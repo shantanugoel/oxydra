@@ -4,14 +4,16 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
 use types::{
-    Context, Message, MessageRole, ModelCatalog, Provider, ProviderError, ProviderId, Response,
-    ToolCall,
+    Context, Message, MessageRole, ModelCatalog, Provider, ProviderError, ProviderId,
+    ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
 };
 
 const OPENAI_PROVIDER_ID: &str = "openai";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
+const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct OpenAIConfig {
@@ -135,6 +137,115 @@ impl Provider for OpenAIProvider {
                 })?;
         normalize_openai_response(response, &self.provider_id)
     }
+
+    async fn stream(
+        &self,
+        context: &Context,
+        buffer_size: usize,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.validate_context(context)?;
+        tracing::debug!(
+            provider = %self.provider_id,
+            model = %context.model,
+            "sending OpenAI chat completion streaming request"
+        );
+
+        let request = OpenAIChatCompletionRequest::from_stream_context(context)?;
+        let mut http_response = self
+            .client
+            .post(self.chat_completions_url())
+            .bearer_auth(&self.api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| ProviderError::Transport {
+                provider: self.provider_id.clone(),
+                message: error.to_string(),
+            })?;
+
+        if !http_response.status().is_success() {
+            let status = http_response.status().as_u16();
+            let body = match http_response.text().await {
+                Ok(text) => text,
+                Err(error) => format!("unable to read error body: {error}"),
+            };
+            return Err(ProviderError::HttpStatus {
+                provider: self.provider_id.clone(),
+                status,
+                message: extract_http_error_message(&body),
+            });
+        }
+
+        let channel_size = if buffer_size == 0 {
+            DEFAULT_STREAM_BUFFER_SIZE
+        } else {
+            buffer_size
+        };
+        let (sender, receiver) = mpsc::channel(channel_size);
+        let provider = self.provider_id.clone();
+        tokio::spawn(async move {
+            let mut parser = SseDataParser::default();
+            loop {
+                let chunk = match http_response.chunk().await {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        send_stream_error(
+                            &sender,
+                            ProviderError::Transport {
+                                provider: provider.clone(),
+                                message: error.to_string(),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
+
+                let payloads = match parser.push_chunk(&chunk) {
+                    Ok(payloads) => payloads,
+                    Err(message) => {
+                        send_stream_error(
+                            &sender,
+                            ProviderError::ResponseParse {
+                                provider: provider.clone(),
+                                message,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                match emit_stream_payloads(payloads, &sender, &provider).await {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(()) => return,
+                }
+            }
+
+            let payloads = match parser.finish() {
+                Ok(payloads) => payloads,
+                Err(message) => {
+                    send_stream_error(
+                        &sender,
+                        ProviderError::ResponseParse {
+                            provider: provider.clone(),
+                            message,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            let _ = emit_stream_payloads(payloads, &sender, &provider).await;
+        });
+
+        Ok(receiver)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -142,10 +253,20 @@ struct OpenAIChatCompletionRequest {
     model: String,
     messages: Vec<OpenAIChatMessageRequest>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OpenAIStreamOptions>,
 }
 
 impl OpenAIChatCompletionRequest {
     fn from_context(context: &Context) -> Result<Self, ProviderError> {
+        Self::from_context_with_stream(context, false)
+    }
+
+    fn from_stream_context(context: &Context) -> Result<Self, ProviderError> {
+        Self::from_context_with_stream(context, true)
+    }
+
+    fn from_context_with_stream(context: &Context, stream: bool) -> Result<Self, ProviderError> {
         let messages = context
             .messages
             .iter()
@@ -154,9 +275,17 @@ impl OpenAIChatCompletionRequest {
         Ok(Self {
             model: context.model.0.clone(),
             messages,
-            stream: false,
+            stream,
+            stream_options: stream.then_some(OpenAIStreamOptions {
+                include_usage: true,
+            }),
         })
     }
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +379,59 @@ struct OpenAIResponseToolCall {
 struct OpenAIResponseFunction {
     name: String,
     arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChatCompletionStreamChunk {
+    #[serde(default)]
+    choices: Vec<OpenAIStreamChoice>,
+    #[serde(default)]
+    usage: Option<OpenAIUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamChoice {
+    #[serde(default)]
+    delta: OpenAIStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAIStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAIStreamToolCallDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAIStreamFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAIStreamFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +564,170 @@ fn normalize_openai_message(
     })
 }
 
+async fn emit_stream_payloads(
+    payloads: Vec<String>,
+    sender: &mpsc::Sender<Result<StreamItem, ProviderError>>,
+    provider: &ProviderId,
+) -> Result<bool, ()> {
+    for payload in payloads {
+        match parse_openai_stream_payload(&payload, provider) {
+            Ok(Some(items)) => {
+                for item in items {
+                    if sender.send(Ok(item)).await.is_err() {
+                        return Err(());
+                    }
+                }
+            }
+            Ok(None) => return Ok(true),
+            Err(error) => {
+                send_stream_error(sender, error).await;
+                return Err(());
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn send_stream_error(
+    sender: &mpsc::Sender<Result<StreamItem, ProviderError>>,
+    error: ProviderError,
+) {
+    let _ = sender.send(Err(error)).await;
+}
+
+fn parse_openai_stream_payload(
+    payload: &str,
+    provider: &ProviderId,
+) -> Result<Option<Vec<StreamItem>>, ProviderError> {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if trimmed == "[DONE]" {
+        return Ok(None);
+    }
+    let chunk: OpenAIChatCompletionStreamChunk =
+        serde_json::from_str(trimmed).map_err(|error| ProviderError::ResponseParse {
+            provider: provider.clone(),
+            message: format!("failed to parse OpenAI streaming payload: {error}"),
+        })?;
+    Ok(Some(normalize_openai_stream_chunk(chunk)))
+}
+
+fn normalize_openai_stream_chunk(chunk: OpenAIChatCompletionStreamChunk) -> Vec<StreamItem> {
+    let mut items = Vec::new();
+
+    if let Some(usage) = chunk.usage {
+        items.push(StreamItem::UsageUpdate(UsageUpdate {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        }));
+    }
+
+    for choice in chunk.choices {
+        if let Some(content) = choice.delta.content.filter(|content| !content.is_empty()) {
+            items.push(StreamItem::Text(content));
+        }
+
+        if let Some(reasoning) = choice
+            .delta
+            .reasoning
+            .filter(|reasoning| !reasoning.is_empty())
+        {
+            items.push(StreamItem::ReasoningDelta(reasoning));
+        }
+
+        for tool_call in choice.delta.tool_calls {
+            let function = tool_call.function.unwrap_or_default();
+            if tool_call.id.is_none() && function.name.is_none() && function.arguments.is_none() {
+                continue;
+            }
+            items.push(StreamItem::ToolCallDelta(ToolCallDelta {
+                index: tool_call.index,
+                id: tool_call.id,
+                name: function.name,
+                arguments: function.arguments,
+            }));
+        }
+
+        if let Some(finish_reason) = choice
+            .finish_reason
+            .filter(|finish_reason| !finish_reason.is_empty())
+        {
+            items.push(StreamItem::FinishReason(finish_reason));
+        }
+    }
+
+    items
+}
+
+#[derive(Debug, Default)]
+struct SseDataParser {
+    line_buffer: Vec<u8>,
+    data_lines: Vec<String>,
+}
+
+impl SseDataParser {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<String>, String> {
+        let mut payloads = Vec::new();
+        for byte in chunk {
+            if *byte == b'\n' {
+                let line = std::mem::take(&mut self.line_buffer);
+                self.process_line(&line, &mut payloads)?;
+            } else {
+                self.line_buffer.push(*byte);
+            }
+        }
+        Ok(payloads)
+    }
+
+    fn finish(mut self) -> Result<Vec<String>, String> {
+        let mut payloads = Vec::new();
+        if !self.line_buffer.is_empty() {
+            let line = std::mem::take(&mut self.line_buffer);
+            self.process_line(&line, &mut payloads)?;
+        }
+        self.flush_event(&mut payloads);
+        Ok(payloads)
+    }
+
+    fn process_line(&mut self, line: &[u8], payloads: &mut Vec<String>) -> Result<(), String> {
+        let line = if line.ends_with(b"\r") {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+
+        if line.is_empty() {
+            self.flush_event(payloads);
+            return Ok(());
+        }
+
+        if line.starts_with(b":") {
+            return Ok(());
+        }
+
+        if let Some(mut data) = line.strip_prefix(b"data:") {
+            if data.starts_with(b" ") {
+                data = &data[1..];
+            }
+            let data = std::str::from_utf8(data)
+                .map_err(|error| format!("invalid UTF-8 in SSE data line: {error}"))?;
+            self.data_lines.push(data.to_owned());
+        }
+
+        Ok(())
+    }
+
+    fn flush_event(&mut self, payloads: &mut Vec<String>) {
+        if !self.data_lines.is_empty() {
+            payloads.push(self.data_lines.join("\n"));
+            self.data_lines.clear();
+        }
+    }
+}
+
 fn extract_http_error_message(body: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<OpenAIErrorEnvelope>(body)
         && let Some(message) = non_empty(parsed.error.message)
@@ -413,7 +759,7 @@ mod tests {
     };
 
     use serde_json::json;
-    use types::{ModelDescriptor, ModelId, ProviderCaps};
+    use types::{ModelDescriptor, ModelId, ProviderCaps, StreamItem, ToolCallDelta, UsageUpdate};
 
     use super::*;
 
@@ -485,6 +831,97 @@ mod tests {
             request_json["messages"][1]["tool_calls"][0]["function"]["arguments"],
             "{\"path\":\"Cargo.toml\"}"
         );
+    }
+
+    #[test]
+    fn streaming_request_normalization_enables_stream_and_usage() {
+        let request =
+            OpenAIChatCompletionRequest::from_stream_context(&test_context("gpt-4o-mini"))
+                .expect("request should normalize");
+        let request_json = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(request_json["stream"], true);
+        assert_eq!(request_json["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn stream_payload_normalization_maps_text_tool_usage_and_finish_reason() {
+        let payload = json!({
+            "choices": [{
+                "delta": {
+                    "content": "Done",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"Cargo.toml\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7
+            }
+        })
+        .to_string();
+
+        let provider = ProviderId::from("openai");
+        let items = parse_openai_stream_payload(&payload, &provider)
+            .expect("payload should parse")
+            .expect("payload should not terminate stream");
+
+        assert_eq!(
+            items,
+            vec![
+                StreamItem::UsageUpdate(UsageUpdate {
+                    prompt_tokens: Some(5),
+                    completion_tokens: Some(2),
+                    total_tokens: Some(7),
+                }),
+                StreamItem::Text("Done".to_owned()),
+                StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".to_owned()),
+                    name: Some("read_file".to_owned()),
+                    arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                }),
+                StreamItem::FinishReason("tool_calls".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_parser_handles_fragmented_frames() {
+        let mut parser = SseDataParser::default();
+        let payloads = parser
+            .push_chunk(br#"data: {"choices":[{"delta":{"content":"Hel"#)
+            .expect("first chunk should parse");
+        assert!(payloads.is_empty());
+
+        let payloads = parser
+            .push_chunk(
+                br#"lo"}}]}
+
+data: [DONE]
+
+"#,
+            )
+            .expect("second chunk should parse");
+        assert_eq!(payloads.len(), 2);
+
+        let provider = ProviderId::from("openai");
+        let items = parse_openai_stream_payload(&payloads[0], &provider)
+            .expect("payload should parse")
+            .expect("payload should not terminate stream");
+        assert_eq!(items, vec![StreamItem::Text("Hello".to_owned())]);
+
+        let done = parse_openai_stream_payload(&payloads[1], &provider)
+            .expect("done payload should parse");
+        assert!(done.is_none());
     }
 
     #[test]

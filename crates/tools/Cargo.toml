@@ -12,3 +12,4 @@ types = { path = "../types" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tools-macros = { path = "../tools-macros" }

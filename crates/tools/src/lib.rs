@@ -389,9 +389,16 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use tokio::time::sleep;
+    use tools_macros::tool;
     use types::JsonSchemaType;
 
     use super::*;
+
+    #[tool]
+    /// Read UTF-8 text from a file
+    async fn read_file(path: String) -> String {
+        path
+    }
 
     #[tokio::test]
     async fn read_tool_executes_through_tool_contract() {
@@ -492,6 +499,37 @@ mod tests {
         assert!(write.timeout().as_secs() > 0);
         assert!(edit.timeout().as_secs() > 0);
         assert!(bash.timeout().as_secs() > 0);
+    }
+
+    #[test]
+    fn macro_generated_schema_matches_read_tool_contract() {
+        std::mem::drop(read_file("placeholder".to_owned()));
+        let generated = __tool_function_decl_read_file();
+        let runtime = ReadTool.schema();
+
+        assert_eq!(generated.name, runtime.name);
+        assert_eq!(generated.description, runtime.description);
+        assert_eq!(
+            generated.parameters.schema_type,
+            runtime.parameters.schema_type
+        );
+        assert_eq!(generated.parameters.required, runtime.parameters.required);
+        assert_eq!(
+            generated.parameters.additional_properties,
+            runtime.parameters.additional_properties
+        );
+
+        let generated_path = generated
+            .parameters
+            .properties
+            .get("path")
+            .expect("generated schema should expose path");
+        let runtime_path = runtime
+            .parameters
+            .properties
+            .get("path")
+            .expect("runtime schema should expose path");
+        assert_eq!(generated_path.schema_type, runtime_path.schema_type);
     }
 
     #[tokio::test]

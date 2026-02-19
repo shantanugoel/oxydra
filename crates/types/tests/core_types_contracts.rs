@@ -1,7 +1,7 @@
 use serde_json::json;
 use types::{
-    Context, Message, MessageRole, ModelId, ProviderError, ProviderId, Response, RuntimeError,
-    ToolCall, ToolError, init_tracing,
+    Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
+    ProviderError, ProviderId, Response, RuntimeError, ToolCall, ToolError, init_tracing,
 };
 
 #[test]
@@ -45,6 +45,7 @@ fn serde_round_trip_for_phase1_types() {
 #[test]
 fn runtime_error_composes_provider_and_tool_errors() {
     let provider_error = ProviderError::UnknownModel {
+        provider: ProviderId::from("openai"),
         model: ModelId::from("does-not-exist"),
     };
     let runtime_from_provider: RuntimeError = provider_error.into();
@@ -64,4 +65,56 @@ fn tracing_subscriber_initializes_and_emits() {
     let span = tracing::info_span!("phase1_tracing_smoke");
     let _guard = span.enter();
     tracing::info!("phase1 tracing smoke");
+}
+
+#[test]
+fn model_catalog_validates_provider_and_model_id() {
+    let provider = ProviderId::from("openai");
+    let known_model = ModelId::from("gpt-4o-mini");
+    let catalog = ModelCatalog::new(vec![ModelDescriptor {
+        provider: provider.clone(),
+        model: known_model.clone(),
+        display_name: Some("GPT-4o mini".to_owned()),
+        caps: ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            supports_json_mode: true,
+            supports_reasoning_traces: false,
+            max_input_tokens: Some(128_000),
+            max_output_tokens: Some(16_384),
+            max_context_tokens: Some(128_000),
+        },
+        deprecated: false,
+    }]);
+
+    let descriptor = catalog
+        .validate(&provider, &known_model)
+        .expect("known model must validate");
+    assert_eq!(descriptor.model, known_model);
+
+    let unknown = catalog.validate(&provider, &ModelId::from("unknown-model"));
+    assert!(matches!(
+        unknown,
+        Err(ProviderError::UnknownModel {
+            provider: _,
+            model: _
+        })
+    ));
+}
+
+#[test]
+fn provider_caps_serialize_round_trip() {
+    let caps = ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        supports_json_mode: true,
+        supports_reasoning_traces: false,
+        max_input_tokens: Some(128_000),
+        max_output_tokens: Some(16_384),
+        max_context_tokens: Some(128_000),
+    };
+
+    let encoded = serde_json::to_string(&caps).expect("caps should serialize");
+    let decoded: ProviderCaps = serde_json::from_str(&encoded).expect("caps should deserialize");
+    assert_eq!(decoded, caps);
 }

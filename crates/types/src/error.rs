@@ -4,10 +4,34 @@ use crate::{ModelId, ProviderId};
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("unknown model id: {model}")]
-    UnknownModel { model: ModelId },
+    #[error("unknown model id `{model}` for provider `{provider}`")]
+    UnknownModel {
+        provider: ProviderId,
+        model: ModelId,
+    },
+    #[error("missing API key for provider `{provider}`")]
+    MissingApiKey { provider: ProviderId },
+    #[error("provider transport failed for `{provider}`: {message}")]
+    Transport {
+        provider: ProviderId,
+        message: String,
+    },
+    #[error("provider `{provider}` returned HTTP {status}: {message}")]
+    HttpStatus {
+        provider: ProviderId,
+        status: u16,
+        message: String,
+    },
+    #[error("provider response parsing failed for `{provider}`: {message}")]
+    ResponseParse {
+        provider: ProviderId,
+        message: String,
+    },
     #[error("provider request failed for {provider}: {message}")]
-    RequestFailed { provider: ProviderId, message: String },
+    RequestFailed {
+        provider: ProviderId,
+        message: String,
+    },
     #[error("provider serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
 }

@@ -3,6 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::ProviderError;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelId(pub String);
@@ -89,4 +91,64 @@ pub struct Response {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProviderCaps {
+    #[serde(default)]
+    pub supports_streaming: bool,
+    #[serde(default)]
+    pub supports_tools: bool,
+    #[serde(default)]
+    pub supports_json_mode: bool,
+    #[serde(default)]
+    pub supports_reasoning_traces: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelDescriptor {
+    pub provider: ProviderId,
+    pub model: ModelId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub caps: ProviderCaps,
+    #[serde(default)]
+    pub deprecated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ModelCatalog {
+    #[serde(default)]
+    pub models: Vec<ModelDescriptor>,
+}
+
+impl ModelCatalog {
+    pub fn new(models: Vec<ModelDescriptor>) -> Self {
+        Self { models }
+    }
+
+    pub fn get(&self, provider: &ProviderId, model: &ModelId) -> Option<&ModelDescriptor> {
+        self.models
+            .iter()
+            .find(|descriptor| descriptor.provider == *provider && descriptor.model == *model)
+    }
+
+    pub fn validate<'a>(
+        &'a self,
+        provider: &ProviderId,
+        model: &ModelId,
+    ) -> Result<&'a ModelDescriptor, ProviderError> {
+        self.get(provider, model)
+            .ok_or_else(|| ProviderError::UnknownModel {
+                provider: provider.clone(),
+                model: model.clone(),
+            })
+    }
 }

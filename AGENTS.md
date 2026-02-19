@@ -33,6 +33,8 @@ Quick section map:
 6. If you need to arbitrate between different design choices, ask the user (with pros/cons of each approach) instead of guessing.
 7. Always make sure to use the latest version of rust crates unless it is not possible due to a specific reason.
 8. Any file/function names etc should not be based on plan phase etc, rather behavior based.
+9. Whenever any change is made to rust code, make sure the code is errors and warnings free, including clippy, and all tests pass
+10. Avoid using clippy allow directives and instead strive to fix them properly.
 
 ## Maintenance policy for this file
 

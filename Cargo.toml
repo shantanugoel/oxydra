@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/types",
+  "crates/provider",
+  "crates/tools",
+  "crates/tools-macros",
+  "crates/runtime",
+  "crates/memory",
+  "crates/sandbox",
+  "crates/channels",
+  "crates/gateway",
+  "crates/cli",
+]

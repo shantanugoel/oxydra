@@ -32,6 +32,7 @@ Quick section map:
 5. If requirements are unclear or conflicting, ask the user instead of guessing.
 6. If you need to arbitrate between different design choices, ask the user (with pros/cons of each approach) instead of guessing.
 7. Always make sure to use the latest version of rust crates unless it is not possible due to a specific reason.
+8. Any file/function names etc should not be based on plan phase etc, rather behavior based.
 
 ## Maintenance policy for this file
 

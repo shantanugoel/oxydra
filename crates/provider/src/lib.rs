@@ -407,6 +407,11 @@ fn truncate_message(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
     use serde_json::json;
     use types::{ModelDescriptor, ModelId, ProviderCaps};
 
@@ -437,6 +442,9 @@ mod tests {
             Some("fallback".to_owned()),
         );
         assert_eq!(resolved.as_deref(), Some("provider"));
+
+        let resolved = resolve_api_key_from_sources(None, None, None);
+        assert!(resolved.is_none());
     }
 
     #[test]
@@ -516,23 +524,97 @@ mod tests {
         let provider = OpenAIProvider::with_catalog(
             OpenAIConfig {
                 api_key: Some("test-key".to_owned()),
-                base_url: OPENAI_DEFAULT_BASE_URL.to_owned(),
+                base_url: "http://127.0.0.1:9".to_owned(),
             },
             test_model_catalog(),
         )
         .expect("provider should initialize");
 
-        let context = Context {
-            provider: ProviderId::from("openai"),
-            model: ModelId::from("unknown-model"),
-            messages: vec![],
-        };
-
-        let validation = provider.validate_context(&context);
+        let context = test_context("unknown-model");
+        let validation = run_complete(&provider, &context);
         assert!(matches!(
             validation,
             Err(ProviderError::UnknownModel { .. })
         ));
+    }
+
+    #[test]
+    fn transport_errors_are_mapped() {
+        let provider = OpenAIProvider::with_catalog(
+            OpenAIConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url: "http://127.0.0.1:9".to_owned(),
+            },
+            test_model_catalog(),
+        )
+        .expect("provider should initialize");
+        let completion = run_complete(&provider, &test_context("gpt-4o-mini"));
+        assert!(matches!(completion, Err(ProviderError::Transport { .. })));
+    }
+
+    #[test]
+    fn http_status_errors_are_mapped() {
+        let base_url = spawn_one_shot_server(
+            "401 Unauthorized",
+            r#"{"error":{"message":"invalid API key"}}"#,
+            "application/json",
+        );
+        let provider = OpenAIProvider::with_catalog(
+            OpenAIConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url,
+            },
+            test_model_catalog(),
+        )
+        .expect("provider should initialize");
+        let completion = run_complete(&provider, &test_context("gpt-4o-mini"));
+        assert!(matches!(
+            completion,
+            Err(ProviderError::HttpStatus {
+                status: 401,
+                message,
+                ..
+            }) if message == "invalid API key"
+        ));
+    }
+
+    #[test]
+    fn response_parse_errors_are_mapped() {
+        let base_url = spawn_one_shot_server("200 OK", "not-json", "text/plain");
+        let provider = OpenAIProvider::with_catalog(
+            OpenAIConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url,
+            },
+            test_model_catalog(),
+        )
+        .expect("provider should initialize");
+        let completion = run_complete(&provider, &test_context("gpt-4o-mini"));
+        assert!(matches!(
+            completion,
+            Err(ProviderError::ResponseParse { .. })
+        ));
+    }
+
+    #[test]
+    fn live_openai_smoke_normalizes_response() {
+        let _api_key = env::var("OPENAI_API_KEY")
+            .expect("set OPENAI_API_KEY to run live_openai_smoke_normalizes_response");
+        let provider = OpenAIProvider::new(OpenAIConfig::default())
+            .expect("provider should initialize from OPENAI_API_KEY");
+        let context = test_context_with_prompt("gpt-4o-mini", "Reply with exactly: PONG");
+        let response = run_complete(&provider, &context).expect("live completion should succeed");
+
+        assert_eq!(response.message.role, MessageRole::Assistant);
+        assert!(
+            response
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.trim().is_empty())
+                || !response.tool_calls.is_empty(),
+            "live response should include content or tool calls"
+        );
     }
 
     fn test_model_catalog() -> ModelCatalog {
@@ -543,5 +625,56 @@ mod tests {
             caps: ProviderCaps::default(),
             deprecated: false,
         }])
+    }
+
+    fn test_context(model: &str) -> Context {
+        test_context_with_prompt(model, "Ping")
+    }
+
+    fn test_context_with_prompt(model: &str, prompt: &str) -> Context {
+        Context {
+            provider: ProviderId::from("openai"),
+            model: ModelId::from(model),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some(prompt.to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }],
+        }
+    }
+
+    fn run_complete(
+        provider: &OpenAIProvider,
+        context: &Context,
+    ) -> Result<Response, ProviderError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(provider.complete(context))
+    }
+
+    fn spawn_one_shot_server(status_line: &str, body: &str, content_type: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+        let address = listener
+            .local_addr()
+            .expect("server should expose a local address");
+        let status_line = status_line.to_owned();
+        let body = body.to_owned();
+        let content_type = content_type.to_owned();
+        let _server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request_buffer = [0_u8; 8_192];
+                let _ = stream.read(&mut request_buffer);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{address}")
     }
 }

@@ -784,6 +784,15 @@ dependencies = [
 [[package]]
 name = "runtime"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tools",
+ "tracing",
+ "types",
+]
 
 [[package]]
 name = "rustc-hash"
@@ -1118,6 +1127,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

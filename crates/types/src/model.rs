@@ -1,9 +1,11 @@
-use std::fmt;
+use std::{fmt, fs, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ProviderError;
+
+const PINNED_MODEL_CATALOG_SNAPSHOT: &str = include_str!("../data/pinned_model_catalog.json");
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -131,7 +133,45 @@ pub struct ModelCatalog {
 
 impl ModelCatalog {
     pub fn new(models: Vec<ModelDescriptor>) -> Self {
-        Self { models }
+        let mut catalog = Self { models };
+        catalog.sort_models();
+        catalog
+    }
+
+    pub fn from_snapshot_str(snapshot: &str) -> Result<Self, ProviderError> {
+        let parsed: Self = serde_json::from_str(snapshot)?;
+        Ok(Self::new(parsed.models))
+    }
+
+    pub fn from_pinned_snapshot() -> Result<Self, ProviderError> {
+        Self::from_snapshot_str(PINNED_MODEL_CATALOG_SNAPSHOT)
+    }
+
+    pub fn pinned_snapshot_json() -> &'static str {
+        PINNED_MODEL_CATALOG_SNAPSHOT
+    }
+
+    pub fn pinned_snapshot_path() -> &'static str {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/pinned_model_catalog.json"
+        )
+    }
+
+    /// Canonicalizes and writes a pinned catalog snapshot from already-fetched JSON data.
+    ///
+    /// This intentionally does not fetch `https://models.dev/api.json`.
+    /// Network retrieval is deferred to a later operator-facing refresh path (CLI phase),
+    /// while runtime/startup continue using committed offline snapshots.
+    pub fn regenerate_snapshot(
+        source_snapshot: &str,
+        output_path: impl AsRef<Path>,
+    ) -> io::Result<()> {
+        let catalog = Self::from_snapshot_str(source_snapshot)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let canonical_snapshot = serde_json::to_string_pretty(&catalog)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        fs::write(output_path, format!("{canonical_snapshot}\n"))
     }
 
     pub fn get(&self, provider: &ProviderId, model: &ModelId) -> Option<&ModelDescriptor> {
@@ -150,5 +190,14 @@ impl ModelCatalog {
                 provider: provider.clone(),
                 model: model.clone(),
             })
+    }
+
+    fn sort_models(&mut self) {
+        self.models.sort_by(|left, right| {
+            left.provider
+                .0
+                .cmp(&right.provider.0)
+                .then_with(|| left.model.0.cmp(&right.model.0))
+        });
     }
 }

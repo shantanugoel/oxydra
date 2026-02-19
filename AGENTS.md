@@ -35,6 +35,7 @@ Quick section map:
 8. Any file/function names etc should not be based on plan phase etc, rather behavior based.
 9. Whenever any change is made to rust code, make sure the code is errors and warnings free, including clippy, and all tests pass
 10. Avoid using clippy allow directives and instead strive to fix them properly.
+11. After completing any task, make sure to review if you've achieved what the task was about of was there anything left.
 
 ## Maintenance policy for this file
 

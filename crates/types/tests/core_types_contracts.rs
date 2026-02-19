@@ -1,3 +1,8 @@
+use std::{
+    env, fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use serde_json::json;
 use types::{
     Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
@@ -100,6 +105,77 @@ fn model_catalog_validates_provider_and_model_id() {
             model: _
         })
     ));
+}
+
+#[test]
+fn pinned_catalog_snapshot_parses_and_validates_known_model() {
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned snapshot must parse");
+    assert!(
+        !catalog.models.is_empty(),
+        "pinned catalog must not be empty"
+    );
+    assert!(catalog.models.iter().all(|descriptor| {
+        !descriptor.provider.0.trim().is_empty() && !descriptor.model.0.trim().is_empty()
+    }));
+
+    let descriptor = catalog
+        .validate(&ProviderId::from("openai"), &ModelId::from("gpt-4o-mini"))
+        .expect("known pinned model should validate");
+    assert_eq!(descriptor.model, ModelId::from("gpt-4o-mini"));
+}
+
+#[test]
+fn pinned_catalog_snapshot_rejects_missing_required_fields() {
+    let invalid_snapshot = r#"
+    {
+      "models": [
+        {
+          "provider": "openai",
+          "display_name": "Missing model field"
+        }
+      ]
+    }
+    "#;
+
+    let parse_result = ModelCatalog::from_snapshot_str(invalid_snapshot);
+    assert!(matches!(parse_result, Err(ProviderError::Serialization(_))));
+}
+
+#[test]
+fn model_catalog_regenerator_writes_canonical_sorted_snapshot() {
+    let unsorted_snapshot = r#"
+    {
+      "models": [
+        {
+          "provider": "openai",
+          "model": "z-model",
+          "caps": {}
+        },
+        {
+          "provider": "openai",
+          "model": "a-model",
+          "caps": {}
+        }
+      ]
+    }
+    "#;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should move forward")
+        .as_nanos();
+    let output_path = env::temp_dir().join(format!("oxydra-model-catalog-{timestamp}.json"));
+
+    ModelCatalog::regenerate_snapshot(unsorted_snapshot, &output_path)
+        .expect("regeneration should write canonical snapshot");
+
+    let regenerated = fs::read_to_string(&output_path).expect("snapshot should be readable");
+    fs::remove_file(&output_path).expect("temp snapshot should be removable");
+
+    let catalog =
+        ModelCatalog::from_snapshot_str(&regenerated).expect("regenerated snapshot should parse");
+    assert_eq!(catalog.models[0].model, ModelId::from("a-model"));
+    assert_eq!(catalog.models[1].model, ModelId::from("z-model"));
 }
 
 #[test]

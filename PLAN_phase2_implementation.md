@@ -64,6 +64,7 @@ Planned behavior:
 Catalog population approach for Phase 2:
 - Add a full pinned model snapshot to the repo now (deterministic, offline-safe), then parse it into typed `ModelDescriptor` values at startup.
 - Add a reusable regeneration engine in this phase (library/internal task entrypoint) that can refresh the snapshot from a pinned source format and write the committed artifact.
+- Keep the regeneration helper source-driven (input JSON -> canonical snapshot file). Direct network fetch from `https://models.dev/api.json` is deferred to the later operator-facing refresh command in the CLI phase.
 - Defer operator-facing CLI exposure (`oxydra models --refresh`) to the dedicated CLI phase later, so Phase 2 crate boundaries stay intact.
 - Keep runtime lookup local (committed artifact/in-code), never live-fetching from the network during startup.
 - Include fixture tests that verify snapshot parsing, expected required fields, and unknown-model rejection behavior.

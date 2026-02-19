@@ -1,4 +1,4 @@
-use std::env;
+use std::{collections::HashMap, env};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -11,7 +11,8 @@ use types::{
 };
 
 const OPENAI_PROVIDER_ID: &str = "openai";
-const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
+// const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
+const OPENAI_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
 
@@ -185,16 +186,14 @@ impl Provider for OpenAIProvider {
         let provider = self.provider_id.clone();
         tokio::spawn(async move {
             let mut parser = SseDataParser::default();
+            let mut tool_call_accumulator = ToolCallAccumulator::default();
             loop {
                 let chunk = match http_response.chunk().await {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        send_stream_error(
+                        send_connection_lost(
                             &sender,
-                            ProviderError::Transport {
-                                provider: provider.clone(),
-                                message: error.to_string(),
-                            },
+                            format!("OpenAI stream transport dropped: {error}"),
                         )
                         .await;
                         return;
@@ -219,7 +218,9 @@ impl Provider for OpenAIProvider {
                     }
                 };
 
-                match emit_stream_payloads(payloads, &sender, &provider).await {
+                match emit_stream_payloads(payloads, &sender, &provider, &mut tool_call_accumulator)
+                    .await
+                {
                     Ok(true) => return,
                     Ok(false) => {}
                     Err(()) => return,
@@ -241,7 +242,19 @@ impl Provider for OpenAIProvider {
                 }
             };
 
-            let _ = emit_stream_payloads(payloads, &sender, &provider).await;
+            match emit_stream_payloads(payloads, &sender, &provider, &mut tool_call_accumulator)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    send_connection_lost(
+                        &sender,
+                        "OpenAI stream ended before [DONE] sentinel".to_owned(),
+                    )
+                    .await;
+                }
+                Err(()) => {}
+            }
         });
 
         Ok(receiver)
@@ -568,11 +581,12 @@ async fn emit_stream_payloads(
     payloads: Vec<String>,
     sender: &mpsc::Sender<Result<StreamItem, ProviderError>>,
     provider: &ProviderId,
+    tool_call_accumulator: &mut ToolCallAccumulator,
 ) -> Result<bool, ()> {
     for payload in payloads {
         match parse_openai_stream_payload(&payload, provider) {
-            Ok(Some(items)) => {
-                for item in items {
+            Ok(Some(chunk)) => {
+                for item in normalize_openai_stream_chunk(chunk, tool_call_accumulator) {
                     if sender.send(Ok(item)).await.is_err() {
                         return Err(());
                     }
@@ -595,13 +609,23 @@ async fn send_stream_error(
     let _ = sender.send(Err(error)).await;
 }
 
+async fn send_connection_lost(
+    sender: &mpsc::Sender<Result<StreamItem, ProviderError>>,
+    message: String,
+) {
+    let _ = sender.send(Ok(StreamItem::ConnectionLost(message))).await;
+}
+
 fn parse_openai_stream_payload(
     payload: &str,
     provider: &ProviderId,
-) -> Result<Option<Vec<StreamItem>>, ProviderError> {
+) -> Result<Option<OpenAIChatCompletionStreamChunk>, ProviderError> {
     let trimmed = payload.trim();
     if trimmed.is_empty() {
-        return Ok(Some(Vec::new()));
+        return Ok(Some(OpenAIChatCompletionStreamChunk {
+            choices: Vec::new(),
+            usage: None,
+        }));
     }
     if trimmed == "[DONE]" {
         return Ok(None);
@@ -611,10 +635,13 @@ fn parse_openai_stream_payload(
             provider: provider.clone(),
             message: format!("failed to parse OpenAI streaming payload: {error}"),
         })?;
-    Ok(Some(normalize_openai_stream_chunk(chunk)))
+    Ok(Some(chunk))
 }
 
-fn normalize_openai_stream_chunk(chunk: OpenAIChatCompletionStreamChunk) -> Vec<StreamItem> {
+fn normalize_openai_stream_chunk(
+    chunk: OpenAIChatCompletionStreamChunk,
+    tool_call_accumulator: &mut ToolCallAccumulator,
+) -> Vec<StreamItem> {
     let mut items = Vec::new();
 
     if let Some(usage) = chunk.usage {
@@ -643,12 +670,11 @@ fn normalize_openai_stream_chunk(chunk: OpenAIChatCompletionStreamChunk) -> Vec<
             if tool_call.id.is_none() && function.name.is_none() && function.arguments.is_none() {
                 continue;
             }
-            items.push(StreamItem::ToolCallDelta(ToolCallDelta {
-                index: tool_call.index,
-                id: tool_call.id,
-                name: function.name,
-                arguments: function.arguments,
-            }));
+            items.push(StreamItem::ToolCallDelta(tool_call_accumulator.merge(
+                tool_call.index,
+                tool_call.id,
+                function,
+            )));
         }
 
         if let Some(finish_reason) = choice
@@ -660,6 +686,45 @@ fn normalize_openai_stream_chunk(chunk: OpenAIChatCompletionStreamChunk) -> Vec<
     }
 
     items
+}
+
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    by_index: HashMap<usize, ToolCallAccumulatorEntry>,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallAccumulatorEntry {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn merge(
+        &mut self,
+        index: usize,
+        id: Option<String>,
+        function: OpenAIStreamFunctionDelta,
+    ) -> ToolCallDelta {
+        let entry = self.by_index.entry(index).or_default();
+        if let Some(id) = id {
+            entry.id = Some(id);
+        }
+        if let Some(name) = function.name {
+            entry.name = Some(name);
+        }
+        if let Some(arguments) = function.arguments {
+            entry.arguments.push_str(&arguments);
+        }
+
+        ToolCallDelta {
+            index,
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            arguments: (!entry.arguments.is_empty()).then(|| entry.arguments.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -759,7 +824,9 @@ mod tests {
     };
 
     use serde_json::json;
-    use types::{ModelDescriptor, ModelId, ProviderCaps, StreamItem, ToolCallDelta, UsageUpdate};
+    use types::{
+        ModelDescriptor, ModelId, Provider, ProviderCaps, StreamItem, ToolCallDelta, UsageUpdate,
+    };
 
     use super::*;
 
@@ -870,9 +937,11 @@ mod tests {
         .to_string();
 
         let provider = ProviderId::from("openai");
-        let items = parse_openai_stream_payload(&payload, &provider)
+        let mut accumulator = ToolCallAccumulator::default();
+        let chunk = parse_openai_stream_payload(&payload, &provider)
             .expect("payload should parse")
             .expect("payload should not terminate stream");
+        let items = normalize_openai_stream_chunk(chunk, &mut accumulator);
 
         assert_eq!(
             items,
@@ -895,6 +964,118 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_deltas_reassemble_arguments_across_payloads() {
+        let first_payload = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"Car"
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let second_payload = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": "go.toml\"}"
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+
+        let provider = ProviderId::from("openai");
+        let mut accumulator = ToolCallAccumulator::default();
+        let first_chunk = parse_openai_stream_payload(&first_payload, &provider)
+            .expect("first payload should parse")
+            .expect("first payload should not terminate stream");
+        let first_items = normalize_openai_stream_chunk(first_chunk, &mut accumulator);
+        assert!(matches!(
+            first_items.first(),
+            Some(StreamItem::ToolCallDelta(ToolCallDelta { arguments: Some(arguments), .. }))
+                if arguments == "{\"path\":\"Car"
+        ));
+
+        let second_chunk = parse_openai_stream_payload(&second_payload, &provider)
+            .expect("second payload should parse")
+            .expect("second payload should not terminate stream");
+        let second_items = normalize_openai_stream_chunk(second_chunk, &mut accumulator);
+        let arguments = match second_items.first() {
+            Some(StreamItem::ToolCallDelta(delta)) => delta
+                .arguments
+                .as_ref()
+                .expect("reassembled arguments should be present"),
+            _ => panic!("expected tool-call delta item"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(arguments).expect("reassembled arguments should be valid JSON");
+        assert_eq!(parsed, json!({"path": "Cargo.toml"}));
+    }
+
+    #[test]
+    fn tool_call_deltas_reassemble_split_unicode_escape_sequences() {
+        let first_payload = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"emoji\":\"\\uD83D"
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let second_payload = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": "\\uDE00\"}"
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+
+        let provider = ProviderId::from("openai");
+        let mut accumulator = ToolCallAccumulator::default();
+        let first_chunk = parse_openai_stream_payload(&first_payload, &provider)
+            .expect("first payload should parse")
+            .expect("first payload should not terminate stream");
+        let _ = normalize_openai_stream_chunk(first_chunk, &mut accumulator);
+        let second_chunk = parse_openai_stream_payload(&second_payload, &provider)
+            .expect("second payload should parse")
+            .expect("second payload should not terminate stream");
+        let second_items = normalize_openai_stream_chunk(second_chunk, &mut accumulator);
+        let arguments = match second_items.first() {
+            Some(StreamItem::ToolCallDelta(delta)) => delta
+                .arguments
+                .as_ref()
+                .expect("reassembled arguments should be present"),
+            _ => panic!("expected tool-call delta item"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(arguments).expect("reassembled arguments should be valid JSON");
+        assert_eq!(parsed, json!({"emoji": "😀"}));
+    }
+
+    #[test]
     fn sse_parser_handles_fragmented_frames() {
         let mut parser = SseDataParser::default();
         let payloads = parser
@@ -914,14 +1095,74 @@ data: [DONE]
         assert_eq!(payloads.len(), 2);
 
         let provider = ProviderId::from("openai");
-        let items = parse_openai_stream_payload(&payloads[0], &provider)
+        let mut accumulator = ToolCallAccumulator::default();
+        let chunk = parse_openai_stream_payload(&payloads[0], &provider)
             .expect("payload should parse")
             .expect("payload should not terminate stream");
+        let items = normalize_openai_stream_chunk(chunk, &mut accumulator);
         assert_eq!(items, vec![StreamItem::Text("Hello".to_owned())]);
 
         let done = parse_openai_stream_payload(&payloads[1], &provider)
             .expect("done payload should parse");
         assert!(done.is_none());
+    }
+
+    #[test]
+    fn stream_emits_connection_lost_when_done_sentinel_missing() {
+        let base_url = spawn_one_shot_server(
+            "200 OK",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            "text/event-stream",
+        );
+        let provider = OpenAIProvider::with_catalog(
+            OpenAIConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url,
+            },
+            test_model_catalog(),
+        )
+        .expect("provider should initialize");
+
+        let items = run_stream_collect(&provider, &test_context("gpt-4o-mini"));
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, Ok(StreamItem::Text(text)) if text == "Hi"))
+        );
+        assert!(matches!(
+            items.last(),
+            Some(Ok(StreamItem::ConnectionLost(message))) if message.contains("[DONE]")
+        ));
+    }
+
+    #[test]
+    fn stream_finishes_without_connection_lost_when_done_is_received() {
+        let base_url = spawn_one_shot_server(
+            "200 OK",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        );
+        let provider = OpenAIProvider::with_catalog(
+            OpenAIConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url,
+            },
+            test_model_catalog(),
+        )
+        .expect("provider should initialize");
+
+        let items = run_stream_collect(&provider, &test_context("gpt-4o-mini"));
+        assert!(items.iter().all(Result::is_ok));
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, Ok(StreamItem::Text(text)) if text == "Hi"))
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Ok(StreamItem::ConnectionLost(_))))
+        );
     }
 
     #[test]
@@ -1090,6 +1331,27 @@ data: [DONE]
             .build()
             .expect("runtime should build")
             .block_on(provider.complete(context))
+    }
+
+    fn run_stream_collect(
+        provider: &OpenAIProvider,
+        context: &Context,
+    ) -> Vec<Result<StreamItem, ProviderError>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(async {
+                let mut stream = provider
+                    .stream(context, DEFAULT_STREAM_BUFFER_SIZE)
+                    .await
+                    .expect("stream should start");
+                let mut items = Vec::new();
+                while let Some(item) = stream.recv().await {
+                    items.push(item);
+                }
+                items
+            })
     }
 
     fn spawn_one_shot_server(status_line: &str, body: &str, content_type: &str) -> String {

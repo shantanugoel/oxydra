@@ -4,10 +4,12 @@ use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
 use types::{
     Context, Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError,
-    StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    SafetyTier, StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
+const INVALID_TOOL_ARGS_RAW_KEY: &str = "__oxydra_invalid_tool_args_raw";
+const INVALID_TOOL_ARGS_ERROR_KEY: &str = "__oxydra_invalid_tool_args_error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnState {
@@ -127,23 +129,52 @@ impl AgentRuntime {
                 tool_calls = tool_calls.len(),
                 "executing tool calls"
             );
-            for tool_call in tool_calls {
-                if cancellation.is_cancelled() {
-                    let state = TurnState::Cancelled;
-                    tracing::debug!(turn, ?state, "run_session cancelled during tool execution");
-                    return Err(RuntimeError::Cancelled);
+
+            let mut current_batch = Vec::new();
+            for tool_call in &tool_calls {
+                let tier = self
+                    .tool_registry
+                    .get(&tool_call.name)
+                    .map(|t| t.safety_tier());
+
+                if tier == Some(SafetyTier::ReadOnly) {
+                    current_batch.push(tool_call);
+                } else {
+                    if !current_batch.is_empty() {
+                        let futures = current_batch
+                            .drain(..)
+                            .map(|tc| self.execute_tool_and_format(tc, cancellation));
+                        let batch_results = futures::future::join_all(futures).await;
+                        for result in batch_results {
+                            context.messages.push(result?);
+                        }
+                    }
+
+                    if cancellation.is_cancelled() {
+                        let state = TurnState::Cancelled;
+                        tracing::debug!(
+                            turn,
+                            ?state,
+                            "run_session cancelled during tool execution"
+                        );
+                        return Err(RuntimeError::Cancelled);
+                    }
+
+                    let result = self
+                        .execute_tool_and_format(tool_call, cancellation)
+                        .await?;
+                    context.messages.push(result);
                 }
-                let arguments =
-                    serde_json::to_string(&tool_call.arguments).map_err(ToolError::from)?;
-                let output = self
-                    .execute_tool_call(&tool_call.name, &arguments, cancellation)
-                    .await?;
-                context.messages.push(Message {
-                    role: MessageRole::Tool,
-                    content: Some(output),
-                    tool_calls: Vec::new(),
-                    tool_call_id: Some(tool_call.id),
-                });
+            }
+
+            if !current_batch.is_empty() {
+                let futures = current_batch
+                    .drain(..)
+                    .map(|tc| self.execute_tool_and_format(tc, cancellation));
+                let batch_results = futures::future::join_all(futures).await;
+                for result in batch_results {
+                    context.messages.push(result?);
+                }
             }
         }
     }
@@ -203,6 +234,15 @@ impl AgentRuntime {
             merged.total_tokens = update.total_tokens;
         }
         merged
+    }
+
+    fn invalid_streamed_arguments(arguments: &serde_json::Value) -> Option<String> {
+        let object = arguments.as_object()?;
+        let raw_payload = object.get(INVALID_TOOL_ARGS_RAW_KEY)?.as_str()?;
+        let parse_error = object.get(INVALID_TOOL_ARGS_ERROR_KEY)?.as_str()?;
+        Some(format!(
+            "invalid JSON arguments payload: {parse_error}; raw payload: {raw_payload}"
+        ))
     }
 
     async fn request_provider_response(
@@ -313,16 +353,82 @@ impl AgentRuntime {
     async fn execute_tool_call(
         &self,
         name: &str,
-        arguments: &str,
+        arguments: &serde_json::Value,
         cancellation: &CancellationToken,
     ) -> Result<String, RuntimeError> {
+        let tool = self.tool_registry.get(name).ok_or_else(|| {
+            RuntimeError::Tool(ToolError::ExecutionFailed {
+                tool: name.to_string(),
+                message: format!("unknown tool `{name}`"),
+            })
+        })?;
+
+        if let Some(message) = Self::invalid_streamed_arguments(arguments) {
+            return Err(RuntimeError::Tool(ToolError::InvalidArguments {
+                tool: name.to_string(),
+                message,
+            }));
+        }
+
+        let schema_decl = tool.schema();
+        let schema_json =
+            serde_json::to_value(&schema_decl.parameters).map_err(ToolError::Serialization)?;
+        let validator = jsonschema::options().build(&schema_json).map_err(|error| {
+            RuntimeError::Tool(ToolError::ExecutionFailed {
+                tool: name.to_string(),
+                message: format!("failed to compile validation schema: {error}"),
+            })
+        })?;
+
+        if !validator.is_valid(arguments) {
+            let error_msgs: Vec<String> = validator
+                .iter_errors(arguments)
+                .map(|e| format!("- {e}"))
+                .collect();
+            return Err(RuntimeError::Tool(ToolError::InvalidArguments {
+                tool: name.to_string(),
+                message: format!("schema validation failed:\n{}", error_msgs.join("\n")),
+            }));
+        }
+
+        let arg_str = serde_json::to_string(arguments).map_err(ToolError::Serialization)?;
+
         tokio::select! {
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
-            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute(name, arguments)) => match timed {
+            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute(name, &arg_str)) => match timed {
                 Ok(output) => output.map_err(RuntimeError::from),
                 Err(_) => Err(RuntimeError::BudgetExceeded),
             }
         }
+    }
+
+    async fn execute_tool_and_format(
+        &self,
+        tool_call: &ToolCall,
+        cancellation: &CancellationToken,
+    ) -> Result<Message, RuntimeError> {
+        let output = match self
+            .execute_tool_call(&tool_call.name, &tool_call.arguments, cancellation)
+            .await
+        {
+            Ok(out) => out,
+            Err(RuntimeError::Tool(err)) => {
+                tracing::warn!(
+                    ?err,
+                    tool = tool_call.name,
+                    "tool execution failed, injecting error for self-correction"
+                );
+                format!("Tool execution failed: {}", err)
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok(Message {
+            role: MessageRole::Tool,
+            content: Some(output),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call.id.clone()),
+        })
     }
 }
 
@@ -376,13 +482,21 @@ impl ToolCallAccumulator {
             } else {
                 entry.arguments.as_str()
             };
-            let parsed_arguments =
-                serde_json::from_str(arguments).map_err(|error| ProviderError::ResponseParse {
-                    provider: provider.clone(),
-                    message: format!(
-                        "streamed tool-call `{id}` has invalid arguments payload: {error}"
-                    ),
-                })?;
+            let parsed_arguments = match serde_json::from_str(arguments) {
+                Ok(parsed_arguments) => parsed_arguments,
+                Err(error) => {
+                    let mut payload = serde_json::Map::new();
+                    payload.insert(
+                        INVALID_TOOL_ARGS_RAW_KEY.to_owned(),
+                        serde_json::Value::String(arguments.to_owned()),
+                    );
+                    payload.insert(
+                        INVALID_TOOL_ARGS_ERROR_KEY.to_owned(),
+                        serde_json::Value::String(error.to_string()),
+                    );
+                    serde_json::Value::Object(payload)
+                }
+            };
             tool_calls.push(ToolCall {
                 id,
                 name,
@@ -816,6 +930,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_session_recovers_from_validation_error() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                        index: 0,
+                        id: Some("call_1".to_owned()),
+                        name: Some("read_file".to_owned()),
+                        // Missing "path" property, should trigger validation error
+                        arguments: Some("{}".to_owned()),
+                    })),
+                    Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+                ]),
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::Text(
+                        "Oh I missed the path argument!".to_owned(),
+                    )),
+                    Ok(StreamItem::FinishReason("stop".to_owned())),
+                ]),
+            ],
+        );
+
+        let mut tool = MockToolContract::new();
+        let mut properties = std::collections::BTreeMap::new();
+        properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
+        tool.expect_schema().return_const(FunctionDecl::new(
+            "read_file",
+            None,
+            JsonSchema::object(properties, vec!["path".to_owned()]),
+        ));
+        tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
+        // Execute should not be called because validation intercepts it!
+        tool.expect_execute().times(0);
+
+        let mut registry = ToolRegistry::new(1024);
+        registry.register("read_file", tool);
+
+        let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
+        let mut context = Context {
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some("read".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }],
+            tools: Vec::new(),
+            model: model_id,
+            provider: provider_id,
+        };
+
+        let result = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect("should complete despite validation error");
+
+        assert_eq!(
+            result.message.content.as_deref(),
+            Some("Oh I missed the path argument!")
+        );
+        // Context should contain the injected tool error
+        let tool_result = context
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .unwrap();
+        let err_msg = tool_result.content.as_ref().unwrap();
+        assert!(err_msg.contains("schema validation failed"));
+        assert!(err_msg.contains("\"path\" is a required property"));
+    }
+
+    #[tokio::test]
+    async fn run_session_recovers_from_malformed_streamed_json_arguments() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                        index: 0,
+                        id: Some("call_1".to_owned()),
+                        name: Some("read_file".to_owned()),
+                        arguments: Some("{\"path\":\"Cargo.toml\"".to_owned()),
+                    })),
+                    Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+                ]),
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::Text("retrying with corrected args".to_owned())),
+                    Ok(StreamItem::FinishReason("stop".to_owned())),
+                ]),
+            ],
+        );
+
+        let mut tool = MockToolContract::new();
+        let mut properties = std::collections::BTreeMap::new();
+        properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
+        tool.expect_schema().return_const(FunctionDecl::new(
+            "read_file",
+            None,
+            JsonSchema::object(properties, vec!["path".to_owned()]),
+        ));
+        tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
+        tool.expect_execute().times(0);
+
+        let mut registry = ToolRegistry::new(1024);
+        registry.register("read_file", tool);
+
+        let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
+        let mut context = Context {
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some("read".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }],
+            tools: Vec::new(),
+            model: model_id,
+            provider: provider_id,
+        };
+
+        let result = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect("should complete despite malformed JSON arguments");
+
+        assert_eq!(
+            result.message.content.as_deref(),
+            Some("retrying with corrected args")
+        );
+        let tool_result = context
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("tool result should be injected into context");
+        let err_msg = tool_result
+            .content
+            .as_ref()
+            .expect("tool result should contain error text");
+        assert!(err_msg.contains("invalid JSON arguments payload"));
+        assert!(err_msg.contains("EOF while parsing"));
+    }
+
+    #[tokio::test]
+    async fn run_session_executes_readonly_tools_in_parallel() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                        index: 0,
+                        id: Some("call_1".to_owned()),
+                        name: Some("slow_tool".to_owned()),
+                        arguments: Some("{}".to_owned()),
+                    })),
+                    Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                        index: 1,
+                        id: Some("call_2".to_owned()),
+                        name: Some("slow_tool".to_owned()),
+                        arguments: Some("{}".to_owned()),
+                    })),
+                    Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+                ]),
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::Text("all done".to_owned())),
+                    Ok(StreamItem::FinishReason("stop".to_owned())),
+                ]),
+            ],
+        );
+
+        let mut registry = ToolRegistry::new(1024);
+        registry.register("slow_tool", SlowTool);
+
+        let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
+        let mut context = Context {
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some("do slow things".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }],
+            tools: Vec::new(),
+            model: model_id,
+            provider: provider_id,
+        };
+
+        let start = std::time::Instant::now();
+        runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        // SlowTool sleeps for 50ms. Two sequential would take > 100ms.
+        // Parallel should take ~50ms. We give it some buffer for setup/teardown.
+        assert!(
+            elapsed < Duration::from_millis(90),
+            "Took {:?}, not parallel!",
+            elapsed
+        );
+
+        let tool_results: Vec<_> = context
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_results.len(), 2);
+    }
+
+    #[tokio::test]
     async fn run_session_supports_mockall_tool_execution() {
         let provider_id = ProviderId::from("openai");
         let model_id = ModelId::from("gpt-4o-mini");
@@ -840,10 +1171,12 @@ mod tests {
         );
 
         let mut tool = MockToolContract::new();
+        let mut properties = std::collections::BTreeMap::new();
+        properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
         tool.expect_schema().return_const(FunctionDecl::new(
             "read_file",
             None,
-            JsonSchema::object(std::collections::BTreeMap::new(), vec![]),
+            JsonSchema::object(properties, vec!["path".to_owned()]),
         ));
         tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
         tool.expect_timeout().return_const(Duration::from_secs(1));

@@ -722,6 +722,9 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 - Middle phases (5-10) add runtime integration tests for cancellation, retries, tool safety tiers, memory migration, and sandbox behavior.
 - Later phases (11-15) add end-to-end and distributed tests for CLI, channels, gateway routing, observability, and MCP adapters.
 - Regression policy is cumulative: later phases add tests but do not remove earlier phase checks.
+- User onboarding across channels
+- Scheduler
+- Skills
 
 #### Why This Order Avoids Rewrites
 

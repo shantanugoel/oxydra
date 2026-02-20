@@ -11,10 +11,13 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use types::{
-    Context, FunctionDecl, JsonSchema, JsonSchemaType, Memory, MemoryError, MemoryForgetRequest,
-    MemoryRecallRequest, MemoryRecord, MemoryStoreRequest, Message, MessageRole, ModelCatalog,
-    ModelDescriptor, ModelId, Provider, ProviderCaps, ProviderError, ProviderId, Response,
-    SafetyTier, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    Context, FunctionDecl, JsonSchema, JsonSchemaType, Memory, MemoryChunkUpsertRequest,
+    MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
+    MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord, MemoryRetrieval,
+    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
+    MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
+    Provider, ProviderCaps, ProviderError, ProviderId, Response, SafetyTier, StreamItem, Tool,
+    ToolCall, ToolCallDelta, ToolError, UsageUpdate,
 };
 
 use super::{AgentRuntime, RuntimeLimits};
@@ -192,13 +195,32 @@ impl Tool for SlowTool {
 #[derive(Default)]
 struct RecordingMemory {
     records: Mutex<Vec<MemoryRecord>>,
+    hybrid_query_requests: Mutex<Vec<MemoryHybridQueryRequest>>,
+    hybrid_query_results: Mutex<Vec<MemoryHybridQueryResult>>,
 }
 
 impl RecordingMemory {
     fn with_records(records: Vec<MemoryRecord>) -> Self {
         Self {
             records: Mutex::new(records),
+            hybrid_query_requests: Mutex::new(Vec::new()),
+            hybrid_query_results: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_hybrid_query_results(results: Vec<MemoryHybridQueryResult>) -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+            hybrid_query_requests: Mutex::new(Vec::new()),
+            hybrid_query_results: Mutex::new(results),
+        }
+    }
+
+    fn recorded_hybrid_queries(&self) -> Vec<MemoryHybridQueryRequest> {
+        self.hybrid_query_requests
+            .lock()
+            .expect("memory test mutex should not be poisoned")
+            .clone()
     }
 }
 
@@ -254,6 +276,51 @@ impl Memory for RecordingMemory {
             });
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl MemoryRetrieval for RecordingMemory {
+    async fn upsert_chunks(
+        &self,
+        _request: MemoryChunkUpsertRequest,
+    ) -> Result<MemoryChunkUpsertResponse, MemoryError> {
+        Ok(MemoryChunkUpsertResponse {
+            upserted_chunks: 0,
+            skipped_chunks: 0,
+        })
+    }
+
+    async fn hybrid_query(
+        &self,
+        request: MemoryHybridQueryRequest,
+    ) -> Result<Vec<MemoryHybridQueryResult>, MemoryError> {
+        self.hybrid_query_requests
+            .lock()
+            .expect("memory test mutex should not be poisoned")
+            .push(request);
+        Ok(self
+            .hybrid_query_results
+            .lock()
+            .expect("memory test mutex should not be poisoned")
+            .clone())
+    }
+
+    async fn read_summary_state(
+        &self,
+        _request: MemorySummaryReadRequest,
+    ) -> Result<Option<MemorySummaryState>, MemoryError> {
+        Ok(None)
+    }
+
+    async fn write_summary_state(
+        &self,
+        request: MemorySummaryWriteRequest,
+    ) -> Result<MemorySummaryWriteResult, MemoryError> {
+        Ok(MemorySummaryWriteResult {
+            applied: false,
+            current_epoch: request.expected_epoch,
+        })
     }
 }
 
@@ -1086,10 +1153,257 @@ async fn run_session_errors_when_max_cost_budget_is_exceeded() {
     assert!(matches!(error, types::RuntimeError::BudgetExceeded));
 }
 
+#[tokio::test]
+async fn run_session_trims_provider_context_to_max_context_budget() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            Some(96),
+        ));
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(|provider_context| {
+            provider_context.messages.len() < 6
+                && provider_context
+                    .messages
+                    .iter()
+                    .any(|message| message.content.as_deref() == Some("latest user turn"))
+        })
+        .returning(|_| Ok(assistant_response("budgeted response", vec![])));
+
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.safety_buffer_tokens = 8;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits);
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: Some("system ".repeat(120)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("older user ".repeat(90)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("older assistant ".repeat(90)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("middle user ".repeat(90)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("middle assistant ".repeat(90)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("latest user turn".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should trim provider-facing context");
+
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("budgeted response")
+    );
+    assert_eq!(context.messages.len(), 7);
+    assert_eq!(
+        context.messages[5].content.as_deref(),
+        Some("latest user turn")
+    );
+}
+
+#[tokio::test]
+async fn run_session_uses_fallback_context_limit_when_model_cap_is_missing() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            None,
+        ));
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(|provider_context| provider_context.messages.len() <= 2)
+        .returning(|_| Ok(assistant_response("fallback budget applied", vec![])));
+
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.safety_buffer_tokens = 8;
+    limits.context_budget.fallback_max_context_tokens = 48;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits);
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::User,
+                content: Some("older user ".repeat(100)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("older assistant ".repeat(100)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("latest user".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should use fallback max context tokens");
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("fallback budget applied")
+    );
+}
+
+#[tokio::test]
+async fn run_session_for_session_injects_retrieved_memory_snippets() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            Some(256),
+        ));
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(|provider_context| {
+            provider_context.messages.iter().any(|message| {
+                message.role == MessageRole::System
+                    && message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains("Retrieved memory snippets:"))
+            })
+        })
+        .returning(|_| Ok(assistant_response("response with retrieval", vec![])));
+
+    let memory = Arc::new(RecordingMemory::with_hybrid_query_results(vec![
+        MemoryHybridQueryResult {
+            chunk_id: "chunk-1".to_owned(),
+            session_id: "session-retrieval".to_owned(),
+            text: "Persisted memory snippet".to_owned(),
+            score: 0.91,
+            vector_score: 1.0,
+            fts_score: 0.0,
+            file_id: None,
+            sequence_start: Some(1),
+            sequence_end: Some(1),
+            metadata: None,
+        },
+    ]));
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.safety_buffer_tokens = 8;
+    limits.retrieval.top_k = 3;
+    limits.retrieval.vector_weight = 0.6;
+    limits.retrieval.fts_weight = 0.4;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits)
+        .with_memory_retrieval(memory.clone());
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("what did we persist?".to_owned()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }],
+    };
+
+    let response = runtime
+        .run_session_for_session("session-retrieval", &mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should inject retrieved snippets into provider context");
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("response with retrieval")
+    );
+
+    let retrieval_queries = memory.recorded_hybrid_queries();
+    assert_eq!(retrieval_queries.len(), 1);
+    let request = &retrieval_queries[0];
+    assert_eq!(request.session_id, "session-retrieval");
+    assert_eq!(request.query, "what did we persist?");
+    assert_eq!(request.top_k, Some(3));
+    assert_eq!(request.vector_weight, Some(0.6));
+    assert_eq!(request.fts_weight, Some(0.4));
+}
+
 fn test_catalog(
     provider_id: ProviderId,
     model_id: ModelId,
     supports_streaming: bool,
+) -> ModelCatalog {
+    test_catalog_with_max_context(provider_id, model_id, supports_streaming, None)
+}
+
+fn test_catalog_with_max_context(
+    provider_id: ProviderId,
+    model_id: ModelId,
+    supports_streaming: bool,
+    max_context_tokens: Option<u32>,
 ) -> ModelCatalog {
     ModelCatalog::new(vec![ModelDescriptor {
         provider: provider_id,
@@ -1102,7 +1416,7 @@ fn test_catalog(
             supports_reasoning_traces: false,
             max_input_tokens: None,
             max_output_tokens: None,
-            max_context_tokens: None,
+            max_context_tokens,
         },
         deprecated: false,
     }])
@@ -1144,6 +1458,7 @@ fn runtime_limits_default_matches_phase5_baseline() {
     assert_eq!(limits.max_cost, None);
     assert_eq!(limits.context_budget.trigger_ratio, 0.85);
     assert_eq!(limits.context_budget.safety_buffer_tokens, 1_024);
+    assert_eq!(limits.context_budget.fallback_max_context_tokens, 128_000);
     assert_eq!(limits.retrieval.top_k, 8);
     assert_eq!(limits.retrieval.vector_weight, 0.7);
     assert_eq!(limits.retrieval.fts_weight, 0.3);

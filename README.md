@@ -30,6 +30,7 @@ This repository now includes a Phase 7 config loader in `crates/cli` with determ
 - `runtime.max_cost` (optional)
 - `runtime.context_budget.trigger_ratio` (`0.0..=1.0`; default `0.85`)
 - `runtime.context_budget.safety_buffer_tokens` (> 0; default `1024`)
+- `runtime.context_budget.fallback_max_context_tokens` (> 0; default `128000`; used when model caps do not expose `max_context_tokens`)
 - `runtime.summarization.target_ratio` (`0.0..=1.0`; default `0.5`)
 - `runtime.summarization.min_turns` (> 0; default `6`)
 - `memory.enabled` (defaults to `false`; when `true`, memory persistence is active)
@@ -52,6 +53,7 @@ Use `OXYDRA__` prefix and `__` as path separators:
 - `OXYDRA__SELECTION__MODEL=claude-3-5-haiku-latest`
 - `OXYDRA__RUNTIME__MAX_TURNS=12`
 - `OXYDRA__RUNTIME__CONTEXT_BUDGET__TRIGGER_RATIO=0.85`
+- `OXYDRA__RUNTIME__CONTEXT_BUDGET__FALLBACK_MAX_CONTEXT_TOKENS=128000`
 - `OXYDRA__MEMORY__ENABLED=true`
 - `OXYDRA__MEMORY__RETRIEVAL__TOP_K=8`
 - `OXYDRA__MEMORY__AUTH_TOKEN=...`

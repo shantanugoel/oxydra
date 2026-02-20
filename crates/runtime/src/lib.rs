@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
 use types::{
-    Context, Memory, MemoryError, MemoryRecallRequest, MemoryStoreRequest, Message, MessageRole,
-    Provider, ProviderError, ProviderId, Response, RuntimeError, SafetyTier, StreamItem, ToolCall,
-    ToolCallDelta, ToolError, UsageUpdate,
+    Context, Memory, MemoryError, MemoryHybridQueryRequest, MemoryRecallRequest, MemoryRetrieval,
+    MemoryStoreRequest, Message, MessageRole, Provider, ProviderError, ProviderId, Response,
+    RuntimeError, SafetyTier, StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -32,6 +32,7 @@ pub enum TurnState {
 pub struct ContextBudgetLimits {
     pub trigger_ratio: f64,
     pub safety_buffer_tokens: u64,
+    pub fallback_max_context_tokens: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,7 @@ impl Default for RuntimeLimits {
             context_budget: ContextBudgetLimits {
                 trigger_ratio: 0.85,
                 safety_buffer_tokens: 1_024,
+                fallback_max_context_tokens: 128_000,
             },
             retrieval: RetrievalLimits {
                 top_k: 8,
@@ -86,6 +88,7 @@ pub struct AgentRuntime {
     limits: RuntimeLimits,
     stream_buffer_size: usize,
     memory: Option<Arc<dyn Memory>>,
+    memory_retrieval: Option<Arc<dyn MemoryRetrieval>>,
 }
 
 impl AgentRuntime {
@@ -100,11 +103,19 @@ impl AgentRuntime {
             limits,
             stream_buffer_size: DEFAULT_STREAM_BUFFER_SIZE,
             memory: None,
+            memory_retrieval: None,
         }
     }
 
     pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
         self.memory = Some(memory);
+        self.memory_retrieval = None;
+        self
+    }
+
+    pub fn with_memory_retrieval(mut self, memory: Arc<dyn MemoryRetrieval>) -> Self {
+        self.memory = Some(memory.clone());
+        self.memory_retrieval = Some(memory);
         self
     }
 
@@ -197,8 +208,9 @@ impl AgentRuntime {
             let state = TurnState::Streaming;
             tracing::debug!(turn, ?state, "running provider turn");
 
+            let provider_context = self.prepare_provider_context(session_id, context).await?;
             let provider_response = self
-                .request_provider_response(context, cancellation)
+                .request_provider_response(&provider_context, cancellation)
                 .await?;
             let Response {
                 message,

@@ -131,6 +131,19 @@ fn validation_rejects_invalid_context_budget_ratio() {
 }
 
 #[test]
+fn validation_rejects_invalid_context_fallback_max_context_tokens() {
+    let mut config = AgentConfig::default();
+    config.runtime.context_budget.fallback_max_context_tokens = 0;
+    let error = config
+        .validate()
+        .expect_err("invalid fallback_max_context_tokens should fail validation");
+    assert_eq!(
+        error,
+        ConfigError::InvalidContextFallbackMaxContextTokens { value: 0 }
+    );
+}
+
+#[test]
 fn validation_rejects_invalid_summarization_min_turns() {
     let mut config = AgentConfig::default();
     config.runtime.summarization.min_turns = 0;

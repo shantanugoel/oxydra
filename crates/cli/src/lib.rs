@@ -100,6 +100,8 @@ pub struct ContextBudgetOverrides {
     pub trigger_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_buffer_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_max_context_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -270,6 +272,7 @@ pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
         context_budget: ContextBudgetLimits {
             trigger_ratio: config.runtime.context_budget.trigger_ratio,
             safety_buffer_tokens: config.runtime.context_budget.safety_buffer_tokens,
+            fallback_max_context_tokens: config.runtime.context_budget.fallback_max_context_tokens,
         },
         retrieval: RetrievalLimits {
             top_k: config.memory.retrieval.top_k,
@@ -595,6 +598,7 @@ remote_url = "libsql://example-org.turso.io"
         config.runtime.max_cost = Some(3.25);
         config.runtime.context_budget.trigger_ratio = 0.9;
         config.runtime.context_budget.safety_buffer_tokens = 2_048;
+        config.runtime.context_budget.fallback_max_context_tokens = 96_000;
         config.memory.retrieval.top_k = 12;
         config.memory.retrieval.vector_weight = 0.6;
         config.memory.retrieval.fts_weight = 0.4;
@@ -607,6 +611,7 @@ remote_url = "libsql://example-org.turso.io"
         assert_eq!(limits.max_cost, Some(3.25));
         assert_eq!(limits.context_budget.trigger_ratio, 0.9);
         assert_eq!(limits.context_budget.safety_buffer_tokens, 2_048);
+        assert_eq!(limits.context_budget.fallback_max_context_tokens, 96_000);
         assert_eq!(limits.retrieval.top_k, 12);
         assert_eq!(limits.retrieval.vector_weight, 0.6);
         assert_eq!(limits.retrieval.fts_weight, 0.4);

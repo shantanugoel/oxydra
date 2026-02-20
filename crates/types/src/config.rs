@@ -134,6 +134,8 @@ pub struct ContextBudgetConfig {
     pub trigger_ratio: f64,
     #[serde(default = "default_context_safety_buffer_tokens")]
     pub safety_buffer_tokens: u64,
+    #[serde(default = "default_context_fallback_max_context_tokens")]
+    pub fallback_max_context_tokens: u32,
 }
 
 impl Default for ContextBudgetConfig {
@@ -141,6 +143,7 @@ impl Default for ContextBudgetConfig {
         Self {
             trigger_ratio: default_context_budget_trigger_ratio(),
             safety_buffer_tokens: default_context_safety_buffer_tokens(),
+            fallback_max_context_tokens: default_context_fallback_max_context_tokens(),
         }
     }
 }
@@ -154,6 +157,9 @@ impl ContextBudgetConfig {
         }
         if self.safety_buffer_tokens == 0 {
             return Err(ConfigError::InvalidContextSafetyBufferTokens { value: 0 });
+        }
+        if self.fallback_max_context_tokens == 0 {
+            return Err(ConfigError::InvalidContextFallbackMaxContextTokens { value: 0 });
         }
         Ok(())
     }
@@ -402,6 +408,10 @@ pub enum ConfigError {
     InvalidContextBudgetRatio { value: f64 },
     #[error("runtime context budget safety_buffer_tokens must be greater than zero; got {value}")]
     InvalidContextSafetyBufferTokens { value: u64 },
+    #[error(
+        "runtime context budget fallback_max_context_tokens must be greater than zero; got {value}"
+    )]
+    InvalidContextFallbackMaxContextTokens { value: u32 },
     #[error("runtime summarization target_ratio must be within [0.0, 1.0]; got {value}")]
     InvalidSummarizationTargetRatio { value: f64 },
     #[error("runtime summarization min_turns must be greater than zero; got {value}")]
@@ -502,6 +512,10 @@ fn default_context_budget_trigger_ratio() -> f64 {
 
 fn default_context_safety_buffer_tokens() -> u64 {
     1_024
+}
+
+fn default_context_fallback_max_context_tokens() -> u32 {
+    128_000
 }
 
 fn default_summarization_target_ratio() -> f64 {

@@ -1370,6 +1370,114 @@ async fn run_session_uses_fallback_context_limit_when_model_cap_is_missing() {
 }
 
 #[tokio::test]
+async fn run_session_for_session_enforces_budget_with_retrieval_injection() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            Some(96),
+        ));
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(|provider_context| {
+            provider_context.messages.len() <= 3
+                && provider_context.messages.iter().any(|message| {
+                    message.role == MessageRole::System
+                        && message
+                            .content
+                            .as_deref()
+                            .is_some_and(|content| content.contains("Retrieved memory snippets:"))
+                })
+                && provider_context
+                    .messages
+                    .iter()
+                    .any(|message| message.content.as_deref() == Some("latest user turn"))
+                && !provider_context.messages.iter().any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains("older user detail"))
+                })
+        })
+        .returning(|_| Ok(assistant_response("budgeted retrieval response", vec![])));
+
+    let memory = Arc::new(RecordingMemory::with_hybrid_query_results(vec![
+        MemoryHybridQueryResult {
+            chunk_id: "chunk-budget".to_owned(),
+            session_id: "session-budget-retrieval".to_owned(),
+            text: "persisted budget note".to_owned(),
+            score: 0.93,
+            vector_score: 1.0,
+            fts_score: 0.0,
+            file_id: None,
+            sequence_start: Some(1),
+            sequence_end: Some(1),
+            metadata: None,
+        },
+    ]));
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.safety_buffer_tokens = 8;
+    limits.retrieval.top_k = 1;
+    limits.retrieval.vector_weight = 0.7;
+    limits.retrieval.fts_weight = 0.3;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits)
+        .with_memory_retrieval(memory.clone());
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::User,
+                content: Some("older user detail ".repeat(120)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("older assistant detail ".repeat(120)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("latest user turn".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let response = runtime
+        .run_session_for_session(
+            "session-budget-retrieval",
+            &mut context,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("runtime should keep provider context within budget after retrieval injection");
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("budgeted retrieval response")
+    );
+
+    let queries = memory.recorded_hybrid_queries();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].session_id, "session-budget-retrieval");
+    assert_eq!(queries[0].query, "latest user turn");
+}
+
+#[tokio::test]
 async fn run_session_for_session_injects_retrieved_memory_snippets() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");

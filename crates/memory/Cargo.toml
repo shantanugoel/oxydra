@@ -11,6 +11,7 @@ fastembed = ["dep:fastembed"]
 async-trait = "0.1"
 blake3 = "1"
 fastembed = { version = "5", optional = true }
+futures = "0.3.32"
 libsql = "0.9"
 serde_json = "1"
 types = { path = "../types" }

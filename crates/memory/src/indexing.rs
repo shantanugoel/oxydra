@@ -81,6 +81,19 @@ impl EmbeddingAdapter {
             vectors,
         })
     }
+
+    pub(crate) fn embed_query(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+        let normalized = normalize_text_for_indexing(text);
+        if normalized.is_empty() {
+            return Ok(vec![0.0; DETERMINISTIC_EMBEDDING_DIMENSIONS]);
+        }
+        let batch = self.embed_batch(&[normalized])?;
+        batch
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| query_error("query embedding batch unexpectedly empty".to_owned()))
+    }
 }
 
 #[cfg(feature = "fastembed")]
@@ -289,6 +302,21 @@ fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
         blob.extend_from_slice(&value.to_le_bytes());
     }
     blob
+}
+
+pub(crate) fn decode_embedding_blob(blob: &[u8]) -> Result<Vec<f32>, MemoryError> {
+    const FLOAT_WIDTH: usize = std::mem::size_of::<f32>();
+    if !blob.len().is_multiple_of(FLOAT_WIDTH) {
+        return Err(query_error(format!(
+            "embedding blob length {} is not aligned to f32 width",
+            blob.len()
+        )));
+    }
+    let mut embedding = Vec::with_capacity(blob.len() / FLOAT_WIDTH);
+    for chunk in blob.chunks_exact(FLOAT_WIDTH) {
+        embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(embedding)
 }
 
 fn stable_hash_hex(input: &[u8]) -> String {

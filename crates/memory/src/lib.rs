@@ -3,25 +3,60 @@ mod errors;
 mod indexing;
 mod schema;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use libsql::{Builder, Connection, Database, params};
-use serde_json::json;
+use serde_json::{Value, json};
 use types::{
-    Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryRecallRequest, MemoryRecord,
-    MemoryStoreRequest,
+    Memory, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryConfig, MemoryError,
+    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
+    MemoryRecord, MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest,
+    MemorySummaryState, MemorySummaryWriteRequest, MemorySummaryWriteResult, RetrievalConfig,
 };
 
 use connection::{ConnectionStrategy, ensure_local_parent_directory};
 use errors::{connection_error, initialization_error, query_error};
-use indexing::{EmbeddingAdapter, index_prepared_document, prepare_index_document};
+use indexing::{
+    EmbeddingAdapter, decode_embedding_blob, index_prepared_document, prepare_index_document,
+};
 use schema::{
     enable_foreign_keys, ensure_migration_bookkeeping, rollback_quietly, run_pending_migrations,
     verify_required_schema,
 };
 
+const RETRIEVAL_WEIGHT_SUM_EPSILON: f64 = 1e-6;
+const RETRIEVAL_CANDIDATE_MULTIPLIER: usize = 4;
+
 pub struct LibsqlMemory {
     db: Database,
     embedding_adapter: EmbeddingAdapter,
+}
+
+#[derive(Debug, Clone)]
+struct HybridCandidateRow {
+    chunk_id: String,
+    session_id: String,
+    text: String,
+    file_id: Option<i64>,
+    sequence_start: Option<u64>,
+    sequence_end: Option<u64>,
+    metadata: Option<Value>,
+    recency_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ScoredHybridCandidate {
+    row: HybridCandidateRow,
+    raw_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct MergedHybridCandidate {
+    row: HybridCandidateRow,
+    score: f64,
+    vector_score: f64,
+    fts_score: f64,
 }
 
 impl LibsqlMemory {
@@ -123,6 +158,198 @@ impl LibsqlMemory {
         self.db
             .connect()
             .map_err(|error| connection_error(error.to_string()))
+    }
+
+    async fn execute_hybrid_query(
+        &self,
+        request: MemoryHybridQueryRequest,
+    ) -> Result<Vec<MemoryHybridQueryResult>, MemoryError> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(query_error(
+                "hybrid query must include a non-empty query string".to_owned(),
+            ));
+        }
+
+        let defaults = RetrievalConfig::default();
+        let top_k = request.top_k.unwrap_or(defaults.top_k);
+        if top_k == 0 {
+            return Err(query_error(
+                "hybrid query `top_k` must be greater than zero".to_owned(),
+            ));
+        }
+        let vector_weight = request.vector_weight.unwrap_or(defaults.vector_weight);
+        let fts_weight = request.fts_weight.unwrap_or(defaults.fts_weight);
+        validate_hybrid_weights(vector_weight, fts_weight)?;
+
+        let query_embedding = match request.query_embedding {
+            Some(embedding) => embedding,
+            None => self.embedding_adapter.embed_query(query)?,
+        };
+        validate_query_embedding(&query_embedding)?;
+
+        let candidate_limit = top_k
+            .checked_mul(RETRIEVAL_CANDIDATE_MULTIPLIER)
+            .ok_or_else(|| query_error("hybrid query top_k is too large".to_owned()))?;
+        let (vector_candidates, fts_candidates) = futures::try_join!(
+            self.vector_search(
+                request.session_id.as_str(),
+                query_embedding.as_slice(),
+                candidate_limit
+            ),
+            self.fts_search(request.session_id.as_str(), query, candidate_limit)
+        )?;
+
+        let vector_scores = normalize_scores(vector_candidates.as_slice());
+        let fts_scores = normalize_scores(fts_candidates.as_slice());
+        let mut merged: HashMap<String, MergedHybridCandidate> = HashMap::new();
+
+        for candidate in vector_candidates {
+            let chunk_id = candidate.row.chunk_id.clone();
+            let entry = merged
+                .entry(chunk_id.clone())
+                .or_insert_with(|| MergedHybridCandidate {
+                    row: candidate.row,
+                    score: 0.0,
+                    vector_score: 0.0,
+                    fts_score: 0.0,
+                });
+            entry.vector_score = vector_scores.get(&chunk_id).copied().unwrap_or_default();
+        }
+        for candidate in fts_candidates {
+            let chunk_id = candidate.row.chunk_id.clone();
+            let entry = merged
+                .entry(chunk_id.clone())
+                .or_insert_with(|| MergedHybridCandidate {
+                    row: candidate.row,
+                    score: 0.0,
+                    vector_score: 0.0,
+                    fts_score: 0.0,
+                });
+            entry.fts_score = fts_scores.get(&chunk_id).copied().unwrap_or_default();
+        }
+
+        let mut ranked = merged.into_values().collect::<Vec<_>>();
+        for candidate in &mut ranked {
+            candidate.score =
+                (vector_weight * candidate.vector_score) + (fts_weight * candidate.fts_score);
+        }
+        ranked.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| right.row.recency_sequence.cmp(&left.row.recency_sequence))
+                .then_with(|| left.row.chunk_id.cmp(&right.row.chunk_id))
+        });
+
+        let mut results = Vec::with_capacity(top_k.min(ranked.len()));
+        for candidate in ranked.into_iter().take(top_k) {
+            results.push(MemoryHybridQueryResult {
+                chunk_id: candidate.row.chunk_id,
+                session_id: candidate.row.session_id,
+                text: candidate.row.text,
+                score: candidate.score,
+                vector_score: candidate.vector_score,
+                fts_score: candidate.fts_score,
+                file_id: candidate.row.file_id,
+                sequence_start: candidate.row.sequence_start,
+                sequence_end: candidate.row.sequence_end,
+                metadata: candidate.row.metadata,
+            });
+        }
+        Ok(results)
+    }
+
+    async fn vector_search(
+        &self,
+        session_id: &str,
+        query_embedding: &[f32],
+        candidate_limit: usize,
+    ) -> Result<Vec<ScoredHybridCandidate>, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        let mut rows = conn
+            .query(
+                "SELECT c.chunk_id, c.session_id, c.chunk_text, c.file_id, c.sequence_start, c.sequence_end, c.metadata_json, cv.embedding_blob
+                 FROM chunks c
+                 INNER JOIN chunks_vec cv ON cv.chunk_id = c.chunk_id
+                 WHERE c.session_id = ?1",
+                params![session_id],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+        let mut candidates = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        {
+            let row_data = hybrid_candidate_from_row(&row)?;
+            let embedding_blob = row
+                .get::<Vec<u8>>(7)
+                .map_err(|error| query_error(error.to_string()))?;
+            let chunk_embedding = decode_embedding_blob(embedding_blob.as_slice())?;
+            let score = cosine_similarity(query_embedding, chunk_embedding.as_slice())?;
+            candidates.push(ScoredHybridCandidate {
+                row: row_data,
+                raw_score: score,
+            });
+        }
+
+        candidates.sort_by(|left, right| {
+            right
+                .raw_score
+                .total_cmp(&left.raw_score)
+                .then_with(|| right.row.recency_sequence.cmp(&left.row.recency_sequence))
+                .then_with(|| left.row.chunk_id.cmp(&right.row.chunk_id))
+        });
+        candidates.truncate(candidate_limit);
+        Ok(candidates)
+    }
+
+    async fn fts_search(
+        &self,
+        session_id: &str,
+        query: &str,
+        candidate_limit: usize,
+    ) -> Result<Vec<ScoredHybridCandidate>, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        let candidate_limit = i64::try_from(candidate_limit)
+            .map_err(|_| query_error("hybrid candidate limit exceeds sqlite range".to_owned()))?;
+        let match_query = format_fts_match_query(query);
+        let mut rows = conn
+            .query(
+                "SELECT c.chunk_id, c.session_id, c.chunk_text, c.file_id, c.sequence_start, c.sequence_end, c.metadata_json, -bm25(chunks_fts) AS score
+                 FROM chunks_fts
+                 INNER JOIN chunks c ON c.rowid = chunks_fts.rowid
+                 WHERE chunks_fts MATCH ?1 AND c.session_id = ?2
+                 ORDER BY score DESC, c.sequence_end DESC, c.sequence_start DESC, c.chunk_id ASC
+                 LIMIT ?3",
+                params![match_query, session_id, candidate_limit],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+        let mut candidates = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        {
+            let row_data = hybrid_candidate_from_row(&row)?;
+            let raw_score = row
+                .get::<f64>(7)
+                .map_err(|error| query_error(error.to_string()))?;
+            candidates.push(ScoredHybridCandidate {
+                row: row_data,
+                raw_score,
+            });
+        }
+        Ok(candidates)
     }
 }
 
@@ -303,6 +530,43 @@ impl Memory for LibsqlMemory {
     }
 }
 
+#[async_trait]
+impl MemoryRetrieval for LibsqlMemory {
+    async fn upsert_chunks(
+        &self,
+        _request: MemoryChunkUpsertRequest,
+    ) -> Result<MemoryChunkUpsertResponse, MemoryError> {
+        Err(query_error(
+            "chunk upsert API is not implemented yet for libsql memory".to_owned(),
+        ))
+    }
+
+    async fn hybrid_query(
+        &self,
+        request: MemoryHybridQueryRequest,
+    ) -> Result<Vec<MemoryHybridQueryResult>, MemoryError> {
+        self.execute_hybrid_query(request).await
+    }
+
+    async fn read_summary_state(
+        &self,
+        _request: MemorySummaryReadRequest,
+    ) -> Result<Option<MemorySummaryState>, MemoryError> {
+        Err(query_error(
+            "summary state read API is not implemented yet for libsql memory".to_owned(),
+        ))
+    }
+
+    async fn write_summary_state(
+        &self,
+        _request: MemorySummaryWriteRequest,
+    ) -> Result<MemorySummaryWriteResult, MemoryError> {
+        Err(query_error(
+            "summary state write API is not implemented yet for libsql memory".to_owned(),
+        ))
+    }
+}
+
 pub struct UnconfiguredMemory;
 
 impl UnconfiguredMemory {
@@ -342,6 +606,37 @@ impl Memory for UnconfiguredMemory {
     }
 }
 
+#[async_trait]
+impl MemoryRetrieval for UnconfiguredMemory {
+    async fn upsert_chunks(
+        &self,
+        _request: MemoryChunkUpsertRequest,
+    ) -> Result<MemoryChunkUpsertResponse, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn hybrid_query(
+        &self,
+        _request: MemoryHybridQueryRequest,
+    ) -> Result<Vec<MemoryHybridQueryResult>, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn read_summary_state(
+        &self,
+        _request: MemorySummaryReadRequest,
+    ) -> Result<Option<MemorySummaryState>, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn write_summary_state(
+        &self,
+        _request: MemorySummaryWriteRequest,
+    ) -> Result<MemorySummaryWriteResult, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+}
+
 async fn ensure_monotonic_sequence(
     conn: &Connection,
     session_id: &str,
@@ -370,6 +665,153 @@ async fn ensure_monotonic_sequence(
         )));
     }
     Ok(())
+}
+
+fn validate_hybrid_weights(vector_weight: f64, fts_weight: f64) -> Result<(), MemoryError> {
+    if !vector_weight.is_finite() || !(0.0..=1.0).contains(&vector_weight) {
+        return Err(query_error(format!(
+            "hybrid query vector_weight must be within [0.0, 1.0]; got {vector_weight}"
+        )));
+    }
+    if !fts_weight.is_finite() || !(0.0..=1.0).contains(&fts_weight) {
+        return Err(query_error(format!(
+            "hybrid query fts_weight must be within [0.0, 1.0]; got {fts_weight}"
+        )));
+    }
+    let sum = vector_weight + fts_weight;
+    if (sum - 1.0).abs() > RETRIEVAL_WEIGHT_SUM_EPSILON {
+        return Err(query_error(format!(
+            "hybrid query weights must sum to 1.0; got vector_weight={vector_weight} fts_weight={fts_weight}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_query_embedding(embedding: &[f32]) -> Result<(), MemoryError> {
+    if embedding.is_empty() {
+        return Err(query_error(
+            "hybrid query embedding must contain at least one dimension".to_owned(),
+        ));
+    }
+    if embedding.iter().any(|value| !value.is_finite()) {
+        return Err(query_error(
+            "hybrid query embedding must contain only finite f32 values".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_scores(candidates: &[ScoredHybridCandidate]) -> HashMap<String, f64> {
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
+
+    let (min_score, max_score) = candidates.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(current_min, current_max), candidate| {
+            (
+                current_min.min(candidate.raw_score),
+                current_max.max(candidate.raw_score),
+            )
+        },
+    );
+    let range = max_score - min_score;
+
+    let mut normalized = HashMap::with_capacity(candidates.len());
+    for candidate in candidates {
+        let score = if range.abs() <= RETRIEVAL_WEIGHT_SUM_EPSILON {
+            1.0
+        } else {
+            (candidate.raw_score - min_score) / range
+        };
+        normalized.insert(candidate.row.chunk_id.clone(), score);
+    }
+    normalized
+}
+
+fn hybrid_candidate_from_row(row: &libsql::Row) -> Result<HybridCandidateRow, MemoryError> {
+    let chunk_id = row
+        .get::<String>(0)
+        .map_err(|error| query_error(error.to_string()))?;
+    let session_id = row
+        .get::<String>(1)
+        .map_err(|error| query_error(error.to_string()))?;
+    let text = row
+        .get::<String>(2)
+        .map_err(|error| query_error(error.to_string()))?;
+    let file_id = row
+        .get::<Option<i64>>(3)
+        .map_err(|error| query_error(error.to_string()))?;
+    let sequence_start = read_optional_u64(row, 4, "sequence_start")?;
+    let sequence_end = read_optional_u64(row, 5, "sequence_end")?;
+    let metadata_json = row
+        .get::<String>(6)
+        .map_err(|error| query_error(error.to_string()))?;
+    let metadata: Value = serde_json::from_str(&metadata_json)?;
+    let metadata = match metadata {
+        Value::Null => None,
+        other => Some(other),
+    };
+    let recency_sequence = sequence_end.or(sequence_start).unwrap_or(0);
+
+    Ok(HybridCandidateRow {
+        chunk_id,
+        session_id,
+        text,
+        file_id,
+        sequence_start,
+        sequence_end,
+        metadata,
+        recency_sequence,
+    })
+}
+
+fn read_optional_u64(
+    row: &libsql::Row,
+    index: i32,
+    field_name: &str,
+) -> Result<Option<u64>, MemoryError> {
+    let value = row
+        .get::<Option<i64>>(index)
+        .map_err(|error| query_error(error.to_string()))?;
+    value
+        .map(|raw| {
+            u64::try_from(raw).map_err(|_| {
+                query_error(format!(
+                    "stored {field_name} value {raw} is negative and cannot be converted to u64"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn cosine_similarity(query: &[f32], candidate: &[f32]) -> Result<f64, MemoryError> {
+    if query.len() != candidate.len() {
+        return Err(query_error(format!(
+            "embedding dimension mismatch for hybrid vector search: query has {}, candidate has {}",
+            query.len(),
+            candidate.len()
+        )));
+    }
+    let mut dot = 0.0_f64;
+    let mut query_norm = 0.0_f64;
+    let mut candidate_norm = 0.0_f64;
+    for (left, right) in query.iter().zip(candidate.iter()) {
+        let left = f64::from(*left);
+        let right = f64::from(*right);
+        dot += left * right;
+        query_norm += left * left;
+        candidate_norm += right * right;
+    }
+    if query_norm <= f64::EPSILON || candidate_norm <= f64::EPSILON {
+        return Ok(0.0);
+    }
+    Ok(dot / (query_norm.sqrt() * candidate_norm.sqrt()))
+}
+
+fn format_fts_match_query(query: &str) -> String {
+    let escaped = query.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]

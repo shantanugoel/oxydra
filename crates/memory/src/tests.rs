@@ -6,8 +6,8 @@ use std::{
 use libsql::{Builder, params};
 use serde_json::json;
 use types::{
-    Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryRecallRequest,
-    MemoryStoreRequest, Message, MessageRole,
+    Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
+    MemoryRecallRequest, MemoryRetrieval, MemoryStoreRequest, Message, MessageRole,
 };
 
 use crate::{
@@ -551,6 +551,150 @@ async fn chunks_fts_triggers_keep_index_synchronized() {
 }
 
 #[tokio::test]
+async fn hybrid_query_merges_vector_and_fts_with_weighted_rank() {
+    let db_path = temp_db_path("hybrid-query-merge");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+    let conn = backend.connect().expect("backend should connect");
+    insert_test_session(&conn, "session-hybrid").await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-a",
+        "session-hybrid",
+        1,
+        "alpha vector anchor",
+        r#"{"tag":"vector-only"}"#,
+        &[1.0, 0.0],
+    )
+    .await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-b",
+        "session-hybrid",
+        2,
+        "banana keyword",
+        r#"{"tag":"hybrid-top"}"#,
+        &[0.0, 1.0],
+    )
+    .await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-c",
+        "session-hybrid",
+        3,
+        "banana keyword",
+        r#"{"tag":"recency-tie-break"}"#,
+        &[-1.0, 0.0],
+    )
+    .await;
+    drop(conn);
+
+    let results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "session-hybrid".to_owned(),
+            query: "banana".to_owned(),
+            query_embedding: Some(vec![1.0, 0.0]),
+            top_k: Some(3),
+            vector_weight: Some(0.5),
+            fts_weight: Some(0.5),
+        },
+    )
+    .await
+    .expect("hybrid query should merge vector and fts candidates");
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].chunk_id, "chunk-b");
+    assert_eq!(results[1].chunk_id, "chunk-c");
+    assert_eq!(results[2].chunk_id, "chunk-a");
+    assert_approx_eq(results[0].score, 0.75);
+    assert_approx_eq(results[0].vector_score, 0.5);
+    assert_approx_eq(results[0].fts_score, 1.0);
+    assert_approx_eq(results[1].score, results[2].score);
+    assert_eq!(results[1].sequence_end, Some(3));
+    assert_eq!(
+        results[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("tag"))
+            .and_then(serde_json::Value::as_str),
+        Some("hybrid-top")
+    );
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn hybrid_query_breaks_ties_by_recency_then_chunk_id() {
+    let db_path = temp_db_path("hybrid-query-tie-break");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+    let conn = backend.connect().expect("backend should connect");
+    insert_test_session(&conn, "session-hybrid-tie").await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-a",
+        "session-hybrid-tie",
+        5,
+        "vector candidate a",
+        r#"{"tag":"a"}"#,
+        &[1.0, 0.0],
+    )
+    .await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-b",
+        "session-hybrid-tie",
+        5,
+        "vector candidate b",
+        r#"{"tag":"b"}"#,
+        &[1.0, 0.0],
+    )
+    .await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-c",
+        "session-hybrid-tie",
+        3,
+        "vector candidate c",
+        r#"{"tag":"c"}"#,
+        &[1.0, 0.0],
+    )
+    .await;
+    drop(conn);
+
+    let results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "session-hybrid-tie".to_owned(),
+            query: "unmatched-token".to_owned(),
+            query_embedding: Some(vec![1.0, 0.0]),
+            top_k: Some(3),
+            vector_weight: Some(1.0),
+            fts_weight: Some(0.0),
+        },
+    )
+    .await
+    .expect("vector-only hybrid query should succeed");
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].chunk_id, "chunk-a");
+    assert_eq!(results[1].chunk_id, "chunk-b");
+    assert_eq!(results[2].chunk_id, "chunk-c");
+    assert_eq!(results[0].sequence_end, Some(5));
+    assert_eq!(results[1].sequence_end, Some(5));
+    assert_eq!(results[2].sequence_end, Some(3));
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn local_mode_surfaces_unreachable_database_path_errors() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -641,4 +785,67 @@ async fn count_fts_matches(conn: &libsql::Connection, term: &str) -> i64 {
         .expect("count row should be readable")
         .expect("count row should exist");
     row.get::<i64>(0).expect("count column should be readable")
+}
+
+async fn insert_test_session(conn: &libsql::Connection, session_id: &str) {
+    conn.execute(
+        "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
+         VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        params![session_id],
+    )
+    .await
+    .expect("test session should insert");
+}
+
+async fn insert_chunk_with_embedding(
+    conn: &libsql::Connection,
+    chunk_id: &str,
+    session_id: &str,
+    sequence: i64,
+    chunk_text: &str,
+    metadata_json: &str,
+    embedding: &[f32],
+) {
+    conn.execute(
+        "INSERT INTO chunks (
+            chunk_id, session_id, sequence_start, sequence_end, chunk_text, metadata_json, content_hash
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7
+         )",
+        params![
+            chunk_id,
+            session_id,
+            sequence,
+            sequence,
+            chunk_text,
+            metadata_json,
+            format!("{chunk_id}-hash")
+        ],
+    )
+    .await
+    .expect("test chunk should insert");
+
+    let embedding_blob = encode_embedding_blob(embedding);
+    conn.execute(
+        "INSERT INTO chunks_vec (chunk_id, embedding_blob, embedding_model)
+         VALUES (?1, ?2, ?3)",
+        params![chunk_id, embedding_blob.as_slice(), "test-embedding-model"],
+    )
+    .await
+    .expect("test chunk vector should insert");
+}
+
+fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(std::mem::size_of_val(embedding));
+    for value in embedding {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
+}
+
+fn assert_approx_eq(left: f64, right: f64) {
+    assert!(
+        (left - right).abs() <= 1e-6,
+        "expected {left} ~= {right} within 1e-6"
+    );
 }

@@ -2303,6 +2303,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "fastembed",
+ "futures",
  "libsql",
  "serde_json",
  "tokio",

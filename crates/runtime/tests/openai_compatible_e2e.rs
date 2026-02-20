@@ -215,17 +215,14 @@ async fn live_openrouter_tool_call_smoke() {
         .expect("assistant tool-call turn should include at least one tool call");
     assert_eq!(first_tool_call.name, "read_file");
     assert!(
-        context
-            .messages
-            .iter()
-            .any(|message| {
-                message.role == MessageRole::Tool
-                    && message.tool_call_id.as_deref() == Some(first_tool_call.id.as_str())
-                    && message
-                        .content
-                        .as_deref()
-                        .is_some_and(|content| content.contains("RUNTIME_LIVE_SMOKE_MARKER"))
-            }),
+        context.messages.iter().any(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_call_id.as_deref() == Some(first_tool_call.id.as_str())
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("RUNTIME_LIVE_SMOKE_MARKER"))
+        }),
         "live run should include a linked tool result with file content"
     );
     assert!(

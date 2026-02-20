@@ -3,8 +3,14 @@ name = "memory"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+fastembed = ["dep:fastembed"]
+
 [dependencies]
 async-trait = "0.1"
+blake3 = "1"
+fastembed = { version = "5", optional = true }
 libsql = "0.9"
 serde_json = "1"
 types = { path = "../types" }

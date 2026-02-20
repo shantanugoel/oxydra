@@ -25,7 +25,7 @@ The transition from monolithic, script-based artificial intelligence application
 
 However, as these systems scale to handle multimodal streams, complex multi-agent routing, and concurrent tool execution, the overhead of heavily abstracted runtime environments becomes a critical architectural bottleneck. In an ecosystem where a single TypeScript-based agent runtime can consume over 1 gigabyte of random access memory and require upwards of 500 seconds for complex cold starts, transitioning to a systems-level language becomes an operational imperative.[4] Constructing a highly concurrent, memory-safe, and dynamically extensible agent orchestrator in Rust offers profound advantages in both cost and performance. Systems like ZeroClaw have proven that an entire AI agent infrastructure can be condensed into a 3.4-megabyte compiled binary capable of executing with less than 5 megabytes of memory overhead and a cold start latency of under 10 milliseconds.[5, 6] This lean architecture enables deployment on hardware as constrained as a $10 single-board computer, making it 98 percent cheaper to operate than traditional heavy runtimes.[4, 6]
 
-Achieving this requires a rigorous, progressive architectural strategy. Rather than attempting to construct a monolithic framework in a single iteration—a process prone to architectural drift and unmaintainable coupling—the system must be built layer by layer. This approach adheres strictly to the "small core" philosophy demonstrated by architectures like the Pi-mono monorepo, where the intentional omission of bloated features forces the agent to rely on a minimal set of highly optimized, generalized capabilities to extend itself dynamically.[2, 7] By isolating the foundational language model abstractions, constructing a minimal agent loop, engineering kernel-level sandboxing, and finally multiplexing through a centralized gateway, one can develop an orchestrator that is secure by design, infinitely extensible, and capable of deep multi-agent collaboration without succumbing to technical debt.
+Achieving this requires a rigorous, progressive architectural strategy. Rather than attempting to construct a monolithic framework in a single iteration—a process prone to architectural drift and unmaintainable coupling—the system must be built layer by layer. This approach adheres strictly to the "small core" philosophy demonstrated by architectures like the Pi-mono monorepo, where the intentional omission of bloated features forces the agent to rely on a minimal set of highly optimized, generalized capabilities to extend itself dynamically.[2, 7] By isolating the foundational language model abstractions, constructing a minimal agent loop, engineering runner-enforced sandboxing (microVM/container + WASM), and finally multiplexing through a centralized gateway, one can develop an orchestrator that is secure by design, infinitely extensible, and capable of deep multi-agent collaboration without succumbing to technical debt.
 
 ---
 
@@ -39,7 +39,7 @@ To successfully implement this philosophy in a Rust environment, the architectur
 |---|---|---|---|---|
 | Foundation | `types` | Zero internal dependencies | Defines universal message/tool/context structs, base traits, config schema structs, and shared error primitives. |
 | Core | `provider`, `tools`, `tools-macros`, `runtime`, `memory`, `sandbox` | Depends strictly on Foundation | Implements provider adapters, tool execution, turn loop, persistence, and sandbox boundaries. |
-| Application | `channels`, `gateway`, `cli` | Depends on Core and Foundation | Manages ingress/egress channels, routing daemon, and operator interfaces. |
+| Application | `runner`, `channels`, `gateway`, `cli` | Depends on Core and Foundation | Manages host-side sandbox orchestration, ingress/egress channels, routing daemon, and operator interfaces. |
 
 By enforcing these boundaries at the compiler level, the orchestrator's core runtime remains entirely decoupled from specific communication channels, terminal user interfaces, or external application programming interfaces. This separation allows a developer to focus on the stability of the abstraction layer before attempting to route multi-agent conversations. Furthermore, it supports the Pi philosophy of providing the shortest viable system prompt alongside a highly restricted toolset—specifically Read, Write, Edit, and Bash.[2, 7] By providing only these four primitives, the agent is granted full Turing-complete control over its environment, relying on its internal understanding of command-line tools to navigate the host system rather than requiring the developer to hardcode specialized Rust traits for every conceivable operation.[7]
 
@@ -48,7 +48,7 @@ By enforcing these boundaries at the compiler level, the orchestrator's core run
 - **Cargo Workspace Root:** Define `[workspace]` in the root `Cargo.toml` and declare all crates explicitly.
 - **Configuration Module (`types::config`):** Define typed config structs and defaults shared across runtime, provider, and gateway crates.
 - **Error Hierarchy:** Define per-crate `thiserror` enums and compose them upward (`RuntimeError` wrapping provider/tool/memory failures).
-- **Layered Crates:** Initialize `types`, `provider`, `tools`, `runtime`, `memory`, `sandbox`, `channels`, `gateway`, and `cli` from day one to avoid structural rewrites later.
+- **Layered Crates:** Initialize `types`, `provider`, `tools`, `runtime`, `memory`, `sandbox`, `runner`, `channels`, `gateway`, and `cli` from day one to avoid structural rewrites later.
 
 ### Architecture Diagram So Far
 
@@ -441,11 +441,13 @@ The integration of unrestricted shell execution, filesystem manipulation, and dy
 
 Traditional cybersecurity paradigms operate on the assumption that malicious code is introduced externally. In agentic AI, the threat frequently originates from the authorized user's prompts or from poisoned data retrieved legitimately by the agent—an attack vector known as Indirect Prompt Injection.[27] A malicious skill or an injected payload can easily instruct an unsuspecting agent to exfiltrate SSH keys, AWS credentials, or browser cookies.[29] The orchestrator cannot rely on the language model's internal alignment or highly engineered system prompts to refuse these commands, as attackers continually discover novel jailbreak methodologies to bypass semantic filters.[26, 27] A deterministic, system-level guardrail is therefore mandatory.[27]
 
-### Kernel-Level Isolation and Capability Sets
+### Runner-Isolated Execution and Capability Sets
 
-The `SecurityPolicy` trait must govern all external interactions and state modifications.[6] Projects such as `nono` and `SkillSandbox` demonstrate the extreme effectiveness of capability-based sandboxing implemented natively in Rust.[29, 28] Rather than attempting to block specific destructive commands via a fragile denylist, the orchestrator employs a strict default-deny architecture.[28]
+The `SecurityPolicy` trait must govern all external interactions and state modifications.[6] Rather than attempting to block specific destructive commands via a fragile denylist, the orchestrator employs a strict default-deny architecture.[28]
 
-On Linux environments, the orchestrator should leverage Landlock to restrict filesystem access at the kernel level.[28] Before invoking runtime execution, define a `CapabilitySet` that grants access only to an isolated workspace and validate kernel compatibility (Landlock requires modern kernels; fail closed or switch backend explicitly if unsupported). Once applied, restrictions are inherited by child processes, so spawned shells remain confined.[28] On macOS, use a backend with Seatbelt support (for example via `nono`) rather than assuming all agent frameworks provide native Seatbelt integration. Any attempt to escape allowed paths should fail with an OS-level permission error the runtime can surface transparently.[4, 6, 28]
+Host-side isolation is delegated to a thin `oxydra-runner` process that never executes user code directly. The runner provisions one isolated runtime guest for Oxydra and separate isolated guests for heavyweight shell/browser execution, then wires communication over vsock (preferred for microVM backends) or Unix sockets (container backends). Backend choice should be explicit and policy-driven: on macOS prefer Docker Sandbox when available; on Linux use hardened rootless containers (and optionally microVM-capable backends) with fail-loud startup checks when required controls are unavailable.
+
+Each user receives a segregated workspace namespace with `shared`, `tmp`, and `vault` directories. `vault` is for workflow safety and explicit long-term blob storage, not as a hard security boundary. Shell/browser guests mount only `shared` + `tmp`; vault access is mediated by explicit vault tools.
 
 ### Secrets Management, Egress Filtering, and Safe Execution
 
@@ -453,48 +455,65 @@ To utilize API keys without exposing them to the agent's memory or bash environm
 
 Network egress is similarly constrained to prevent data exfiltration. `seccomp-bpf` and host firewall rules solve different layers: syscall filtering can block broad socket behavior, while domain-level allowlists require proxy- or namespace-based routing controls. For strict outbound policies, route tool traffic through a controlled proxy and allow only approved destinations (for example `api.github.com`) so policy can be enforced and audited consistently.[29, 28]
 
+Lightweight tools execute through `wasmtime` with strict per-tool mount policies: `file_search`/`file_list`/`file_read` mount `shared`+`tmp`+`vault` read-only; `file_write`/`file_edit`/`file_delete` mount `shared`+`tmp` read-write; vault copy/delete tools mount `vault`+`shared`+`tmp` read-write with canonicalized path checks. `web_fetch` and `web_search` run with read-only workspace mounts and host-level network guards that block loopback, link-local, RFC1918/private ranges, and metadata endpoints before any outbound request.
+
+Heavyweight shell and browser tools run in a persistent sidecar guest per user (or bounded per-user pool) mounting `shared` + `tmp`. Runtime requests sidecar startup through runner control RPC at startup/on-demand; if the channel is unavailable, these tools are disabled rather than silently degrading isolation.
+
 When interacting with databases, the orchestrator must constrain the agent's expressible intent. Passing a raw `execute_sql` tool to an agent invites catastrophic data loss via hallucination.[26] Instead, the architecture should employ Abstract Syntax Tree enforcement, akin to the ExoAgent methodology.[26] The agent is provided a constrained query builder capability object that compiles down to safe SQL execution, ensuring that mandatory conditional clauses and join constraints are mathematically enforced before the database engine receives the query.[26]
 
 ### Entities to Implement
 
 - **`SecurityPolicy` Trait:** Exposes allowlists, HITL gate policy, and runtime enforcement checks.[3]
-- **`CapabilitySet` Struct:** Represents permitted filesystem scope, execution scope, and network egress policy for a session.[28]
-- **`Sandbox` Trait + Backends:** Landlock (Linux), Seatbelt-backed backend on macOS (for example `nono`), optional WASM tool sandbox, and `NoopSandbox` with startup warning on unsupported platforms.
+- **`RunnerControl` Protocol/Client:** Runtime-to-runner control plane for provisioning runtime/shell/browser guests and returning vsock or Unix socket channels.
+- **`WorkspaceLayout` + `CapabilitySet` Structs:** Canonical per-user `shared`/`tmp`/`vault` directories and mount/egress policy by tool class.[28]
+- **`Sandbox` Trait + Backends:** `WasmtimeSandbox` for lightweight tools, runner-managed sidecar sandbox for shell/browser, and optional in-guest Landlock hardening on Linux fallback paths.
 - **Credential Scrubber + Audit Logger:** Runtime layer that redacts secret-like strings and records all policy decisions for forensics.
 
 ### Architecture Diagram So Far
 
 ```mermaid
 graph TD
-subgraph Kernel Sandbox Layer
-subgraph Application Workspace
+subgraph Host
+Runner[oxydra-runner]
+end
+subgraph Runtime Guest
 Loop[Agent Loop]
-Tools
+Wasm[wasmtime Tools]
 Mem[Memory Layer]
 end
+subgraph Sidecar Guest
+Shell[Shell/Browser]
 end
-Security --> |Enforces| Kernel Sandbox Layer
-Tools -.-> |Attempted Malicious Access| KernelBlocked
-style Kernel Sandbox Layer fill:#fff3cd,stroke:#856404,stroke-width:2px
+Security --> |Enforces| Runner
+Runner --> |vsock/unix control| Loop
+Runner --> |per-user sidecar channel| Shell
+Loop --> Wasm
+Loop --> |approved commands| Shell
+Wasm -.-> |Policy Violation| KernelBlocked
+Shell -.-> |Escape Attempt| KernelBlocked
+style Host fill:#fff3cd,stroke:#856404,stroke-width:2px
 style Security fill:#cce5ff,stroke:#004085,stroke-width:2px
 style KernelBlocked fill:#f8d7da,stroke:#721c24,stroke-width:2px
 ```
 
 ### Implementation Hints
 
-- Apply sandbox boundaries before spawning tokio worker threads; restrictions applied too late may not cover pre-existing threads.[28]
-- Check backend prerequisites at startup (kernel/version/capability detection) and fail loudly when configured policies cannot be enforced.
-- Add approval gates for privileged and dangerous tools even when kernel sandboxing is active; policy and isolation should be layered.
+- Initialize runner isolation before runtime turn execution and fail loudly if the configured backend cannot satisfy required policy guarantees.
+- Create/canonicalize per-user `shared`/`tmp`/`vault` paths before tool registration; never mount parent directories directly.
+- Start shell/browser sidecars lazily, health-check channels continuously, and remove/disable those tools immediately on channel failure.
+- Add approval gates for privileged and dangerous tools even when sandboxing is active; policy and isolation should be layered.
 
 ### Finalized Design Decisions
 
-- Sandbox backends are explicit per platform, with prerequisite checks and fail-loud startup behavior.
-- Egress control is treated as layered enforcement (syscall limits + proxy/domain policy), not a single primitive.
-- Security posture includes kernel isolation, policy gates, credential scrubbing, and full audit logging.
+- Host-side isolation is anchored on a thin `oxydra-runner` process that never executes user code directly.
+- Execution is split by workload: `wasmtime` for lightweight tools and runner-managed sidecars for persistent shell/browser workloads.
+- Egress control is layered (host function IP/range blocking + proxy/domain policy), not a single primitive.
+- Startup is fail-loud for required isolation tiers; unavailable sidecar channels force shell/browser tool disablement.
+- Security posture includes runner isolation, policy gates, credential scrubbing, and full audit logging.
 
 ### Considerations
 
-- Decide environment-specific fallback behavior (hard fail vs degraded mode) by deployment tier and risk tolerance.
+- Decide environment-specific fallback behavior (hard fail vs explicitly-degraded mode) and per-user sidecar pooling limits by deployment tier.
 
 ---
 
@@ -581,7 +600,7 @@ style Router fill:#d4edda,stroke:#28a745,stroke-width:2px
 
 Architecting a comprehensive, production-grade AI agent orchestrator requires significantly more than wrapping external API calls in high-level scripting languages. It demands a rigorous, progressive systems engineering approach rooted in efficiency and security. By adopting the "small core" philosophy, developers deliberately restrict the fundamental built-in capabilities of the agent runtime, forcing the underlying language model to dynamically generate, execute, and persist its own extensions rather than relying on bloated, hardcoded frameworks.
 
-Progressively building this architecture in Rust ensures that every layer—from unified multi-provider abstractions to asynchronous streaming and memory persistence—benefits from strict safety and predictable performance. Integrating embedded libSQL hybrid retrieval keeps long-horizon context durable without heavyweight infrastructure while staying compatible with optional Turso-hosted deployments. Layered security (kernel isolation, policy gates, credential scrubbing, and auditability) ensures autonomous capability can be deployed with controlled operational risk across Linux, macOS, and fallback platforms.
+Progressively building this architecture in Rust ensures that every layer—from unified multi-provider abstractions to asynchronous streaming and memory persistence—benefits from strict safety and predictable performance. Integrating embedded libSQL hybrid retrieval keeps long-horizon context durable without heavyweight infrastructure while staying compatible with optional Turso-hosted deployments. Layered security (runner-isolated execution, policy gates, credential scrubbing, and auditability) ensures autonomous capability can be deployed with controlled operational risk across Linux, macOS, and fallback platforms.
 
 ### Final Readiness Summary
 
@@ -615,7 +634,8 @@ crates/
   tools-macros/   # Proc-macro crate for #[tool] attribute (no internal deps except syn/quote)
   runtime/        # Depends on types, provider, tools. Agent loop + state machine
   memory/         # Depends on types. Memory trait + libSQL implementation (embedded + optional Turso remote)
-  sandbox/        # Depends on types. Sandbox trait + Landlock/nono/WASM implementations
+  sandbox/        # Depends on types. Sandbox trait + Wasmtime mount policy + optional in-guest hardening
+  runner/         # Depends on runtime, sandbox, types. Host orchestrator for runtime/sidecar sandbox guests
   channels/       # Depends on types. Channel trait impls (Telegram, Discord, etc.) behind feature flags
   gateway/        # Depends on runtime, channels. Multi-agent routing, WebSocket server
   cli/            # Depends on runtime. Terminal UI (ratatui)
@@ -672,9 +692,10 @@ For the reader building this system, here is a verified set of crates mapped to 
 | Full-text search | libSQL/SQLite FTS5 | memory | Phase 9 | Built into engine |
 | Token counting | `tiktoken-rs` | runtime / memory | Phase 9 | OpenAI-compatible tokenizer for context budgeting |
 | Local embeddings | `fastembed-rs` | memory | Phase 9 | ONNX-based, offline-first, no API dependency |
-| Sandboxing (Linux) | `landlock` crate or `nono` | sandbox | Phase 10 | Kernel-enforced; check kernel ≥5.13 |
-| Sandboxing (macOS) | `nono` (Seatbelt) | sandbox | Phase 10 | Cross-platform via nono CLI |
-| Sandboxing (WASM) | `wasmtime` | sandbox | Phase 10 | Cross-platform, strong isolation for untrusted tools |
+| Runner container orchestration | `bollard` (Docker API) or equivalent OCI wrapper | runner | Phase 10 | Launch isolated runtime and shell/browser guests; rootless profiles by default |
+| Runner transport | `tokio::net::UnixStream` + `tokio-vsock` (where available) | runner / runtime | Phase 10 | Control/data channels between runtime and sidecar sandboxes |
+| Sandboxing (WASM) | `wasmtime` | sandbox | Phase 10 | Cross-platform, strong isolation for lightweight/untrusted tools |
+| Optional in-guest hardening (Linux) | `landlock` | sandbox | Phase 10 | Defense-in-depth when using container fallback paths |
 | CLI / TUI | `ratatui` + `crossterm` | cli | Phase 11 | Terminal UI |
 | Telemetry | `tracing` + `tracing-subscriber` | all (from Phase 1) | Phase 1 (basic), Phase 14 (OTel) | Start with `tracing` spans from day one |
 | OpenTelemetry | `opentelemetry` + `tracing-opentelemetry` | runtime / gateway | Phase 14 | Distributed traces, metrics, cost attribution |
@@ -701,7 +722,7 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 | **Phase 7** | Second provider (Anthropic) + config management + provider switching | `provider`, `types`, `cli` | Phases 2, 5 | Swap providers via `agent.toml` without code changes; Anthropic block format serializes correctly; config precedence tests pass | Add `config`/`figment` loader with deterministic precedence and `config_version` validation. Introduce `ReliableProvider` wrapper with retry/backoff. Add snapshot tests (`insta`) for provider serialization and credential resolution fixtures (explicit -> provider env -> generic fallback). |
 | **Phase 8** | Memory trait + libSQL conversation persistence | `memory` | Phase 1 | Conversations survive process restart; session list/restore works | `Memory` trait: `store`, `recall`, `forget`. Persist with async `libsql` in embedded mode by default. Use versioned SQL migrations from the start (for example `refinery`). Store conversations as JSON blobs initially — don't over-normalize. |
 | **Phase 9** | Context window management + hybrid retrieval (vector + FTS) | `memory`, `runtime` | Phases 8, 5 | Agent operates within token budget; rolling summarization triggers correctly; hybrid search returns relevant results | `tiktoken-rs` for token counting. Context budget: system + memory + history + tools + buffer. Use libSQL/Turso vector search plus FTS5 keywords. `fastembed-rs` for local embeddings. Address summarizer race condition with epoch counter. |
-| **Phase 10** | Sandbox trait + security policy + credential scrubbing | `sandbox`, `runtime` | Phase 5 | Bash tool cannot read `~/.ssh/`; credentials are scrubbed from tool output | `Sandbox` trait with Landlock (Linux) / nono (macOS) / NoopSandbox (Windows, with warning). Application-layer `SecurityPolicy` always active: command allowlist, path traversal blocking. `RegexSet` credential scrubbing. Check Landlock kernel version ≥5.13. |
+| **Phase 10** | Runner-isolated sandboxing + security policy + credential scrubbing | `sandbox`, `runtime`, `runner` | Phase 5 | Runtime starts in isolated guest; shell/browser tools are disabled when sidecar channel is unavailable; credentials are scrubbed from tool output | `oxydra-runner` is host-only orchestrator (no direct user code execution). Lightweight tools run in `wasmtime` with explicit mount policy (`shared`/`tmp`/`vault`). Web tools block loopback/link-local/RFC1918/private ranges. Shell/browser run in per-user sidecar sandboxes mounted to `shared` + `tmp`. |
 | **Phase 11** | CLI / TUI interface | `cli` | Phases 5, 8 | Interactive terminal with streaming output, conversation history, Ctrl+C cancel | `ratatui` + `crossterm`. Connects to the runtime directly (no gateway needed). HITL approval prompts for privileged tools. |
 | **Phase 12** | Channel trait + first external channel (e.g. Telegram) | `types`, `channels` | Phase 1 | Messages received from Telegram trigger agent responses; responses sent back | `Channel` trait in `types`: `send`, `listen`, `health_check`. Feature-flagged channel adapters in `channels/`. Each channel maps platform messages to/from internal `Message` type. |
 | **Phase 13** | Multi-agent: subagent spawning + delegation + gateway daemon | `runtime`, `gateway` | Phases 5, 12 | One agent delegates a task to a subagent; gateway serves multiple clients over WebSocket; lane-based per-user queueing works | `SubagentBrief` struct for context handoffs. Per-subagent `CancellationToken` + timeout + cost budget. Gateway multiplexes CLI + channels. `axum` WebSocket server. |
@@ -730,7 +751,7 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 
 - **Phase 1 defines the canonical types** that every subsequent phase uses. `Message`, `ToolCall`, `Context` are stable from day one.
 - **Phase 2 introduces the `Provider` trait** with `#[async_trait]` and `ProviderCaps` — Phase 7 adds a second provider without changing the trait.
-- **Phase 4 defines the `Tool` trait** with `safety_tier()` and `timeout()` — Phase 6 uses these for parallel execution decisions, Phase 10 uses `safety_tier()` for sandbox policy, Phase 15 implements it for MCP.
+- **Phase 4 defines the `Tool` trait** with `safety_tier()` and `timeout()` — Phase 6 uses these for parallel execution decisions, Phase 10 uses `safety_tier()` for `wasmtime` mount/egress policy and sidecar routing, Phase 15 implements it for MCP.
 - **Phase 5 builds the agent loop with `CancellationToken`** — Phase 13 reuses the same token for subagent lifecycle management.
 - **`tracing` is introduced in Phase 1** as simple stderr logging — Phase 14 upgrades the subscriber to OpenTelemetry without changing any instrumentation code.
 - **Phase 8 uses versioned SQL migrations from day one** — Phase 9 adds vector/FTS tables via migration, not schema wipe.

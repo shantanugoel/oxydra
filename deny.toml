@@ -16,6 +16,10 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "Zlib",
+  "ISC",
+  "MIT-0",
+  "OpenSSL",
+  "CDLA-Permissive-2.0",
 ]
 
 [sources]

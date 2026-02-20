@@ -13,11 +13,24 @@ turn_timeout_secs = 60
 max_turns = 8
 # max_cost = 1000.0
 
+[runtime.context_budget]
+trigger_ratio = 0.85
+safety_buffer_tokens = 1024
+
+[runtime.summarization]
+target_ratio = 0.5
+min_turns = 6
+
 [memory]
 enabled = false
 db_path = ".oxydra/memory.db"
 # remote_url = "libsql://your-database.turso.io"
 # auth_token = "set-me-or-use-OXYDRA__MEMORY__AUTH_TOKEN"
+
+[memory.retrieval]
+top_k = 8
+vector_weight = 0.7
+fts_weight = 0.3
 
 [reliability]
 max_attempts = 3

@@ -119,3 +119,43 @@ fn validation_rejects_enabled_remote_memory_without_auth_token() {
         }
     );
 }
+
+#[test]
+fn validation_rejects_invalid_context_budget_ratio() {
+    let mut config = AgentConfig::default();
+    config.runtime.context_budget.trigger_ratio = 1.2;
+    let error = config
+        .validate()
+        .expect_err("invalid trigger ratio should fail validation");
+    assert_eq!(error, ConfigError::InvalidContextBudgetRatio { value: 1.2 });
+}
+
+#[test]
+fn validation_rejects_invalid_summarization_min_turns() {
+    let mut config = AgentConfig::default();
+    config.runtime.summarization.min_turns = 0;
+    let error = config
+        .validate()
+        .expect_err("invalid min_turns should fail validation");
+    assert_eq!(
+        error,
+        ConfigError::InvalidSummarizationMinTurns { value: 0 }
+    );
+}
+
+#[test]
+fn validation_rejects_invalid_retrieval_weight_sum() {
+    let mut config = AgentConfig::default();
+    config.memory.retrieval.vector_weight = 0.5;
+    config.memory.retrieval.fts_weight = 0.2;
+    let error = config
+        .validate()
+        .expect_err("retrieval weights must sum to 1.0");
+    assert_eq!(
+        error,
+        ConfigError::InvalidRetrievalWeightSum {
+            vector_weight: 0.5,
+            fts_weight: 0.2
+        }
+    );
+}

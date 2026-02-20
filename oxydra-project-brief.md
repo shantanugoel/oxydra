@@ -708,6 +708,12 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 | **Phase 14** | Observability: OpenTelemetry traces + metrics + cost reporting | `runtime`, `gateway` | Phases 5, 13 | Full trace of agent turns visible in Jaeger; per-session cost report; tool success/failure rates | Upgrade from `tracing` subscriber to `tracing-opentelemetry` exporter. Add token cost metrics. Trace spans: turn → provider_call → tool_execution. Conversation replay from stored traces. |
 | **Phase 15** | MCP (Model Context Protocol) support | `tools`, `runtime` | Phases 4, 5 | External MCP tool servers discoverable and callable alongside native tools | `McpToolAdapter` implements `Tool` trait, bridging MCP protocol (stdio or HTTP+SSE transport). MCP tools registered in the same tool registry as native tools. Discovery via config or runtime negotiation. |
 
+#### TODOs not covered in above phases yet
+- Document ingestion APIs
+- Background summarisation for better latency with epoch retries
+- User scoped memories/db/sessions?
+- Full schema for models.dev catalog with code for snapshot generation
+
 ### Test Strategy Across All Phases
 
 - Every phase verification gate must be represented by automated tests before phase closure.

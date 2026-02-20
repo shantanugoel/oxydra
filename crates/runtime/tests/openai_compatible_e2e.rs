@@ -78,6 +78,7 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
             turn_timeout: Duration::from_secs(5),
             max_turns: 4,
             max_cost: None,
+            ..RuntimeLimits::default()
         },
     );
 
@@ -179,6 +180,7 @@ async fn live_openrouter_tool_call_smoke() {
             turn_timeout: Duration::from_secs(90),
             max_turns: 6,
             max_cost: Some(8_000.0),
+            ..RuntimeLimits::default()
         },
     );
 

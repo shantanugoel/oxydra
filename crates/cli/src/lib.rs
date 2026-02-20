@@ -13,7 +13,7 @@ use memory::LibsqlMemory;
 use provider::{
     AnthropicConfig, AnthropicProvider, OpenAIConfig, OpenAIProvider, ReliableProvider, RetryPolicy,
 };
-use runtime::RuntimeLimits;
+use runtime::{ContextBudgetLimits, RetrievalLimits, RuntimeLimits, SummarizationLimits};
 use serde::Serialize;
 use thiserror::Error;
 use types::{
@@ -74,9 +74,13 @@ pub struct RuntimeOverrides {
     pub max_turns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<ContextBudgetOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summarization: Option<SummarizationOverrides>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MemoryOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -86,6 +90,34 @@ pub struct MemoryOverrides {
     pub remote_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval: Option<RetrievalOverrides>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ContextBudgetOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_buffer_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SummarizationOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_turns: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RetrievalOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fts_weight: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -235,6 +267,19 @@ pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
         turn_timeout: Duration::from_secs(config.runtime.turn_timeout_secs),
         max_turns: config.runtime.max_turns,
         max_cost: config.runtime.max_cost,
+        context_budget: ContextBudgetLimits {
+            trigger_ratio: config.runtime.context_budget.trigger_ratio,
+            safety_buffer_tokens: config.runtime.context_budget.safety_buffer_tokens,
+        },
+        retrieval: RetrievalLimits {
+            top_k: config.memory.retrieval.top_k,
+            vector_weight: config.memory.retrieval.vector_weight,
+            fts_weight: config.memory.retrieval.fts_weight,
+        },
+        summarization: SummarizationLimits {
+            target_ratio: config.runtime.summarization.target_ratio,
+            min_turns: config.runtime.summarization.min_turns,
+        },
     }
 }
 
@@ -540,6 +585,33 @@ remote_url = "libsql://example-org.turso.io"
             .await
             .expect("disabled memory config should not fail");
         assert!(backend.is_none());
+    }
+
+    #[test]
+    fn runtime_limits_maps_phase9_budget_retrieval_and_summarization_settings() {
+        let mut config = AgentConfig::default();
+        config.runtime.turn_timeout_secs = 30;
+        config.runtime.max_turns = 5;
+        config.runtime.max_cost = Some(3.25);
+        config.runtime.context_budget.trigger_ratio = 0.9;
+        config.runtime.context_budget.safety_buffer_tokens = 2_048;
+        config.memory.retrieval.top_k = 12;
+        config.memory.retrieval.vector_weight = 0.6;
+        config.memory.retrieval.fts_weight = 0.4;
+        config.runtime.summarization.target_ratio = 0.45;
+        config.runtime.summarization.min_turns = 9;
+
+        let limits = runtime_limits(&config);
+        assert_eq!(limits.turn_timeout, Duration::from_secs(30));
+        assert_eq!(limits.max_turns, 5);
+        assert_eq!(limits.max_cost, Some(3.25));
+        assert_eq!(limits.context_budget.trigger_ratio, 0.9);
+        assert_eq!(limits.context_budget.safety_buffer_tokens, 2_048);
+        assert_eq!(limits.retrieval.top_k, 12);
+        assert_eq!(limits.retrieval.vector_weight, 0.6);
+        assert_eq!(limits.retrieval.fts_weight, 0.4);
+        assert_eq!(limits.summarization.target_ratio, 0.45);
+        assert_eq!(limits.summarization.min_turns, 9);
     }
 
     fn temp_dir(label: &str) -> PathBuf {

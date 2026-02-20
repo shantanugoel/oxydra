@@ -5,9 +5,12 @@ use std::{
 
 use serde_json::json;
 use types::{
-    Context, MemoryError, MemoryForgetRequest, MemoryRecallRequest, MemoryRecord,
-    MemoryStoreRequest, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
-    ProviderError, ProviderId, Response, RuntimeError, ToolCall, ToolError, init_tracing,
+    Context, MemoryChunkDocument, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError,
+    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
+    MemoryRecord, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
+    MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
+    ModelDescriptor, ModelId, ProviderCaps, ProviderError, ProviderId, Response, RuntimeError,
+    ToolCall, ToolError, init_tracing,
 };
 
 #[test]
@@ -92,6 +95,66 @@ fn memory_contract_types_serialize_round_trip() {
         sequence: store.sequence,
         payload: store.payload.clone(),
     };
+    let upsert_request = MemoryChunkUpsertRequest {
+        session_id: "session-1".to_owned(),
+        chunks: vec![MemoryChunkDocument {
+            chunk_id: "chunk-1".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            text: "chunk text".to_owned(),
+            file_id: Some(7),
+            sequence_start: Some(1),
+            sequence_end: Some(2),
+            metadata: Some(json!({"role":"assistant"})),
+            embedding: Some(vec![0.1, 0.2, 0.3]),
+            embedding_model: Some("local-embedding".to_owned()),
+        }],
+    };
+    let upsert_response = MemoryChunkUpsertResponse {
+        upserted_chunks: 1,
+        skipped_chunks: 0,
+    };
+    let hybrid_query = MemoryHybridQueryRequest {
+        session_id: "session-1".to_owned(),
+        query: "hello".to_owned(),
+        query_embedding: Some(vec![0.9, 0.1]),
+        top_k: Some(5),
+        vector_weight: Some(0.7),
+        fts_weight: Some(0.3),
+    };
+    let hybrid_result = MemoryHybridQueryResult {
+        chunk_id: "chunk-1".to_owned(),
+        session_id: "session-1".to_owned(),
+        text: "chunk text".to_owned(),
+        score: 0.42,
+        vector_score: 0.5,
+        fts_score: 0.3,
+        file_id: Some(7),
+        sequence_start: Some(1),
+        sequence_end: Some(2),
+        metadata: Some(json!({"source":"conversation"})),
+    };
+    let summary_read = MemorySummaryReadRequest {
+        session_id: "session-1".to_owned(),
+    };
+    let summary_state = MemorySummaryState {
+        session_id: "session-1".to_owned(),
+        epoch: 3,
+        upper_sequence: 40,
+        summary: "summary text".to_owned(),
+        metadata: Some(json!({"model":"gpt"})),
+    };
+    let summary_write = MemorySummaryWriteRequest {
+        session_id: "session-1".to_owned(),
+        expected_epoch: 3,
+        next_epoch: 4,
+        upper_sequence: 42,
+        summary: "new summary".to_owned(),
+        metadata: Some(json!({"reason":"budget"})),
+    };
+    let summary_write_result = MemorySummaryWriteResult {
+        applied: true,
+        current_epoch: 4,
+    };
 
     let store_json = serde_json::to_string(&store).expect("store request should serialize");
     let parsed_store: MemoryStoreRequest =
@@ -112,6 +175,55 @@ fn memory_contract_types_serialize_round_trip() {
     let parsed_record: MemoryRecord =
         serde_json::from_str(&record_json).expect("record should deserialize");
     assert_eq!(parsed_record, record);
+
+    let upsert_request_json =
+        serde_json::to_string(&upsert_request).expect("upsert request should serialize");
+    let parsed_upsert_request: MemoryChunkUpsertRequest =
+        serde_json::from_str(&upsert_request_json).expect("upsert request should deserialize");
+    assert_eq!(parsed_upsert_request, upsert_request);
+
+    let upsert_response_json =
+        serde_json::to_string(&upsert_response).expect("upsert response should serialize");
+    let parsed_upsert_response: MemoryChunkUpsertResponse =
+        serde_json::from_str(&upsert_response_json).expect("upsert response should deserialize");
+    assert_eq!(parsed_upsert_response, upsert_response);
+
+    let hybrid_query_json =
+        serde_json::to_string(&hybrid_query).expect("hybrid query should serialize");
+    let parsed_hybrid_query: MemoryHybridQueryRequest =
+        serde_json::from_str(&hybrid_query_json).expect("hybrid query should deserialize");
+    assert_eq!(parsed_hybrid_query, hybrid_query);
+
+    let hybrid_result_json =
+        serde_json::to_string(&hybrid_result).expect("hybrid result should serialize");
+    let parsed_hybrid_result: MemoryHybridQueryResult =
+        serde_json::from_str(&hybrid_result_json).expect("hybrid result should deserialize");
+    assert_eq!(parsed_hybrid_result, hybrid_result);
+
+    let summary_read_json =
+        serde_json::to_string(&summary_read).expect("summary read should serialize");
+    let parsed_summary_read: MemorySummaryReadRequest =
+        serde_json::from_str(&summary_read_json).expect("summary read should deserialize");
+    assert_eq!(parsed_summary_read, summary_read);
+
+    let summary_state_json =
+        serde_json::to_string(&summary_state).expect("summary state should serialize");
+    let parsed_summary_state: MemorySummaryState =
+        serde_json::from_str(&summary_state_json).expect("summary state should deserialize");
+    assert_eq!(parsed_summary_state, summary_state);
+
+    let summary_write_json =
+        serde_json::to_string(&summary_write).expect("summary write should serialize");
+    let parsed_summary_write: MemorySummaryWriteRequest =
+        serde_json::from_str(&summary_write_json).expect("summary write should deserialize");
+    assert_eq!(parsed_summary_write, summary_write);
+
+    let summary_write_result_json = serde_json::to_string(&summary_write_result)
+        .expect("summary write result should serialize");
+    let parsed_summary_write_result: MemorySummaryWriteResult =
+        serde_json::from_str(&summary_write_result_json)
+            .expect("summary write result should deserialize");
+    assert_eq!(parsed_summary_write_result, summary_write_result);
 }
 
 #[test]

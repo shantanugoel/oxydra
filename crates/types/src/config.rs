@@ -58,19 +58,7 @@ impl AgentConfig {
             });
         }
 
-        if self.runtime.turn_timeout_secs == 0 {
-            return Err(ConfigError::InvalidRuntimeLimit {
-                field: "turn_timeout_secs",
-                value: 0,
-            });
-        }
-
-        if self.runtime.max_turns == 0 {
-            return Err(ConfigError::InvalidRuntimeLimit {
-                field: "max_turns",
-                value: 0,
-            });
-        }
+        self.runtime.validate()?;
 
         if self.reliability.max_attempts == 0 {
             return Err(ConfigError::InvalidReliabilityAttempts { attempts: 0 });
@@ -100,6 +88,10 @@ pub struct RuntimeConfig {
     pub max_turns: usize,
     #[serde(default)]
     pub max_cost: Option<f64>,
+    #[serde(default)]
+    pub context_budget: ContextBudgetConfig,
+    #[serde(default)]
+    pub summarization: SummarizationConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -108,11 +100,97 @@ impl Default for RuntimeConfig {
             turn_timeout_secs: default_turn_timeout_secs(),
             max_turns: default_max_turns(),
             max_cost: None,
+            context_budget: ContextBudgetConfig::default(),
+            summarization: SummarizationConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl RuntimeConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.turn_timeout_secs == 0 {
+            return Err(ConfigError::InvalidRuntimeLimit {
+                field: "turn_timeout_secs",
+                value: 0,
+            });
+        }
+
+        if self.max_turns == 0 {
+            return Err(ConfigError::InvalidRuntimeLimit {
+                field: "max_turns",
+                value: 0,
+            });
+        }
+
+        self.context_budget.validate()?;
+        self.summarization.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextBudgetConfig {
+    #[serde(default = "default_context_budget_trigger_ratio")]
+    pub trigger_ratio: f64,
+    #[serde(default = "default_context_safety_buffer_tokens")]
+    pub safety_buffer_tokens: u64,
+}
+
+impl Default for ContextBudgetConfig {
+    fn default() -> Self {
+        Self {
+            trigger_ratio: default_context_budget_trigger_ratio(),
+            safety_buffer_tokens: default_context_safety_buffer_tokens(),
+        }
+    }
+}
+
+impl ContextBudgetConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !is_ratio(self.trigger_ratio) {
+            return Err(ConfigError::InvalidContextBudgetRatio {
+                value: self.trigger_ratio,
+            });
+        }
+        if self.safety_buffer_tokens == 0 {
+            return Err(ConfigError::InvalidContextSafetyBufferTokens { value: 0 });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummarizationConfig {
+    #[serde(default = "default_summarization_target_ratio")]
+    pub target_ratio: f64,
+    #[serde(default = "default_summarization_min_turns")]
+    pub min_turns: usize,
+}
+
+impl Default for SummarizationConfig {
+    fn default() -> Self {
+        Self {
+            target_ratio: default_summarization_target_ratio(),
+            min_turns: default_summarization_min_turns(),
+        }
+    }
+}
+
+impl SummarizationConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !is_ratio(self.target_ratio) {
+            return Err(ConfigError::InvalidSummarizationTargetRatio {
+                value: self.target_ratio,
+            });
+        }
+        if self.min_turns == 0 {
+            return Err(ConfigError::InvalidSummarizationMinTurns { value: 0 });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -122,6 +200,8 @@ pub struct MemoryConfig {
     pub remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
 }
 
 impl Default for MemoryConfig {
@@ -131,12 +211,15 @@ impl Default for MemoryConfig {
             db_path: default_memory_db_path(),
             remote_url: None,
             auth_token: None,
+            retrieval: RetrievalConfig::default(),
         }
     }
 }
 
 impl MemoryConfig {
     fn validate(&self) -> Result<(), ConfigError> {
+        self.retrieval.validate()?;
+
         if !self.enabled {
             return Ok(());
         }
@@ -164,6 +247,56 @@ impl MemoryConfig {
             return Err(ConfigError::InvalidMemoryDatabasePath);
         }
 
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalConfig {
+    #[serde(default = "default_retrieval_top_k")]
+    pub top_k: usize,
+    #[serde(default = "default_retrieval_vector_weight")]
+    pub vector_weight: f64,
+    #[serde(default = "default_retrieval_fts_weight")]
+    pub fts_weight: f64,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        Self {
+            top_k: default_retrieval_top_k(),
+            vector_weight: default_retrieval_vector_weight(),
+            fts_weight: default_retrieval_fts_weight(),
+        }
+    }
+}
+
+impl RetrievalConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        const WEIGHT_SUM_EPSILON: f64 = 1e-6;
+
+        if self.top_k == 0 {
+            return Err(ConfigError::InvalidRetrievalTopK { value: 0 });
+        }
+        if !is_ratio(self.vector_weight) {
+            return Err(ConfigError::InvalidRetrievalWeight {
+                field: "vector_weight",
+                value: self.vector_weight,
+            });
+        }
+        if !is_ratio(self.fts_weight) {
+            return Err(ConfigError::InvalidRetrievalWeight {
+                field: "fts_weight",
+                value: self.fts_weight,
+            });
+        }
+        let weight_sum = self.vector_weight + self.fts_weight;
+        if (weight_sum - 1.0).abs() > WEIGHT_SUM_EPSILON {
+            return Err(ConfigError::InvalidRetrievalWeightSum {
+                vector_weight: self.vector_weight,
+                fts_weight: self.fts_weight,
+            });
+        }
         Ok(())
     }
 }
@@ -250,7 +383,7 @@ impl Default for ReliabilityConfig {
     }
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq)]
 pub enum ConfigError {
     #[error("unsupported config_version `{version}`; supported major is {supported_major}")]
     UnsupportedConfigVersion {
@@ -265,6 +398,22 @@ pub enum ConfigError {
     EmptyModelForProvider { provider: String },
     #[error("runtime limit `{field}` must be greater than zero; got {value}")]
     InvalidRuntimeLimit { field: &'static str, value: u64 },
+    #[error("runtime context budget trigger_ratio must be within [0.0, 1.0]; got {value}")]
+    InvalidContextBudgetRatio { value: f64 },
+    #[error("runtime context budget safety_buffer_tokens must be greater than zero; got {value}")]
+    InvalidContextSafetyBufferTokens { value: u64 },
+    #[error("runtime summarization target_ratio must be within [0.0, 1.0]; got {value}")]
+    InvalidSummarizationTargetRatio { value: f64 },
+    #[error("runtime summarization min_turns must be greater than zero; got {value}")]
+    InvalidSummarizationMinTurns { value: usize },
+    #[error("memory retrieval top_k must be greater than zero; got {value}")]
+    InvalidRetrievalTopK { value: usize },
+    #[error("memory retrieval weight `{field}` must be within [0.0, 1.0]; got {value}")]
+    InvalidRetrievalWeight { field: &'static str, value: f64 },
+    #[error(
+        "memory retrieval weights must sum to 1.0; got vector_weight={vector_weight} and fts_weight={fts_weight}"
+    )]
+    InvalidRetrievalWeightSum { vector_weight: f64, fts_weight: f64 },
     #[error("reliability max_attempts must be greater than zero; got {attempts}")]
     InvalidReliabilityAttempts { attempts: u32 },
     #[error(
@@ -347,12 +496,40 @@ fn default_turn_timeout_secs() -> u64 {
     60
 }
 
+fn default_context_budget_trigger_ratio() -> f64 {
+    0.85
+}
+
+fn default_context_safety_buffer_tokens() -> u64 {
+    1_024
+}
+
+fn default_summarization_target_ratio() -> f64 {
+    0.5
+}
+
+fn default_summarization_min_turns() -> usize {
+    6
+}
+
 fn default_memory_db_path() -> String {
     ".oxydra/memory.db".to_owned()
 }
 
 fn default_max_turns() -> usize {
     8
+}
+
+fn default_retrieval_top_k() -> usize {
+    8
+}
+
+fn default_retrieval_vector_weight() -> f64 {
+    0.7
+}
+
+fn default_retrieval_fts_weight() -> f64 {
+    0.3
 }
 
 fn default_max_attempts() -> u32 {
@@ -365,4 +542,8 @@ fn default_backoff_base_ms() -> u64 {
 
 fn default_backoff_max_ms() -> u64 {
     2_000
+}
+
+fn is_ratio(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
 }

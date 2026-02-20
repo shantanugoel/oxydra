@@ -21,10 +21,32 @@ pub enum TurnState {
 }
 
 #[derive(Debug, Clone)]
+pub struct ContextBudgetLimits {
+    pub trigger_ratio: f64,
+    pub safety_buffer_tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetrievalLimits {
+    pub top_k: usize,
+    pub vector_weight: f64,
+    pub fts_weight: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SummarizationLimits {
+    pub target_ratio: f64,
+    pub min_turns: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct RuntimeLimits {
     pub turn_timeout: Duration,
     pub max_turns: usize,
     pub max_cost: Option<f64>,
+    pub context_budget: ContextBudgetLimits,
+    pub retrieval: RetrievalLimits,
+    pub summarization: SummarizationLimits,
 }
 
 impl Default for RuntimeLimits {
@@ -33,6 +55,19 @@ impl Default for RuntimeLimits {
             turn_timeout: Duration::from_secs(60),
             max_turns: 8,
             max_cost: None,
+            context_budget: ContextBudgetLimits {
+                trigger_ratio: 0.85,
+                safety_buffer_tokens: 1_024,
+            },
+            retrieval: RetrievalLimits {
+                top_k: 8,
+                vector_weight: 0.7,
+                fts_weight: 0.3,
+            },
+            summarization: SummarizationLimits {
+                target_ratio: 0.5,
+                min_turns: 6,
+            },
         }
     }
 }
@@ -1084,6 +1119,7 @@ mod tests {
                 turn_timeout: Duration::from_secs(1),
                 max_turns: 0,
                 max_cost: None,
+                ..RuntimeLimits::default()
             },
         );
         let mut context = test_context(provider_id, model_id);
@@ -1601,6 +1637,7 @@ mod tests {
                 turn_timeout: Duration::from_secs(2),
                 max_turns: 3,
                 max_cost: None,
+                ..RuntimeLimits::default()
             },
         );
         let mut context = test_context(provider_id, model_id);
@@ -1637,6 +1674,7 @@ mod tests {
                 turn_timeout: Duration::from_millis(10),
                 max_turns: 2,
                 max_cost: None,
+                ..RuntimeLimits::default()
             },
         );
         let mut context = test_context(provider_id, model_id);
@@ -1675,6 +1713,7 @@ mod tests {
                 turn_timeout: Duration::from_millis(5),
                 max_turns: 2,
                 max_cost: None,
+                ..RuntimeLimits::default()
             },
         );
         let mut context = test_context(provider_id, model_id);
@@ -1712,6 +1751,7 @@ mod tests {
                 turn_timeout: Duration::from_secs(1),
                 max_turns: 1,
                 max_cost: None,
+                ..RuntimeLimits::default()
             },
         );
         let mut context = test_context(provider_id, model_id);
@@ -1747,6 +1787,7 @@ mod tests {
                 turn_timeout: Duration::from_secs(1),
                 max_turns: 2,
                 max_cost: Some(5.0),
+                ..RuntimeLimits::default()
             },
         );
         let mut context = test_context(provider_id, model_id);
@@ -1814,6 +1855,13 @@ mod tests {
         assert_eq!(limits.turn_timeout, Duration::from_secs(60));
         assert_eq!(limits.max_turns, 8);
         assert_eq!(limits.max_cost, None);
+        assert_eq!(limits.context_budget.trigger_ratio, 0.85);
+        assert_eq!(limits.context_budget.safety_buffer_tokens, 1_024);
+        assert_eq!(limits.retrieval.top_k, 8);
+        assert_eq!(limits.retrieval.vector_weight, 0.7);
+        assert_eq!(limits.retrieval.fts_weight, 0.3);
+        assert_eq!(limits.summarization.target_ratio, 0.5);
+        assert_eq!(limits.summarization.min_turns, 6);
     }
 
     #[test]
@@ -1822,6 +1870,7 @@ mod tests {
             turn_timeout: Duration::from_secs(15),
             max_turns: 3,
             max_cost: Some(1.25),
+            ..RuntimeLimits::default()
         };
         assert_eq!(limits.max_cost, Some(1.25));
     }

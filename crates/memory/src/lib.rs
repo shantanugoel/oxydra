@@ -14,10 +14,23 @@ const REQUIRED_TABLES: &[&str] = &[
     "sessions",
     "conversation_events",
     "session_state",
+    "files",
+    "chunks",
+    "chunks_vec",
+    "chunks_fts",
 ];
 const REQUIRED_INDEXES: &[&str] = &[
     "idx_conversation_events_session_sequence",
     "idx_sessions_updated_at",
+    "idx_files_session_source_uri",
+    "idx_chunks_session_created_at",
+    "idx_chunks_file_id",
+    "idx_chunks_session_content_hash",
+];
+const REQUIRED_TRIGGERS: &[&str] = &[
+    "trg_chunks_fts_ai",
+    "trg_chunks_fts_au",
+    "trg_chunks_fts_ad",
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +59,50 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: "0005_create_sessions_updated_at_index",
         sql: include_str!("../migrations/0005_create_sessions_updated_at_index.sql"),
+    },
+    Migration {
+        version: "0006_create_files_table",
+        sql: include_str!("../migrations/0006_create_files_table.sql"),
+    },
+    Migration {
+        version: "0007_create_chunks_table",
+        sql: include_str!("../migrations/0007_create_chunks_table.sql"),
+    },
+    Migration {
+        version: "0008_create_chunks_vec_table",
+        sql: include_str!("../migrations/0008_create_chunks_vec_table.sql"),
+    },
+    Migration {
+        version: "0009_create_chunks_fts_table",
+        sql: include_str!("../migrations/0009_create_chunks_fts_table.sql"),
+    },
+    Migration {
+        version: "0010_create_files_session_source_index",
+        sql: include_str!("../migrations/0010_create_files_session_source_index.sql"),
+    },
+    Migration {
+        version: "0011_create_chunks_session_recency_index",
+        sql: include_str!("../migrations/0011_create_chunks_session_recency_index.sql"),
+    },
+    Migration {
+        version: "0012_create_chunks_file_lookup_index",
+        sql: include_str!("../migrations/0012_create_chunks_file_lookup_index.sql"),
+    },
+    Migration {
+        version: "0013_create_chunks_session_hash_index",
+        sql: include_str!("../migrations/0013_create_chunks_session_hash_index.sql"),
+    },
+    Migration {
+        version: "0014_create_chunks_fts_insert_trigger",
+        sql: include_str!("../migrations/0014_create_chunks_fts_insert_trigger.sql"),
+    },
+    Migration {
+        version: "0015_create_chunks_fts_update_trigger",
+        sql: include_str!("../migrations/0015_create_chunks_fts_update_trigger.sql"),
+    },
+    Migration {
+        version: "0016_create_chunks_fts_delete_trigger",
+        sql: include_str!("../migrations/0016_create_chunks_fts_delete_trigger.sql"),
     },
 ];
 
@@ -216,6 +273,8 @@ impl Memory for LibsqlMemory {
             .await
             .map_err(|error| query_error(error.to_string()))?;
         let transaction_result = async {
+            ensure_monotonic_sequence(&conn, request.session_id.as_str(), sequence).await?;
+
             conn.execute(
                 "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
                  VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -403,6 +462,36 @@ async fn rollback_quietly(conn: &Connection) {
     let _ = conn.execute("ROLLBACK TRANSACTION", params![]).await;
 }
 
+async fn ensure_monotonic_sequence(
+    conn: &Connection,
+    session_id: &str,
+    sequence: i64,
+) -> Result<(), MemoryError> {
+    let mut rows = conn
+        .query(
+            "SELECT COALESCE(MAX(sequence), -1) FROM conversation_events WHERE session_id = ?1",
+            params![session_id],
+        )
+        .await
+        .map_err(|error| query_error(error.to_string()))?;
+
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| query_error(error.to_string()))?
+        .ok_or_else(|| query_error("failed to inspect existing sequence state".to_owned()))?;
+    let max_sequence = row
+        .get::<i64>(0)
+        .map_err(|error| query_error(error.to_string()))?;
+
+    if max_sequence >= 0 && sequence <= max_sequence {
+        return Err(query_error(format!(
+            "store sequence {sequence} must be greater than existing max sequence {max_sequence} for session `{session_id}`"
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_local_parent_directory(db_path: &str) -> Result<(), MemoryError> {
     let path = Path::new(db_path);
     let Some(parent) = path
@@ -512,6 +601,13 @@ async fn verify_required_schema(conn: &Connection) -> Result<(), MemoryError> {
             )));
         }
     }
+    for trigger in REQUIRED_TRIGGERS {
+        if !schema_exists(conn, "trigger", trigger).await? {
+            return Err(initialization_error(format!(
+                "required trigger `{trigger}` is missing after migration"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -565,8 +661,8 @@ mod tests {
 
     use super::{
         ConnectionStrategy, LibsqlMemory, MIGRATIONS, REQUIRED_INDEXES, REQUIRED_TABLES,
-        applied_migration_versions, enable_foreign_keys, ensure_migration_bookkeeping,
-        run_pending_migrations, schema_exists,
+        REQUIRED_TRIGGERS, applied_migration_versions, enable_foreign_keys,
+        ensure_migration_bookkeeping, run_pending_migrations, schema_exists,
     };
 
     #[tokio::test]
@@ -584,6 +680,7 @@ mod tests {
             db_path: ".oxydra/memory.db".to_owned(),
             remote_url: Some("libsql://example-org.turso.io".to_owned()),
             auth_token: None,
+            retrieval: types::RetrievalConfig::default(),
         };
         let error = ConnectionStrategy::from_config(&config)
             .expect_err("remote mode without auth token should fail");
@@ -747,6 +844,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_rejects_non_monotonic_sequence_for_session() {
+        let db_path = temp_db_path("non-monotonic-sequence");
+        let config = local_memory_config(&db_path);
+        let backend = LibsqlMemory::from_config(&config)
+            .await
+            .expect("local memory should initialize")
+            .expect("memory should be enabled");
+
+        backend
+            .store(MemoryStoreRequest {
+                session_id: "session-non-monotonic".to_owned(),
+                sequence: 2,
+                payload: json!({"role":"user","content":"second"}),
+            })
+            .await
+            .expect("first event should store");
+
+        let error = backend
+            .store(MemoryStoreRequest {
+                session_id: "session-non-monotonic".to_owned(),
+                sequence: 1,
+                payload: json!({"role":"assistant","content":"first"}),
+            })
+            .await
+            .expect_err("decreasing sequence should fail");
+        assert!(matches!(error, MemoryError::Query { .. }));
+
+        let records = backend
+            .recall(MemoryRecallRequest {
+                session_id: "session-non-monotonic".to_owned(),
+                limit: None,
+            })
+            .await
+            .expect("existing events should remain queryable");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, 2);
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn initialization_applies_pending_migrations_and_verifies_schema() {
         let db_path = temp_db_path("migrations");
         let config = local_memory_config(&db_path);
@@ -807,7 +945,85 @@ mod tests {
                 "missing index `{index}`"
             );
         }
+        for trigger in REQUIRED_TRIGGERS {
+            assert!(
+                schema_exists(&conn, "trigger", trigger)
+                    .await
+                    .expect("schema check should work"),
+                "missing trigger `{trigger}`"
+            );
+        }
 
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn chunks_fts_triggers_keep_index_synchronized() {
+        let db_path = temp_db_path("chunks-fts-sync");
+        let config = local_memory_config(&db_path);
+        let backend = LibsqlMemory::from_config(&config)
+            .await
+            .expect("local memory should initialize")
+            .expect("memory should be enabled");
+
+        backend
+            .store(MemoryStoreRequest {
+                session_id: "session-fts".to_owned(),
+                sequence: 1,
+                payload: json!({"role":"user","content":"seed"}),
+            })
+            .await
+            .expect("seed session should store");
+
+        let conn = backend.connect().expect("backend should connect");
+        conn.execute(
+            "INSERT INTO files (session_id, source_uri, content_hash, metadata_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "session-fts",
+                "conversation://session-fts",
+                "file-hash",
+                "{\"kind\":\"conversation\"}"
+            ],
+        )
+        .await
+        .expect("file row should insert");
+        conn.execute(
+            "INSERT INTO chunks (
+                chunk_id, session_id, file_id, sequence_start, sequence_end, chunk_text, metadata_json, content_hash
+             ) VALUES (
+                ?1, ?2, (SELECT file_id FROM files WHERE session_id = ?2 LIMIT 1), ?3, ?4, ?5, ?6, ?7
+             )",
+            params![
+                "chunk-1",
+                "session-fts",
+                1_i64,
+                1_i64,
+                "hello world",
+                "{\"source\":\"conversation\"}",
+                "chunk-hash-1"
+            ],
+        )
+        .await
+        .expect("chunk row should insert");
+
+        assert_eq!(count_fts_matches(&conn, "hello").await, 1);
+
+        conn.execute(
+            "UPDATE chunks SET chunk_text = ?2, content_hash = ?3 WHERE chunk_id = ?1",
+            params!["chunk-1", "updated content", "chunk-hash-2"],
+        )
+        .await
+        .expect("chunk row should update");
+        assert_eq!(count_fts_matches(&conn, "hello").await, 0);
+        assert_eq!(count_fts_matches(&conn, "updated").await, 1);
+
+        conn.execute("DELETE FROM chunks WHERE chunk_id = ?1", params!["chunk-1"])
+            .await
+            .expect("chunk row should delete");
+        assert_eq!(count_fts_matches(&conn, "updated").await, 0);
+
+        drop(conn);
         let _ = fs::remove_file(db_path);
     }
 
@@ -871,6 +1087,7 @@ mod tests {
             db_path: db_path.to_owned(),
             remote_url: None,
             auth_token: None,
+            retrieval: types::RetrievalConfig::default(),
         }
     }
 
@@ -885,5 +1102,21 @@ mod tests {
             std::process::id()
         ));
         path.to_string_lossy().to_string()
+    }
+
+    async fn count_fts_matches(conn: &libsql::Connection, term: &str) -> i64 {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?1",
+                params![term],
+            )
+            .await
+            .expect("count query should run");
+        let row = rows
+            .next()
+            .await
+            .expect("count row should be readable")
+            .expect("count row should exist");
+        row.get::<i64>(0).expect("count column should be readable")
     }
 }

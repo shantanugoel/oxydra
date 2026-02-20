@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
 use async_trait::async_trait;
 use libsql::{Builder, Connection, Database, params};
@@ -165,10 +165,13 @@ impl LibsqlMemory {
 
     async fn open(strategy: ConnectionStrategy) -> Result<Self, MemoryError> {
         let db = match strategy {
-            ConnectionStrategy::Local { db_path } => Builder::new_local(db_path)
-                .build()
-                .await
-                .map_err(|error| connection_error(error.to_string()))?,
+            ConnectionStrategy::Local { db_path } => {
+                ensure_local_parent_directory(&db_path)?;
+                Builder::new_local(db_path)
+                    .build()
+                    .await
+                    .map_err(|error| connection_error(error.to_string()))?
+            }
             ConnectionStrategy::Remote { url, auth_token } => Builder::new_remote(url, auth_token)
                 .build()
                 .await
@@ -400,6 +403,23 @@ async fn rollback_quietly(conn: &Connection) {
     let _ = conn.execute("ROLLBACK TRANSACTION", params![]).await;
 }
 
+fn ensure_local_parent_directory(db_path: &str) -> Result<(), MemoryError> {
+    let path = Path::new(db_path);
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).map_err(|error| {
+        initialization_error(format!(
+            "failed to prepare local memory directory `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+    Ok(())
+}
+
 async fn enable_foreign_keys(conn: &Connection) -> Result<(), MemoryError> {
     conn.execute("PRAGMA foreign_keys = ON", params![])
         .await
@@ -546,7 +566,7 @@ mod tests {
     use super::{
         ConnectionStrategy, LibsqlMemory, MIGRATIONS, REQUIRED_INDEXES, REQUIRED_TABLES,
         applied_migration_versions, enable_foreign_keys, ensure_migration_bookkeeping,
-        schema_exists,
+        run_pending_migrations, schema_exists,
     };
 
     #[tokio::test]
@@ -568,6 +588,36 @@ mod tests {
         let error = ConnectionStrategy::from_config(&config)
             .expect_err("remote mode without auth token should fail");
         assert!(matches!(error, MemoryError::Initialization { .. }));
+    }
+
+    #[tokio::test]
+    async fn enabled_local_memory_initializes_with_missing_parent_directory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should move forward")
+            .as_nanos();
+        let mut root = env::temp_dir();
+        root.push(format!(
+            "oxydra-memory-local-default-{}-{unique}",
+            std::process::id()
+        ));
+        let db_path = root.join("nested").join("memory.db");
+        let config = local_memory_config(db_path.to_string_lossy().as_ref());
+
+        let backend = LibsqlMemory::from_config(&config)
+            .await
+            .expect("local memory should initialize")
+            .expect("memory should be enabled");
+        backend
+            .store(MemoryStoreRequest {
+                session_id: "session-local-default".to_owned(),
+                sequence: 1,
+                payload: json!({"role":"user","content":"hello"}),
+            })
+            .await
+            .expect("store should succeed for local mode");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -611,6 +661,15 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].sequence, 1);
         assert_eq!(records[1].sequence, 2);
+        let latest = reopened
+            .recall(MemoryRecallRequest {
+                session_id: "session-1".to_owned(),
+                limit: Some(1),
+            })
+            .await
+            .expect("limited recall should be deterministic");
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].sequence, 2);
 
         reopened
             .forget(MemoryForgetRequest {
@@ -627,6 +686,63 @@ mod tests {
             .expect_err("forgotten session should no longer be recallable");
         assert!(matches!(error, MemoryError::NotFound { .. }));
 
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_recent_first_and_honors_limit() {
+        let db_path = temp_db_path("session-list");
+        let config = local_memory_config(&db_path);
+        let backend = LibsqlMemory::from_config(&config)
+            .await
+            .expect("local memory should initialize")
+            .expect("memory should be enabled");
+        backend
+            .store(MemoryStoreRequest {
+                session_id: "session-a".to_owned(),
+                sequence: 1,
+                payload: json!({"role":"user","content":"first"}),
+            })
+            .await
+            .expect("first session should store");
+        backend
+            .store(MemoryStoreRequest {
+                session_id: "session-b".to_owned(),
+                sequence: 1,
+                payload: json!({"role":"user","content":"second"}),
+            })
+            .await
+            .expect("second session should store");
+
+        let conn = backend.connect().expect("backend should connect");
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?2 WHERE session_id = ?1",
+            params!["session-a", "2025-01-01 00:00:01"],
+        )
+        .await
+        .expect("session-a timestamp should update");
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?2 WHERE session_id = ?1",
+            params!["session-b", "2025-01-01 00:00:02"],
+        )
+        .await
+        .expect("session-b timestamp should update");
+
+        let sessions = backend
+            .list_sessions(None)
+            .await
+            .expect("session listing should succeed");
+        assert_eq!(
+            sessions,
+            vec!["session-b".to_owned(), "session-a".to_owned()]
+        );
+        let limited = backend
+            .list_sessions(Some(1))
+            .await
+            .expect("limited session listing should succeed");
+        assert_eq!(limited, vec!["session-b".to_owned()]);
+
+        drop(conn);
         let _ = fs::remove_file(db_path);
     }
 
@@ -692,6 +808,60 @@ mod tests {
             );
         }
 
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn local_mode_surfaces_unreachable_database_path_errors() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should move forward")
+            .as_nanos();
+        let mut blocker = env::temp_dir();
+        blocker.push(format!(
+            "oxydra-memory-local-unreachable-{}-{unique}",
+            std::process::id()
+        ));
+        fs::write(&blocker, "blocker file").expect("blocker file should be writable");
+
+        let db_path = blocker.join("memory.db").to_string_lossy().to_string();
+        let error = match LibsqlMemory::new_local(db_path).await {
+            Ok(_) => panic!("path with file parent should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MemoryError::Initialization { .. }));
+
+        let _ = fs::remove_file(blocker);
+    }
+
+    #[tokio::test]
+    async fn migration_failures_are_surfaced_without_silent_success() {
+        let db_path = temp_db_path("migration-failure");
+        let db = Builder::new_local(db_path.clone())
+            .build()
+            .await
+            .expect("seed db should initialize");
+        let conn = db.connect().expect("seed db should connect");
+        enable_foreign_keys(&conn)
+            .await
+            .expect("seed db should enable fk support");
+        ensure_migration_bookkeeping(&conn)
+            .await
+            .expect("seed db should create migration bookkeeping");
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .expect("test transaction should start");
+
+        let error = run_pending_migrations(&conn)
+            .await
+            .expect_err("nested migration transaction should fail");
+        assert!(matches!(error, MemoryError::Migration { .. }));
+
+        conn.execute("ROLLBACK TRANSACTION", params![])
+            .await
+            .expect("test transaction should roll back");
+        drop(conn);
+        drop(db);
         let _ = fs::remove_file(db_path);
     }
 

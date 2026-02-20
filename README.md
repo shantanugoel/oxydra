@@ -31,6 +31,7 @@ This repository now includes a Phase 7 config loader in `crates/cli` with determ
 - `memory.enabled` (defaults to `false`; when `true`, memory persistence is active)
 - `memory.db_path` (local embedded libSQL path; defaults to `.oxydra/memory.db`)
 - `memory.remote_url` / `memory.auth_token` (optional remote Turso/libSQL mode; token required when URL is set)
+   - NOTE: Memory persists conversation messages as JSON payloads with versioned SQL migrations; define retention/redaction policy before enabling in production environments.
 - `providers.openai.api_key` / `providers.openai.base_url`
 - `providers.anthropic.api_key` / `providers.anthropic.base_url`
 - `reliability.max_attempts` (> 0)

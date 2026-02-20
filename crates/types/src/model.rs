@@ -3,7 +3,7 @@ use std::{fmt, fs, io, path::Path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::ProviderError;
+use crate::{error::ProviderError, tool::FunctionDecl};
 
 const PINNED_MODEL_CATALOG_SNAPSHOT: &str = include_str!("../data/pinned_model_catalog.json");
 
@@ -82,6 +82,8 @@ pub struct Message {
 pub struct Context {
     pub provider: ProviderId,
     pub model: ModelId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<FunctionDecl>,
     #[serde(default)]
     pub messages: Vec<Message>,
 }
@@ -93,6 +95,8 @@ pub struct Response {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

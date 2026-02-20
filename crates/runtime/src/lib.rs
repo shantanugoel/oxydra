@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
 use types::{
     Context, Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError,
-    StreamItem, ToolCall, ToolCallDelta, ToolError,
+    StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -69,8 +69,12 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
+        if context.tools.is_empty() {
+            context.tools = self.tool_registry.schemas();
+        }
         self.validate_guard_preconditions()?;
         let mut turn = 0usize;
+        let mut accumulated_cost = 0.0;
 
         loop {
             if cancellation.is_cancelled() {
@@ -93,6 +97,7 @@ impl AgentRuntime {
                 message,
                 tool_calls: response_tool_calls,
                 finish_reason,
+                usage,
             } = provider_response;
             let mut assistant_message = message;
             let tool_calls = if assistant_message.tool_calls.is_empty() {
@@ -101,6 +106,7 @@ impl AgentRuntime {
                 assistant_message.tool_calls.clone()
             };
             assistant_message.tool_calls = tool_calls.clone();
+            self.enforce_cost_budget(usage.as_ref(), &mut accumulated_cost)?;
             context.messages.push(assistant_message.clone());
 
             if tool_calls.is_empty() {
@@ -110,6 +116,7 @@ impl AgentRuntime {
                     message: assistant_message,
                     tool_calls,
                     finish_reason,
+                    usage,
                 });
             }
 
@@ -128,7 +135,9 @@ impl AgentRuntime {
                 }
                 let arguments =
                     serde_json::to_string(&tool_call.arguments).map_err(ToolError::from)?;
-                let output = self.execute_tool_call(&tool_call.name, &arguments).await?;
+                let output = self
+                    .execute_tool_call(&tool_call.name, &arguments, cancellation)
+                    .await?;
                 context.messages.push(Message {
                     role: MessageRole::Tool,
                     content: Some(output),
@@ -153,6 +162,49 @@ impl AgentRuntime {
         Ok(())
     }
 
+    fn enforce_cost_budget(
+        &self,
+        usage: Option<&UsageUpdate>,
+        accumulated_cost: &mut f64,
+    ) -> Result<(), RuntimeError> {
+        let Some(max_cost) = self.limits.max_cost else {
+            return Ok(());
+        };
+        // Phase 5 interim accounting: use provider-reported token usage as cost units.
+        let turn_cost = usage
+            .and_then(Self::usage_to_cost)
+            .ok_or(RuntimeError::BudgetExceeded)?;
+        *accumulated_cost += turn_cost;
+        if *accumulated_cost > max_cost {
+            return Err(RuntimeError::BudgetExceeded);
+        }
+        Ok(())
+    }
+
+    fn usage_to_cost(usage: &UsageUpdate) -> Option<f64> {
+        let total_tokens = usage.total_tokens.or_else(|| {
+            let prompt = usage.prompt_tokens.unwrap_or(0);
+            let completion = usage.completion_tokens.unwrap_or(0);
+            let aggregated = prompt.saturating_add(completion);
+            (aggregated > 0).then_some(aggregated)
+        })?;
+        Some(total_tokens as f64)
+    }
+
+    fn merge_usage(existing: Option<UsageUpdate>, update: UsageUpdate) -> UsageUpdate {
+        let mut merged = existing.unwrap_or_default();
+        if update.prompt_tokens.is_some() {
+            merged.prompt_tokens = update.prompt_tokens;
+        }
+        if update.completion_tokens.is_some() {
+            merged.completion_tokens = update.completion_tokens;
+        }
+        if update.total_tokens.is_some() {
+            merged.total_tokens = update.total_tokens;
+        }
+        merged
+    }
+
     async fn request_provider_response(
         &self,
         context: &Context,
@@ -163,6 +215,7 @@ impl AgentRuntime {
             match self.stream_response(context, cancellation).await {
                 Ok(response) => return Ok(response),
                 Err(StreamCollectError::Cancelled) => return Err(RuntimeError::Cancelled),
+                Err(StreamCollectError::TurnTimedOut) => return Err(RuntimeError::BudgetExceeded),
                 Err(error) => {
                     tracing::debug!(?error, "streaming path failed; falling back to complete");
                 }
@@ -180,28 +233,44 @@ impl AgentRuntime {
             return Err(StreamCollectError::Cancelled);
         }
 
-        let mut stream = self
-            .provider
-            .stream(context, self.stream_buffer_size)
-            .await
-            .map_err(StreamCollectError::Provider)?;
+        let mut stream = tokio::select! {
+            _ = cancellation.cancelled() => return Err(StreamCollectError::Cancelled),
+            timed = tokio::time::timeout(
+                self.limits.turn_timeout,
+                self.provider.stream(context, self.stream_buffer_size),
+            ) => match timed {
+                Ok(stream) => stream.map_err(StreamCollectError::Provider)?,
+                Err(_) => return Err(StreamCollectError::TurnTimedOut),
+            },
+        };
         let mut text_buffer = String::new();
         let mut tool_calls = ToolCallAccumulator::default();
         let mut finish_reason = None;
+        let mut usage = None;
 
-        while let Some(item) = stream.recv().await {
-            if cancellation.is_cancelled() {
-                return Err(StreamCollectError::Cancelled);
-            }
+        loop {
+            let item = tokio::select! {
+                _ = cancellation.cancelled() => return Err(StreamCollectError::Cancelled),
+                timed = tokio::time::timeout(self.limits.turn_timeout, stream.recv()) => match timed {
+                    Ok(item) => item,
+                    Err(_) => return Err(StreamCollectError::TurnTimedOut),
+                }
+            };
+            let Some(item) = item else {
+                break;
+            };
 
             match item {
                 Ok(StreamItem::Text(text)) => text_buffer.push_str(&text),
                 Ok(StreamItem::ToolCallDelta(delta)) => tool_calls.merge(delta),
                 Ok(StreamItem::FinishReason(reason)) => finish_reason = Some(reason),
+                Ok(StreamItem::UsageUpdate(update)) => {
+                    usage = Some(Self::merge_usage(usage.take(), update));
+                }
                 Ok(StreamItem::ConnectionLost(message)) => {
                     return Err(StreamCollectError::ConnectionLost(message));
                 }
-                Ok(StreamItem::ReasoningDelta(_) | StreamItem::UsageUpdate(_)) => {}
+                Ok(StreamItem::ReasoningDelta(_)) => {}
                 Err(error) => return Err(StreamCollectError::Provider(error)),
             }
         }
@@ -220,6 +289,7 @@ impl AgentRuntime {
             message,
             tool_calls,
             finish_reason,
+            usage,
         })
     }
 
@@ -231,17 +301,28 @@ impl AgentRuntime {
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        self.provider
-            .complete(context)
-            .await
-            .map_err(RuntimeError::from)
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
+            timed = tokio::time::timeout(self.limits.turn_timeout, self.provider.complete(context)) => match timed {
+                Ok(response) => response.map_err(RuntimeError::from),
+                Err(_) => Err(RuntimeError::BudgetExceeded),
+            }
+        }
     }
 
-    async fn execute_tool_call(&self, name: &str, arguments: &str) -> Result<String, RuntimeError> {
-        self.tool_registry
-            .execute(name, arguments)
-            .await
-            .map_err(RuntimeError::from)
+    async fn execute_tool_call(
+        &self,
+        name: &str,
+        arguments: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<String, RuntimeError> {
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
+            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute(name, arguments)) => match timed {
+                Ok(output) => output.map_err(RuntimeError::from),
+                Err(_) => Err(RuntimeError::BudgetExceeded),
+            }
+        }
     }
 }
 
@@ -250,6 +331,7 @@ enum StreamCollectError {
     Provider(ProviderError),
     ConnectionLost(String),
     Cancelled,
+    TurnTimedOut,
 }
 
 #[derive(Debug, Default)]
@@ -317,6 +399,7 @@ impl std::fmt::Display for StreamCollectError {
             Self::Provider(error) => write!(f, "{error}"),
             Self::ConnectionLost(message) => write!(f, "{message}"),
             Self::Cancelled => f.write_str("cancelled"),
+            Self::TurnTimedOut => f.write_str("turn timed out"),
         }
     }
 }
@@ -326,23 +409,52 @@ mod tests {
     use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
     use async_trait::async_trait;
+    use mockall::mock;
     use serde_json::{Value, json};
     use tokio::sync::mpsc;
+    use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
     use types::{
         Context, FunctionDecl, JsonSchema, JsonSchemaType, Message, MessageRole, ModelCatalog,
         ModelDescriptor, ModelId, Provider, ProviderCaps, ProviderError, ProviderId, Response,
-        SafetyTier, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError,
+        SafetyTier, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
     };
 
     use super::{AgentRuntime, RuntimeLimits};
     use tools::ToolRegistry;
+
+    mock! {
+        ProviderContract {}
+        #[async_trait]
+        impl Provider for ProviderContract {
+            fn provider_id(&self) -> &ProviderId;
+            fn model_catalog(&self) -> &ModelCatalog;
+            async fn complete(&self, context: &Context) -> Result<Response, ProviderError>;
+            async fn stream(
+                &self,
+                context: &Context,
+                buffer_size: usize,
+            ) -> Result<types::ProviderStream, ProviderError>;
+        }
+    }
+
+    mock! {
+        ToolContract {}
+        #[async_trait]
+        impl Tool for ToolContract {
+            fn schema(&self) -> FunctionDecl;
+            async fn execute(&self, args: &str) -> Result<String, ToolError>;
+            fn timeout(&self) -> Duration;
+            fn safety_tier(&self) -> SafetyTier;
+        }
+    }
 
     #[derive(Debug)]
     enum ProviderStep {
         Stream(Vec<Result<StreamItem, ProviderError>>),
         StreamFailure(ProviderError),
         Complete(Response),
+        CompleteDelayed { response: Response, delay: Duration },
     }
 
     struct FakeProvider {
@@ -386,6 +498,10 @@ mod tests {
         async fn complete(&self, _context: &Context) -> Result<Response, ProviderError> {
             match self.next_step() {
                 ProviderStep::Complete(response) => Ok(response),
+                ProviderStep::CompleteDelayed { response, delay } => {
+                    sleep(delay).await;
+                    Ok(response)
+                }
                 other => Err(ProviderError::RequestFailed {
                     provider: self.provider_id.clone(),
                     message: format!("unexpected provider step for complete: {other:?}"),
@@ -451,6 +567,50 @@ mod tests {
         fn safety_tier(&self) -> SafetyTier {
             SafetyTier::ReadOnly
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SlowTool;
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn schema(&self) -> FunctionDecl {
+            FunctionDecl::new(
+                "slow_tool",
+                None,
+                JsonSchema::object(std::collections::BTreeMap::new(), vec![]),
+            )
+        }
+
+        async fn execute(&self, _args: &str) -> Result<String, ToolError> {
+            sleep(Duration::from_millis(50)).await;
+            Ok("done".to_owned())
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+
+        fn safety_tier(&self) -> SafetyTier {
+            SafetyTier::ReadOnly
+        }
+    }
+
+    fn mock_provider(
+        provider_id: ProviderId,
+        model_id: ModelId,
+        supports_streaming: bool,
+    ) -> MockProviderContract {
+        let mut provider = MockProviderContract::new();
+        provider
+            .expect_provider_id()
+            .return_const(provider_id.clone());
+        provider.expect_model_catalog().return_const(test_catalog(
+            provider_id,
+            model_id,
+            supports_streaming,
+        ));
+        provider
     }
 
     #[tokio::test]
@@ -596,6 +756,320 @@ mod tests {
         assert!(matches!(error, types::RuntimeError::BudgetExceeded));
     }
 
+    #[tokio::test]
+    async fn run_session_supports_mockall_provider_single_turn_without_tools() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false);
+        provider.expect_stream().never();
+        provider
+            .expect_complete()
+            .times(1)
+            .returning(|_| Ok(assistant_response("mockall response", vec![])));
+
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits::default(),
+        );
+        let mut context = test_context(provider_id, model_id);
+
+        let response = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect("mockall provider should produce one final turn");
+
+        assert_eq!(
+            response.message.content.as_deref(),
+            Some("mockall response")
+        );
+        assert!(response.tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_session_exposes_registered_tools_to_provider_context() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false);
+        provider.expect_stream().never();
+        provider
+            .expect_complete()
+            .times(1)
+            .withf(|context| context.tools.iter().any(|tool| tool.name == "read_file"))
+            .returning(|_| Ok(assistant_response("tool schema seen", vec![])));
+
+        let mut tools = ToolRegistry::default();
+        tools.register("read_file", MockReadTool);
+        let runtime = AgentRuntime::new(Box::new(provider), tools, RuntimeLimits::default());
+        let mut context = test_context(provider_id, model_id);
+
+        let response = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect("runtime should expose tools before provider call");
+
+        assert_eq!(
+            response.message.content.as_deref(),
+            Some("tool schema seen")
+        );
+        assert!(context.tools.iter().any(|tool| tool.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn run_session_supports_mockall_tool_execution() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                        index: 0,
+                        id: Some("call_1".to_owned()),
+                        name: Some("read_file".to_owned()),
+                        arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                    })),
+                    Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+                ]),
+                ProviderStep::Stream(vec![
+                    Ok(StreamItem::Text("tool complete".to_owned())),
+                    Ok(StreamItem::FinishReason("stop".to_owned())),
+                ]),
+            ],
+        );
+
+        let mut tool = MockToolContract::new();
+        tool.expect_schema().return_const(FunctionDecl::new(
+            "read_file",
+            None,
+            JsonSchema::object(std::collections::BTreeMap::new(), vec![]),
+        ));
+        tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
+        tool.expect_timeout().return_const(Duration::from_secs(1));
+        tool.expect_execute()
+            .times(1)
+            .withf(|args| args.contains("\"path\":\"Cargo.toml\""))
+            .returning(|_| Ok("mockall read: Cargo.toml".to_owned()));
+
+        let mut tools = ToolRegistry::default();
+        tools.register("read_file", tool);
+        let runtime = AgentRuntime::new(Box::new(provider), tools, RuntimeLimits::default());
+        let mut context = test_context(provider_id, model_id);
+
+        let response = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect("mockall tool should execute and loop to completion");
+
+        assert_eq!(response.message.content.as_deref(), Some("tool complete"));
+        assert!(matches!(context.messages[2].role, MessageRole::Tool));
+        assert_eq!(
+            context.messages[2].content.as_deref(),
+            Some("mockall read: Cargo.toml")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_session_cancels_before_provider_call() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false);
+        provider.expect_stream().never();
+        provider.expect_complete().never();
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits::default(),
+        );
+        let mut context = test_context(provider_id, model_id);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = runtime
+            .run_session(&mut context, &cancellation)
+            .await
+            .expect_err("cancelled token should short-circuit the turn");
+
+        assert!(matches!(error, types::RuntimeError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn run_session_cancels_during_provider_call() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), false),
+            vec![ProviderStep::CompleteDelayed {
+                response: assistant_response("late response", vec![]),
+                delay: Duration::from_millis(250),
+            }],
+        );
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits {
+                turn_timeout: Duration::from_secs(2),
+                max_turns: 3,
+                max_cost: None,
+            },
+        );
+        let mut context = test_context(provider_id, model_id);
+        let cancellation = CancellationToken::new();
+        let cancellation_clone = cancellation.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(30)).await;
+            cancellation_clone.cancel();
+        });
+
+        let error = runtime
+            .run_session(&mut context, &cancellation)
+            .await
+            .expect_err("provider await should observe cancellation");
+        assert!(matches!(error, types::RuntimeError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn run_session_errors_when_provider_stage_times_out() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), false),
+            vec![ProviderStep::CompleteDelayed {
+                response: assistant_response("late response", vec![]),
+                delay: Duration::from_millis(100),
+            }],
+        );
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits {
+                turn_timeout: Duration::from_millis(10),
+                max_turns: 2,
+                max_cost: None,
+            },
+        );
+        let mut context = test_context(provider_id, model_id);
+
+        let error = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect_err("provider call should be bounded by turn timeout");
+        assert!(matches!(error, types::RuntimeError::BudgetExceeded));
+    }
+
+    #[tokio::test]
+    async fn run_session_errors_when_tool_stage_times_out() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".to_owned()),
+                    name: Some("slow_tool".to_owned()),
+                    arguments: Some("{}".to_owned()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ])],
+        );
+
+        let mut tools = ToolRegistry::default();
+        tools.register("slow_tool", SlowTool);
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            tools,
+            RuntimeLimits {
+                turn_timeout: Duration::from_millis(5),
+                max_turns: 2,
+                max_cost: None,
+            },
+        );
+        let mut context = test_context(provider_id, model_id);
+
+        let error = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect_err("tool stage should respect runtime timeout");
+        assert!(matches!(error, types::RuntimeError::BudgetExceeded));
+    }
+
+    #[tokio::test]
+    async fn run_session_errors_when_max_turn_budget_is_exceeded() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".to_owned()),
+                    name: Some("read_file".to_owned()),
+                    arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ])],
+        );
+        let mut tools = ToolRegistry::default();
+        tools.register("read_file", MockReadTool);
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            tools,
+            RuntimeLimits {
+                turn_timeout: Duration::from_secs(1),
+                max_turns: 1,
+                max_cost: None,
+            },
+        );
+        let mut context = test_context(provider_id, model_id);
+
+        let error = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect_err("runtime should stop after max turn budget");
+        assert!(matches!(error, types::RuntimeError::BudgetExceeded));
+    }
+
+    #[tokio::test]
+    async fn run_session_errors_when_max_cost_budget_is_exceeded() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), true),
+            vec![ProviderStep::Stream(vec![
+                Ok(StreamItem::UsageUpdate(UsageUpdate {
+                    prompt_tokens: Some(4),
+                    completion_tokens: Some(2),
+                    total_tokens: Some(6),
+                })),
+                Ok(StreamItem::Text("expensive turn".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ])],
+        );
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits {
+                turn_timeout: Duration::from_secs(1),
+                max_turns: 2,
+                max_cost: Some(5.0),
+            },
+        );
+        let mut context = test_context(provider_id, model_id);
+
+        let error = runtime
+            .run_session(&mut context, &CancellationToken::new())
+            .await
+            .expect_err("max cost guard should fail fast once budget is exceeded");
+        assert!(matches!(error, types::RuntimeError::BudgetExceeded));
+    }
+
     fn test_catalog(
         provider_id: ProviderId,
         model_id: ModelId,
@@ -622,6 +1096,7 @@ mod tests {
         Context {
             provider: provider_id,
             model: model_id,
+            tools: vec![],
             messages: vec![Message {
                 role: MessageRole::User,
                 content: Some("Read Cargo.toml".to_owned()),
@@ -641,6 +1116,7 @@ mod tests {
             },
             tool_calls,
             finish_reason: Some("stop".to_owned()),
+            usage: None,
         }
     }
 
@@ -677,5 +1153,43 @@ mod tests {
             .expect("empty streamed arguments should normalize to object");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].arguments, json!({}));
+    }
+
+    #[test]
+    fn streamed_tool_calls_require_id_field() {
+        let provider = ProviderId::from("openai");
+        let mut accumulator = super::ToolCallAccumulator::default();
+        accumulator.merge(ToolCallDelta {
+            index: 0,
+            id: None,
+            name: Some("noop".to_owned()),
+            arguments: Some("{}".to_owned()),
+        });
+
+        let error = accumulator
+            .build(&provider)
+            .expect_err("missing id should fail reconstruction");
+        assert!(
+            matches!(error, ProviderError::ResponseParse { message, .. } if message.contains("missing id"))
+        );
+    }
+
+    #[test]
+    fn streamed_tool_calls_require_function_name() {
+        let provider = ProviderId::from("openai");
+        let mut accumulator = super::ToolCallAccumulator::default();
+        accumulator.merge(ToolCallDelta {
+            index: 0,
+            id: Some("call_1".to_owned()),
+            name: None,
+            arguments: Some("{}".to_owned()),
+        });
+
+        let error = accumulator
+            .build(&provider)
+            .expect_err("missing function name should fail reconstruction");
+        assert!(
+            matches!(error, ProviderError::ResponseParse { message, .. } if message.contains("missing function name"))
+        );
     }
 }

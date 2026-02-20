@@ -12,6 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = Context {
         provider: ProviderId::from("openai"),
         model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
         messages: vec![Message {
             role: MessageRole::User,
             content: Some(prompt),

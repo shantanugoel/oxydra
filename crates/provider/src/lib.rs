@@ -6,13 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, Message, MessageRole, ModelCatalog, Provider, ProviderError, ProviderId,
-    ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
+    Context, FunctionDecl, JsonSchema, Message, MessageRole, ModelCatalog, Provider, ProviderError,
+    ProviderId, ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
 };
 
 const OPENAI_PROVIDER_ID: &str = "openai";
-// const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
-const OPENAI_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api";
+const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
 
@@ -265,6 +264,10 @@ impl Provider for OpenAIProvider {
 struct OpenAIChatCompletionRequest {
     model: String,
     messages: Vec<OpenAIChatMessageRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAIRequestToolDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<OpenAIStreamOptions>,
@@ -285,9 +288,17 @@ impl OpenAIChatCompletionRequest {
             .iter()
             .map(OpenAIChatMessageRequest::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+        let tools = context
+            .tools
+            .iter()
+            .map(OpenAIRequestToolDefinition::from)
+            .collect::<Vec<_>>();
+        let tool_choice = (!tools.is_empty()).then_some("auto".to_owned());
         Ok(Self {
             model: context.model.0.clone(),
             messages,
+            tools,
+            tool_choice,
             stream,
             stream_options: stream.then_some(OpenAIStreamOptions {
                 include_usage: true,
@@ -354,6 +365,34 @@ impl TryFrom<&ToolCall> for OpenAIRequestToolCall {
 }
 
 #[derive(Debug, Serialize)]
+struct OpenAIRequestToolDefinition {
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAIRequestFunctionDecl,
+}
+
+impl From<&FunctionDecl> for OpenAIRequestToolDefinition {
+    fn from(value: &FunctionDecl) -> Self {
+        Self {
+            kind: "function".to_owned(),
+            function: OpenAIRequestFunctionDecl {
+                name: value.name.clone(),
+                description: value.description.clone(),
+                parameters: value.parameters.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIRequestFunctionDecl {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: JsonSchema,
+}
+
+#[derive(Debug, Serialize)]
 struct OpenAIRequestFunction {
     name: String,
     arguments: String,
@@ -362,6 +401,8 @@ struct OpenAIRequestFunction {
 #[derive(Debug, Deserialize)]
 struct OpenAIChatCompletionResponse {
     choices: Vec<OpenAIChoice>,
+    #[serde(default)]
+    usage: Option<OpenAIUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,20 +558,24 @@ fn normalize_openai_response(
     response: OpenAIChatCompletionResponse,
     provider: &ProviderId,
 ) -> Result<Response, ProviderError> {
-    let choice =
-        response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| ProviderError::ResponseParse {
-                provider: provider.clone(),
-                message: "OpenAI response did not contain any choices".to_owned(),
-            })?;
+    let OpenAIChatCompletionResponse { choices, usage } = response;
+    let choice = choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| ProviderError::ResponseParse {
+            provider: provider.clone(),
+            message: "OpenAI response did not contain any choices".to_owned(),
+        })?;
     let message = normalize_openai_message(choice.message, provider)?;
     Ok(Response {
         tool_calls: message.tool_calls.clone(),
         message,
         finish_reason: choice.finish_reason,
+        usage: usage.map(|usage| UsageUpdate {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        }),
     })
 }
 
@@ -823,6 +868,7 @@ mod tests {
         net::TcpListener,
     };
 
+    use insta::assert_json_snapshot;
     use serde_json::json;
     use types::{
         ModelDescriptor, ModelId, Provider, ProviderCaps, StreamItem, ToolCallDelta, UsageUpdate,
@@ -861,10 +907,26 @@ mod tests {
     }
 
     #[test]
+    fn default_openai_config_uses_openai_base_url() {
+        assert_eq!(OpenAIConfig::default().base_url, OPENAI_DEFAULT_BASE_URL);
+    }
+
+    #[test]
     fn request_normalization_maps_messages_and_tools() {
         let context = Context {
             provider: ProviderId::from("openai"),
             model: ModelId::from("gpt-4o-mini"),
+            tools: vec![FunctionDecl::new(
+                "read_file",
+                Some("Read UTF-8 text from a file".to_owned()),
+                JsonSchema::object(
+                    std::collections::BTreeMap::from([(
+                        "path".to_owned(),
+                        JsonSchema::new(types::JsonSchemaType::String),
+                    )]),
+                    vec!["path".to_owned()],
+                ),
+            )],
             messages: vec![
                 Message {
                     role: MessageRole::User,
@@ -894,9 +956,39 @@ mod tests {
             request_json["messages"][1]["tool_calls"][0]["function"]["name"],
             "read_file"
         );
+        assert_eq!(request_json["tools"][0]["type"], "function");
+        assert_eq!(request_json["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(request_json["tool_choice"], "auto");
         assert_eq!(
             request_json["messages"][1]["tool_calls"][0]["function"]["arguments"],
             "{\"path\":\"Cargo.toml\"}"
+        );
+    }
+
+    #[test]
+    fn streaming_request_normalization_snapshot_is_stable() {
+        let request =
+            OpenAIChatCompletionRequest::from_stream_context(&test_context("gpt-4o-mini"))
+                .expect("request should normalize");
+        let request_json = serde_json::to_value(request).expect("request should serialize");
+
+        assert_json_snapshot!(
+            request_json,
+            @r###"
+        {
+          "messages": [
+            {
+              "content": "Ping",
+              "role": "user"
+            }
+          ],
+          "model": "gpt-4o-mini",
+          "stream": true,
+          "stream_options": {
+            "include_usage": true
+          }
+        }
+        "###
         );
     }
 
@@ -1183,12 +1275,25 @@ data: [DONE]
                 },
                 finish_reason: Some("tool_calls".to_owned()),
             }],
+            usage: Some(OpenAIUsage {
+                prompt_tokens: Some(5),
+                completion_tokens: Some(2),
+                total_tokens: Some(7),
+            }),
         };
 
         let normalized =
             normalize_openai_response(response, &ProviderId::from("openai")).expect("should parse");
         assert_eq!(normalized.message.role, MessageRole::Assistant);
         assert_eq!(normalized.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            normalized.usage,
+            Some(UsageUpdate {
+                prompt_tokens: Some(5),
+                completion_tokens: Some(2),
+                total_tokens: Some(7),
+            })
+        );
         assert_eq!(normalized.tool_calls.len(), 1);
         assert_eq!(normalized.tool_calls[0].name, "read_file");
         assert_eq!(
@@ -1275,6 +1380,7 @@ data: [DONE]
     }
 
     #[test]
+    #[ignore = "requires OPENAI_API_KEY and network access"]
     fn live_openai_smoke_normalizes_response() {
         let _api_key = env::var("OPENAI_API_KEY")
             .expect("set OPENAI_API_KEY to run live_openai_smoke_normalizes_response");
@@ -1313,6 +1419,7 @@ data: [DONE]
         Context {
             provider: ProviderId::from("openai"),
             model: ModelId::from(model),
+            tools: vec![],
             messages: vec![Message {
                 role: MessageRole::User,
                 content: Some(prompt.to_owned()),

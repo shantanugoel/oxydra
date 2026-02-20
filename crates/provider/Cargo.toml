@@ -13,4 +13,5 @@ tracing = "0.1"
 types = { path = "../types" }
 
 [dev-dependencies]
+insta = { version = "1", features = ["json"] }
 tokio = { version = "1", features = ["full"] }

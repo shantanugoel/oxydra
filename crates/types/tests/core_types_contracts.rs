@@ -27,6 +27,7 @@ fn serde_round_trip_for_phase1_types() {
     let context = Context {
         provider: ProviderId::from("openai"),
         model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
         messages: vec![message.clone()],
     };
 
@@ -34,6 +35,7 @@ fn serde_round_trip_for_phase1_types() {
         message,
         tool_calls: vec![tool_call],
         finish_reason: Some("stop".to_owned()),
+        usage: None,
     };
 
     let context_json = serde_json::to_string(&context).expect("context should serialize");
@@ -118,10 +120,17 @@ fn pinned_catalog_snapshot_parses_and_validates_known_model() {
         !descriptor.provider.0.trim().is_empty() && !descriptor.model.0.trim().is_empty()
     }));
 
+    let openai_provider = ProviderId::from("openai");
+    let known_model = catalog
+        .models
+        .iter()
+        .find(|descriptor| descriptor.provider == openai_provider)
+        .map(|descriptor| descriptor.model.clone())
+        .expect("pinned snapshot should include at least one openai model");
     let descriptor = catalog
-        .validate(&ProviderId::from("openai"), &ModelId::from("gpt-4o-mini"))
+        .validate(&openai_provider, &known_model)
         .expect("known pinned model should validate");
-    assert_eq!(descriptor.model, ModelId::from("gpt-4o-mini"));
+    assert_eq!(descriptor.model, known_model);
 }
 
 #[test]

@@ -1,0 +1,29 @@
+# Example Oxydra workspace configuration.
+# Copy this to ./.oxydra/agent.toml and customize as needed.
+
+config_version = "1.0.0"
+
+[selection]
+# Set to "openai" or "anthropic".
+provider = "openai"
+model = "gpt-4o-mini"
+
+[runtime]
+turn_timeout_secs = 60
+max_turns = 8
+# max_cost = 1000.0
+
+[reliability]
+max_attempts = 3
+backoff_base_ms = 250
+backoff_max_ms = 2000
+jitter = false
+
+[providers.openai]
+base_url = "https://api.openai.com"
+# api_key = "set-me-or-use-OPENAI_API_KEY"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+# api_key = "set-me-or-use-ANTHROPIC_API_KEY"
+

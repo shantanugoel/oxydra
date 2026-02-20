@@ -131,6 +131,18 @@ fn pinned_catalog_snapshot_parses_and_validates_known_model() {
         .validate(&openai_provider, &known_model)
         .expect("known pinned model should validate");
     assert_eq!(descriptor.model, known_model);
+
+    let anthropic_provider = ProviderId::from("anthropic");
+    let anthropic_model = catalog
+        .models
+        .iter()
+        .find(|descriptor| descriptor.provider == anthropic_provider)
+        .map(|descriptor| descriptor.model.clone())
+        .expect("pinned snapshot should include at least one anthropic model");
+    let anthropic_descriptor = catalog
+        .validate(&anthropic_provider, &anthropic_model)
+        .expect("known anthropic pinned model should validate");
+    assert_eq!(anthropic_descriptor.model, anthropic_model);
 }
 
 #[test]

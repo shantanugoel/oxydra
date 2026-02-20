@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+figment = { version = "0.10", features = ["env", "toml"] }
+provider = { path = "../provider" }
+runtime = { path = "../runtime" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+types = { path = "../types" }

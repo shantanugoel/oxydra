@@ -1,14 +1,506 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use std::{
+    env, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use figment::{
+    Figment,
+    providers::{Env, Format, Serialized, Toml},
+};
+use provider::{
+    AnthropicConfig, AnthropicProvider, OpenAIConfig, OpenAIProvider, ReliableProvider, RetryPolicy,
+};
+use runtime::RuntimeLimits;
+use serde::Serialize;
+use thiserror::Error;
+use types::{
+    ANTHROPIC_PROVIDER_ID, AgentConfig, ConfigError, OPENAI_PROVIDER_ID, Provider, ProviderError,
+};
+
+const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
+const USER_CONFIG_DIR: &str = ".config/oxydra";
+const WORKSPACE_CONFIG_DIR: &str = ".oxydra";
+const AGENT_CONFIG_FILE: &str = "agent.toml";
+const PROVIDERS_CONFIG_FILE: &str = "providers.toml";
+const CONFIG_ENV_PREFIX: &str = "OXYDRA__";
+const DEFAULT_PROFILE: &str = "default";
+
+#[derive(Debug, Clone)]
+pub struct ConfigSearchPaths {
+    pub system_dir: PathBuf,
+    pub user_dir: Option<PathBuf>,
+    pub workspace_dir: PathBuf,
+}
+
+impl ConfigSearchPaths {
+    pub fn discover() -> Result<Self, CliError> {
+        let workspace_dir = env::current_dir()?.join(WORKSPACE_CONFIG_DIR);
+        let user_dir = env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(USER_CONFIG_DIR));
+        Ok(Self {
+            system_dir: PathBuf::from(SYSTEM_CONFIG_DIR),
+            user_dir,
+            workspace_dir,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct CliOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub providers: Option<ProviderOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reliability: Option<ReliabilityOverrides>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RuntimeOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cost: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SelectionOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ProviderOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAIProviderOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anthropic: Option<AnthropicProviderOverrides>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OpenAIProviderOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AnthropicProviderOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ReliabilityOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backoff_base_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backoff_max_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<bool>,
+}
+
+#[derive(Debug, Error)]
+pub enum CliError {
+    #[error("failed to resolve configuration path: {0}")]
+    Io(#[from] io::Error),
+    #[error("failed to load configuration: {0}")]
+    ConfigExtract(#[source] Box<figment::Error>),
+    #[error(transparent)]
+    ConfigValidation(#[from] ConfigError),
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+    #[error("unsupported provider `{provider}` in provider selection")]
+    UnsupportedProvider { provider: String },
+}
+
+impl From<figment::Error> for CliError {
+    fn from(value: figment::Error) -> Self {
+        Self::ConfigExtract(Box::new(value))
+    }
+}
+
+pub fn load_agent_config(
+    profile: Option<&str>,
+    cli_overrides: CliOverrides,
+) -> Result<AgentConfig, CliError> {
+    let paths = ConfigSearchPaths::discover()?;
+    load_agent_config_with_paths(&paths, profile, cli_overrides)
+}
+
+pub fn load_agent_config_with_paths(
+    paths: &ConfigSearchPaths,
+    profile: Option<&str>,
+    cli_overrides: CliOverrides,
+) -> Result<AgentConfig, CliError> {
+    let selected_profile = profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_PROFILE);
+
+    let mut figment = Figment::from(Serialized::defaults(AgentConfig::default()));
+    figment = merge_directory(figment, &paths.system_dir, selected_profile);
+    if let Some(user_dir) = &paths.user_dir {
+        figment = merge_directory(figment, user_dir, selected_profile);
+    }
+    figment = merge_directory(figment, &paths.workspace_dir, selected_profile);
+    figment = figment.merge(Env::prefixed(CONFIG_ENV_PREFIX).split("__"));
+    figment = figment.merge(Serialized::defaults(cli_overrides));
+
+    let config: AgentConfig = figment.select(selected_profile).extract()?;
+    config.validate()?;
+    Ok(config)
+}
+
+pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, CliError> {
+    config.validate()?;
+
+    let inner: Box<dyn Provider> = match config.selection.provider.0.as_str() {
+        OPENAI_PROVIDER_ID => Box::new(OpenAIProvider::new(OpenAIConfig {
+            api_key: config.providers.openai.api_key.clone(),
+            base_url: config.providers.openai.base_url.clone(),
+        })?),
+        ANTHROPIC_PROVIDER_ID => Box::new(AnthropicProvider::new(AnthropicConfig {
+            api_key: config.providers.anthropic.api_key.clone(),
+            base_url: config.providers.anthropic.base_url.clone(),
+            ..AnthropicConfig::default()
+        })?),
+        provider => {
+            return Err(CliError::UnsupportedProvider {
+                provider: provider.to_owned(),
+            });
+        }
+    };
+
+    inner.capabilities(&config.selection.model)?;
+
+    Ok(ReliableProvider::new(
+        inner,
+        RetryPolicy {
+            max_attempts: config.reliability.max_attempts,
+            backoff_base: Duration::from_millis(config.reliability.backoff_base_ms),
+            backoff_max: Duration::from_millis(config.reliability.backoff_max_ms),
+        },
+    ))
+}
+
+pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, CliError> {
+    Ok(Box::new(build_reliable_provider(config)?))
+}
+
+pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
+    RuntimeLimits {
+        turn_timeout: Duration::from_secs(config.runtime.turn_timeout_secs),
+        max_turns: config.runtime.max_turns,
+        max_cost: config.runtime.max_cost,
+    }
+}
+
+fn merge_directory(mut figment: Figment, directory: &Path, selected_profile: &str) -> Figment {
+    for file_name in [AGENT_CONFIG_FILE, PROVIDERS_CONFIG_FILE] {
+        let path = directory.join(file_name);
+        if path.is_file() {
+            figment = if file_uses_profiles(&path, selected_profile) {
+                figment.merge(Toml::file(path).nested())
+            } else {
+                figment.merge(Toml::file(path))
+            };
+        }
+    }
+    figment
+}
+
+fn file_uses_profiles(path: &Path, selected_profile: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return false;
+    };
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+
+    table.contains_key("default")
+        || table.contains_key("global")
+        || table.contains_key(selected_profile)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        sync::{Mutex, OnceLock},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use types::{ModelId, ProviderId};
+
     use super::*;
 
+    fn test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[derive(Debug)]
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            // SAFETY: tests hold a process-wide mutex while mutating env to avoid races.
+            unsafe { env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = env::var(key).ok();
+            // SAFETY: tests hold a process-wide mutex while mutating env to avoid races.
+            unsafe { env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: tests hold a process-wide mutex while mutating env to avoid races.
+                unsafe { env::set_var(self.key, value) };
+            } else {
+                // SAFETY: tests hold a process-wide mutex while mutating env to avoid races.
+                unsafe { env::remove_var(self.key) };
+            }
+        }
+    }
+
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn load_agent_config_honors_file_env_and_cli_precedence() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("precedence");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.system_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[runtime]
+max_turns = 2
+"#,
+        );
+        write_config(
+            &paths.user_dir.clone().expect("user dir should be present"),
+            AGENT_CONFIG_FILE,
+            r#"
+[runtime]
+max_turns = 3
+"#,
+        );
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+[runtime]
+max_turns = 4
+"#,
+        );
+        write_config(
+            &paths.workspace_dir,
+            PROVIDERS_CONFIG_FILE,
+            r#"
+[providers.openai]
+base_url = "https://workspace-openai.example"
+"#,
+        );
+
+        let _clear_runtime = EnvGuard::remove("OXYDRA__RUNTIME__MAX_TURNS");
+        let _clear_openai_base_url = EnvGuard::remove("OXYDRA__PROVIDERS__OPENAI__BASE_URL");
+        let _runtime_override = EnvGuard::set("OXYDRA__RUNTIME__MAX_TURNS", "5");
+        let _openai_base_url_override = EnvGuard::set(
+            "OXYDRA__PROVIDERS__OPENAI__BASE_URL",
+            "https://env-openai.example",
+        );
+
+        let config = load_agent_config_with_paths(
+            &paths,
+            None,
+            CliOverrides {
+                runtime: Some(RuntimeOverrides {
+                    max_turns: Some(6),
+                    ..RuntimeOverrides::default()
+                }),
+                ..CliOverrides::default()
+            },
+        )
+        .expect("config should load");
+
+        assert_eq!(config.runtime.max_turns, 6);
+        assert_eq!(
+            config.providers.openai.base_url,
+            "https://env-openai.example"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_agent_config_applies_profile_overrides() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("profile");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+[default]
+config_version = "1.0.0"
+[default.selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[default.runtime]
+max_turns = 3
+[prod.runtime]
+max_turns = 11
+"#,
+        );
+
+        let config = load_agent_config_with_paths(&paths, Some("prod"), CliOverrides::default())
+            .expect("config should load");
+        assert_eq!(config.runtime.max_turns, 11);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_agent_config_maps_nested_env_keys() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("env-nesting");
+        let paths = test_paths(&root);
+
+        let _clear_selection_provider = EnvGuard::remove("OXYDRA__SELECTION__PROVIDER");
+        let _clear_selection_model = EnvGuard::remove("OXYDRA__SELECTION__MODEL");
+        let _clear_anthropic_base_url = EnvGuard::remove("OXYDRA__PROVIDERS__ANTHROPIC__BASE_URL");
+        let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "anthropic");
+        let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "claude-3-5-haiku-latest");
+        let _anthropic_base_url = EnvGuard::set(
+            "OXYDRA__PROVIDERS__ANTHROPIC__BASE_URL",
+            "https://anthropic-env.example",
+        );
+
+        let config = load_agent_config_with_paths(&paths, None, CliOverrides::default())
+            .expect("config should load");
+
+        assert_eq!(config.selection.provider, ProviderId::from("anthropic"));
+        assert_eq!(
+            config.providers.anthropic.base_url,
+            "https://anthropic-env.example"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_agent_config_rejects_unsupported_config_version() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("version");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+config_version = "2.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+"#,
+        );
+
+        let error = load_agent_config_with_paths(&paths, None, CliOverrides::default())
+            .expect_err("unsupported version should fail");
+        assert!(matches!(
+            error,
+            CliError::ConfigValidation(ConfigError::UnsupportedConfigVersion { .. })
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_factory_switches_by_config_selection() {
+        let mut openai_config = AgentConfig::default();
+        openai_config.selection.provider = ProviderId::from("openai");
+        openai_config.selection.model = ModelId::from("gpt-4o-mini");
+        openai_config.providers.openai.api_key = Some("openai-test-key".to_owned());
+        openai_config.reliability.max_attempts = 4;
+        openai_config.reliability.backoff_base_ms = 10;
+        openai_config.reliability.backoff_max_ms = 100;
+        let reliable_openai =
+            build_reliable_provider(&openai_config).expect("openai provider should be constructed");
+        assert_eq!(reliable_openai.provider_id(), &ProviderId::from("openai"));
+        assert_eq!(reliable_openai.retry_policy().max_attempts, 4);
+
+        let mut anthropic_config = AgentConfig::default();
+        anthropic_config.selection.provider = ProviderId::from("anthropic");
+        anthropic_config.selection.model = ModelId::from("claude-3-5-haiku-latest");
+        anthropic_config.providers.anthropic.api_key = Some("anthropic-test-key".to_owned());
+        let provider = build_provider(&anthropic_config).expect("anthropic provider should build");
+        assert_eq!(provider.provider_id(), &ProviderId::from("anthropic"));
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let mut path = env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        path.push(format!(
+            "oxydra-cli-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("temp dir should be creatable");
+        path
+    }
+
+    fn test_paths(root: &Path) -> ConfigSearchPaths {
+        ConfigSearchPaths {
+            system_dir: root.join("system"),
+            user_dir: Some(root.join("user")),
+            workspace_dir: root.join("workspace"),
+        }
+    }
+
+    fn write_config(dir: &Path, file_name: &str, content: &str) {
+        fs::create_dir_all(dir).expect("config dir should be creatable");
+        fs::write(dir.join(file_name), content.trim_start())
+            .expect("config file should be writable");
     }
 }

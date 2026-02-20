@@ -28,6 +28,9 @@ This repository now includes a Phase 7 config loader in `crates/cli` with determ
 - `runtime.turn_timeout_secs` (> 0)
 - `runtime.max_turns` (> 0)
 - `runtime.max_cost` (optional)
+- `memory.enabled` (defaults to `false`; when `true`, memory persistence is active)
+- `memory.db_path` (local embedded libSQL path; defaults to `.oxydra/memory.db`)
+- `memory.remote_url` / `memory.auth_token` (optional remote Turso/libSQL mode; token required when URL is set)
 - `providers.openai.api_key` / `providers.openai.base_url`
 - `providers.anthropic.api_key` / `providers.anthropic.base_url`
 - `reliability.max_attempts` (> 0)
@@ -41,6 +44,8 @@ Use `OXYDRA__` prefix and `__` as path separators:
 - `OXYDRA__SELECTION__PROVIDER=anthropic`
 - `OXYDRA__SELECTION__MODEL=claude-3-5-haiku-latest`
 - `OXYDRA__RUNTIME__MAX_TURNS=12`
+- `OXYDRA__MEMORY__ENABLED=true`
+- `OXYDRA__MEMORY__AUTH_TOKEN=...`
 - `OXYDRA__PROVIDERS__OPENAI__BASE_URL=https://openrouter.ai/api`
 
 ## Credentials resolution
@@ -66,4 +71,3 @@ model = "claude-3-5-sonnet-latest"
 ```
 
 When a profile is selected, values are resolved from that profile with fallback to `default`.
-

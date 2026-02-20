@@ -1,5 +1,5 @@
 use types::{
-    AgentConfig, ConfigError, ModelId, ProviderId, SUPPORTED_CONFIG_MAJOR_VERSION,
+    AgentConfig, ConfigError, MemoryConfig, ModelId, ProviderId, SUPPORTED_CONFIG_MAJOR_VERSION,
     validate_config_version,
 };
 
@@ -8,6 +8,7 @@ fn default_agent_config_is_valid() {
     let config = AgentConfig::default();
     assert_eq!(config.selection.provider, ProviderId::from("openai"));
     assert_eq!(config.selection.model, ModelId::from("gpt-4o-mini"));
+    assert_eq!(config.memory, MemoryConfig::default());
     assert!(config.validate().is_ok());
 }
 
@@ -87,6 +88,34 @@ fn validation_rejects_invalid_reliability_bounds() {
         ConfigError::InvalidReliabilityBackoff {
             base_ms: 10_000,
             max_ms: 100,
+        }
+    );
+}
+
+#[test]
+fn validation_rejects_enabled_local_memory_with_empty_database_path() {
+    let mut config = AgentConfig::default();
+    config.memory.enabled = true;
+    config.memory.db_path = "  ".to_owned();
+    let error = config
+        .validate()
+        .expect_err("empty local db path should fail validation");
+    assert_eq!(error, ConfigError::InvalidMemoryDatabasePath);
+}
+
+#[test]
+fn validation_rejects_enabled_remote_memory_without_auth_token() {
+    let mut config = AgentConfig::default();
+    config.memory.enabled = true;
+    config.memory.remote_url = Some("libsql://example-org.turso.io".to_owned());
+    config.memory.auth_token = Some("   ".to_owned());
+    let error = config
+        .validate()
+        .expect_err("remote mode without auth token should fail validation");
+    assert_eq!(
+        error,
+        ConfigError::MissingMemoryAuthToken {
+            remote_url: "libsql://example-org.turso.io".to_owned()
         }
     );
 }

@@ -5,9 +5,13 @@ edition = "2024"
 
 [dependencies]
 figment = { version = "0.10", features = ["env", "toml"] }
+memory = { path = "../memory" }
 provider = { path = "../provider" }
 runtime = { path = "../runtime" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"
 types = { path = "../types" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

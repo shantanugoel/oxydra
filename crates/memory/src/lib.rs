@@ -1,7 +1,361 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
+use libsql::{Builder, Connection, Database, params};
+use serde_json::json;
 use types::{
-    Memory, MemoryError, MemoryForgetRequest, MemoryRecallRequest, MemoryRecord, MemoryStoreRequest,
+    Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryRecallRequest, MemoryRecord,
+    MemoryStoreRequest,
 };
+
+const MIGRATION_BOOKKEEPING_TABLE: &str = "memory_migrations";
+const REQUIRED_TABLES: &[&str] = &[
+    MIGRATION_BOOKKEEPING_TABLE,
+    "sessions",
+    "conversation_events",
+    "session_state",
+];
+const REQUIRED_INDEXES: &[&str] = &[
+    "idx_conversation_events_session_sequence",
+    "idx_sessions_updated_at",
+];
+
+#[derive(Debug, Clone, Copy)]
+struct Migration {
+    version: &'static str,
+    sql: &'static str,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: "0001_create_sessions_table",
+        sql: include_str!("../migrations/0001_create_sessions_table.sql"),
+    },
+    Migration {
+        version: "0002_create_conversation_events_table",
+        sql: include_str!("../migrations/0002_create_conversation_events_table.sql"),
+    },
+    Migration {
+        version: "0003_create_conversation_events_restore_index",
+        sql: include_str!("../migrations/0003_create_conversation_events_restore_index.sql"),
+    },
+    Migration {
+        version: "0004_create_session_state_table",
+        sql: include_str!("../migrations/0004_create_session_state_table.sql"),
+    },
+    Migration {
+        version: "0005_create_sessions_updated_at_index",
+        sql: include_str!("../migrations/0005_create_sessions_updated_at_index.sql"),
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectionStrategy {
+    Local { db_path: String },
+    Remote { url: String, auth_token: String },
+}
+
+impl ConnectionStrategy {
+    fn from_config(config: &MemoryConfig) -> Result<Option<Self>, MemoryError> {
+        if !config.enabled {
+            return Ok(None);
+        }
+
+        if let Some(url) = config
+            .remote_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let auth_token = config
+                .auth_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    initialization_error(format!(
+                        "remote memory mode requires auth_token when remote_url is set ({url})"
+                    ))
+                })?;
+            return Ok(Some(Self::Remote {
+                url: url.to_owned(),
+                auth_token: auth_token.to_owned(),
+            }));
+        }
+
+        let db_path = config.db_path.trim();
+        if db_path.is_empty() {
+            return Err(initialization_error(
+                "local memory mode requires a non-empty db_path".to_owned(),
+            ));
+        }
+
+        Ok(Some(Self::Local {
+            db_path: db_path.to_owned(),
+        }))
+    }
+}
+
+pub struct LibsqlMemory {
+    db: Database,
+}
+
+impl LibsqlMemory {
+    pub async fn from_config(config: &MemoryConfig) -> Result<Option<Self>, MemoryError> {
+        let Some(strategy) = ConnectionStrategy::from_config(config)? else {
+            return Ok(None);
+        };
+        Self::open(strategy).await.map(Some)
+    }
+
+    pub async fn new_local(db_path: impl Into<String>) -> Result<Self, MemoryError> {
+        Self::open(ConnectionStrategy::Local {
+            db_path: db_path.into(),
+        })
+        .await
+    }
+
+    pub async fn new_remote(
+        url: impl Into<String>,
+        auth_token: impl Into<String>,
+    ) -> Result<Self, MemoryError> {
+        Self::open(ConnectionStrategy::Remote {
+            url: url.into(),
+            auth_token: auth_token.into(),
+        })
+        .await
+    }
+
+    pub async fn list_sessions(&self, limit: Option<u64>) -> Result<Vec<String>, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+        let mut rows = if let Some(limit) = limit {
+            let limit = i64::try_from(limit).map_err(|_| {
+                query_error("session listing limit exceeds sqlite integer range".to_owned())
+            })?;
+            conn.query(
+                "SELECT session_id FROM sessions ORDER BY updated_at DESC, session_id ASC LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        } else {
+            conn.query(
+                "SELECT session_id FROM sessions ORDER BY updated_at DESC, session_id ASC",
+                params![],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        };
+
+        let mut sessions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        {
+            let session_id = row
+                .get::<String>(0)
+                .map_err(|error| query_error(error.to_string()))?;
+            sessions.push(session_id);
+        }
+
+        Ok(sessions)
+    }
+
+    async fn open(strategy: ConnectionStrategy) -> Result<Self, MemoryError> {
+        let db = match strategy {
+            ConnectionStrategy::Local { db_path } => Builder::new_local(db_path)
+                .build()
+                .await
+                .map_err(|error| connection_error(error.to_string()))?,
+            ConnectionStrategy::Remote { url, auth_token } => Builder::new_remote(url, auth_token)
+                .build()
+                .await
+                .map_err(|error| connection_error(error.to_string()))?,
+        };
+
+        let memory = Self { db };
+        memory.initialize().await?;
+        Ok(memory)
+    }
+
+    async fn initialize(&self) -> Result<(), MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+        ensure_migration_bookkeeping(&conn).await?;
+        run_pending_migrations(&conn).await?;
+        verify_required_schema(&conn).await?;
+        Ok(())
+    }
+
+    fn connect(&self) -> Result<Connection, MemoryError> {
+        self.db
+            .connect()
+            .map_err(|error| connection_error(error.to_string()))
+    }
+}
+
+#[async_trait]
+impl Memory for LibsqlMemory {
+    async fn store(&self, request: MemoryStoreRequest) -> Result<MemoryRecord, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        let payload_json = serde_json::to_string(&request.payload)?;
+        let session_state = serde_json::to_string(&json!({
+            "last_sequence": request.sequence
+        }))?;
+        let sequence = i64::try_from(request.sequence)
+            .map_err(|_| query_error("store sequence exceeds sqlite integer range".to_owned()))?;
+
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            conn.execute(
+                "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
+                 VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+                params![request.session_id.as_str()],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            conn.execute(
+                "INSERT INTO conversation_events (session_id, sequence, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
+                params![request.session_id.as_str(), sequence, payload_json],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            conn.execute(
+                "INSERT INTO session_state (session_id, state_json, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     state_json = excluded.state_json,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![request.session_id.as_str(), session_state],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            Ok::<(), MemoryError>(())
+        }
+        .await;
+        if let Err(error) = transaction_result {
+            rollback_quietly(&conn).await;
+            return Err(error);
+        }
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+        Ok(MemoryRecord {
+            session_id: request.session_id,
+            sequence: request.sequence,
+            payload: request.payload,
+        })
+    }
+
+    async fn recall(&self, request: MemoryRecallRequest) -> Result<Vec<MemoryRecord>, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        let mut rows = if let Some(limit) = request.limit {
+            let limit = i64::try_from(limit)
+                .map_err(|_| query_error("recall limit exceeds sqlite integer range".to_owned()))?;
+            conn.query(
+                "SELECT sequence, payload_json FROM conversation_events
+                 WHERE session_id = ?1
+                 ORDER BY sequence DESC
+                 LIMIT ?2",
+                params![request.session_id.as_str(), limit],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        } else {
+            conn.query(
+                "SELECT sequence, payload_json FROM conversation_events
+                 WHERE session_id = ?1
+                 ORDER BY sequence ASC",
+                params![request.session_id.as_str()],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        };
+
+        let mut records = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| query_error(error.to_string()))?
+        {
+            let sequence = row
+                .get::<i64>(0)
+                .map_err(|error| query_error(error.to_string()))?;
+            let sequence = u64::try_from(sequence)
+                .map_err(|_| query_error("stored sequence is negative".to_owned()))?;
+            let payload_json = row
+                .get::<String>(1)
+                .map_err(|error| query_error(error.to_string()))?;
+            let payload = serde_json::from_str(&payload_json)?;
+            records.push(MemoryRecord {
+                session_id: request.session_id.clone(),
+                sequence,
+                payload,
+            });
+        }
+
+        if request.limit.is_some() {
+            records.reverse();
+        }
+
+        if records.is_empty() {
+            return Err(MemoryError::NotFound {
+                session_id: request.session_id,
+            });
+        }
+
+        Ok(records)
+    }
+
+    async fn forget(&self, request: MemoryForgetRequest) -> Result<(), MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            let deleted_sessions = conn
+                .execute(
+                    "DELETE FROM sessions WHERE session_id = ?1",
+                    params![request.session_id.as_str()],
+                )
+                .await
+                .map_err(|error| query_error(error.to_string()))?;
+
+            if deleted_sessions == 0 {
+                return Err(MemoryError::NotFound {
+                    session_id: request.session_id.clone(),
+                });
+            }
+
+            Ok::<(), MemoryError>(())
+        }
+        .await;
+        if let Err(error) = transaction_result {
+            rollback_quietly(&conn).await;
+            return Err(error);
+        }
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(())
+    }
+}
 
 pub struct UnconfiguredMemory;
 
@@ -11,11 +365,10 @@ impl UnconfiguredMemory {
     }
 
     fn backend_unavailable() -> MemoryError {
-        MemoryError::Initialization {
-            message:
-                "memory backend is not configured; explicit local/remote selection is required"
-                    .to_owned(),
-        }
+        initialization_error(
+            "memory backend is not configured; explicit local/remote selection is required"
+                .to_owned(),
+        )
     }
 }
 
@@ -43,50 +396,324 @@ impl Memory for UnconfiguredMemory {
     }
 }
 
+async fn rollback_quietly(conn: &Connection) {
+    let _ = conn.execute("ROLLBACK TRANSACTION", params![]).await;
+}
+
+async fn enable_foreign_keys(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute("PRAGMA foreign_keys = ON", params![])
+        .await
+        .map_err(|error| initialization_error(error.to_string()))?;
+    Ok(())
+}
+
+async fn ensure_migration_bookkeeping(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS memory_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+        params![],
+    )
+    .await
+    .map_err(|error| migration_error(error.to_string()))?;
+    Ok(())
+}
+
+async fn run_pending_migrations(conn: &Connection) -> Result<(), MemoryError> {
+    let applied_versions = applied_migration_versions(conn).await?;
+    for migration in MIGRATIONS {
+        if applied_versions.contains(migration.version) {
+            continue;
+        }
+
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| migration_error(error.to_string()))?;
+        let migration_result = async {
+            conn.execute(migration.sql, params![])
+                .await
+                .map_err(|error| migration_error(error.to_string()))?;
+            conn.execute(
+                "INSERT INTO memory_migrations (version) VALUES (?1)",
+                params![migration.version],
+            )
+            .await
+            .map_err(|error| migration_error(error.to_string()))?;
+            Ok::<(), MemoryError>(())
+        }
+        .await;
+        if let Err(error) = migration_result {
+            rollback_quietly(conn).await;
+            return Err(error);
+        }
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| migration_error(error.to_string()))?;
+    }
+    Ok(())
+}
+
+async fn applied_migration_versions(conn: &Connection) -> Result<HashSet<String>, MemoryError> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM memory_migrations ORDER BY version ASC",
+            params![],
+        )
+        .await
+        .map_err(|error| migration_error(error.to_string()))?;
+
+    let mut versions = HashSet::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| migration_error(error.to_string()))?
+    {
+        let version = row
+            .get::<String>(0)
+            .map_err(|error| migration_error(error.to_string()))?;
+        versions.insert(version);
+    }
+    Ok(versions)
+}
+
+async fn verify_required_schema(conn: &Connection) -> Result<(), MemoryError> {
+    for table in REQUIRED_TABLES {
+        if !schema_exists(conn, "table", table).await? {
+            return Err(initialization_error(format!(
+                "required table `{table}` is missing after migration"
+            )));
+        }
+    }
+    for index in REQUIRED_INDEXES {
+        if !schema_exists(conn, "index", index).await? {
+            return Err(initialization_error(format!(
+                "required index `{index}` is missing after migration"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn schema_exists(
+    conn: &Connection,
+    schema_type: &str,
+    object_name: &str,
+) -> Result<bool, MemoryError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2 LIMIT 1",
+            params![schema_type, object_name],
+        )
+        .await
+        .map_err(|error| initialization_error(error.to_string()))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| initialization_error(error.to_string()))
+}
+
+fn connection_error(message: String) -> MemoryError {
+    MemoryError::Connection { message }
+}
+
+fn initialization_error(message: String) -> MemoryError {
+    MemoryError::Initialization { message }
+}
+
+fn migration_error(message: String) -> MemoryError {
+    MemoryError::Migration { message }
+}
+
+fn query_error(message: String) -> MemoryError {
+    MemoryError::Query { message }
+}
+
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use types::{MemoryError, MemoryForgetRequest, MemoryRecallRequest, MemoryStoreRequest};
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
-    use super::UnconfiguredMemory;
-    use types::Memory;
+    use libsql::{Builder, params};
+    use serde_json::json;
+    use types::{
+        Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryRecallRequest,
+        MemoryStoreRequest,
+    };
+
+    use super::{
+        ConnectionStrategy, LibsqlMemory, MIGRATIONS, REQUIRED_INDEXES, REQUIRED_TABLES,
+        applied_migration_versions, enable_foreign_keys, ensure_migration_bookkeeping,
+        schema_exists,
+    };
 
     #[tokio::test]
-    async fn unconfigured_memory_store_returns_explicit_initialization_error() {
-        let memory = UnconfiguredMemory::new();
-        let err = memory
+    async fn from_config_returns_none_when_memory_is_disabled() {
+        let backend = LibsqlMemory::from_config(&MemoryConfig::default())
+            .await
+            .expect("disabled memory should not fail");
+        assert!(backend.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_connection_strategy_requires_auth_token() {
+        let config = MemoryConfig {
+            enabled: true,
+            db_path: ".oxydra/memory.db".to_owned(),
+            remote_url: Some("libsql://example-org.turso.io".to_owned()),
+            auth_token: None,
+        };
+        let error = ConnectionStrategy::from_config(&config)
+            .expect_err("remote mode without auth token should fail");
+        assert!(matches!(error, MemoryError::Initialization { .. }));
+    }
+
+    #[tokio::test]
+    async fn store_recall_and_forget_are_durable_across_restarts() {
+        let db_path = temp_db_path("roundtrip");
+        let config = local_memory_config(&db_path);
+
+        let backend = LibsqlMemory::from_config(&config)
+            .await
+            .expect("local memory should initialize")
+            .expect("memory should be enabled");
+        backend
             .store(MemoryStoreRequest {
                 session_id: "session-1".to_owned(),
                 sequence: 1,
-                payload: json!({"message":"hello"}),
+                payload: json!({"role":"user","content":"hello"}),
             })
             .await
-            .expect_err("unconfigured backend must not silently store");
-        assert!(matches!(err, MemoryError::Initialization { .. }));
-    }
+            .expect("first message should store");
+        backend
+            .store(MemoryStoreRequest {
+                session_id: "session-1".to_owned(),
+                sequence: 2,
+                payload: json!({"role":"assistant","content":"hi"}),
+            })
+            .await
+            .expect("second message should store");
+        drop(backend);
 
-    #[tokio::test]
-    async fn unconfigured_memory_recall_returns_explicit_initialization_error() {
-        let memory = UnconfiguredMemory::new();
-        let err = memory
+        let reopened = LibsqlMemory::from_config(&config)
+            .await
+            .expect("reopen should succeed")
+            .expect("memory should remain enabled");
+        let records = reopened
             .recall(MemoryRecallRequest {
                 session_id: "session-1".to_owned(),
-                limit: Some(10),
+                limit: None,
             })
             .await
-            .expect_err("unconfigured backend must not silently recall");
-        assert!(matches!(err, MemoryError::Initialization { .. }));
-    }
+            .expect("stored messages should recall");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].sequence, 1);
+        assert_eq!(records[1].sequence, 2);
 
-    #[tokio::test]
-    async fn unconfigured_memory_forget_returns_explicit_initialization_error() {
-        let memory = UnconfiguredMemory::new();
-        let err = memory
+        reopened
             .forget(MemoryForgetRequest {
                 session_id: "session-1".to_owned(),
             })
             .await
-            .expect_err("unconfigured backend must not silently forget");
-        assert!(matches!(err, MemoryError::Initialization { .. }));
+            .expect("forget should remove session");
+        let error = reopened
+            .recall(MemoryRecallRequest {
+                session_id: "session-1".to_owned(),
+                limit: None,
+            })
+            .await
+            .expect_err("forgotten session should no longer be recallable");
+        assert!(matches!(error, MemoryError::NotFound { .. }));
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn initialization_applies_pending_migrations_and_verifies_schema() {
+        let db_path = temp_db_path("migrations");
+        let config = local_memory_config(&db_path);
+
+        let db = Builder::new_local(db_path.clone())
+            .build()
+            .await
+            .expect("seed db should initialize");
+        let conn = db.connect().expect("seed db should connect");
+        enable_foreign_keys(&conn)
+            .await
+            .expect("seed db should enable fk support");
+        ensure_migration_bookkeeping(&conn)
+            .await
+            .expect("seed db should create migration bookkeeping");
+        conn.execute(MIGRATIONS[0].sql, params![])
+            .await
+            .expect("seed migration should apply");
+        conn.execute(
+            "INSERT INTO memory_migrations (version) VALUES (?1)",
+            params![MIGRATIONS[0].version],
+        )
+        .await
+        .expect("seed migration should be marked");
+        drop(conn);
+        drop(db);
+
+        let backend = LibsqlMemory::from_config(&config)
+            .await
+            .expect("runtime migration pass should succeed")
+            .expect("memory should be enabled");
+        let conn = backend
+            .connect()
+            .expect("backend should connect for verification");
+        let versions = applied_migration_versions(&conn)
+            .await
+            .expect("applied versions should be queryable");
+        for migration in MIGRATIONS {
+            assert!(
+                versions.contains(migration.version),
+                "missing migration {}",
+                migration.version
+            );
+        }
+        for table in REQUIRED_TABLES {
+            assert!(
+                schema_exists(&conn, "table", table)
+                    .await
+                    .expect("schema check should work"),
+                "missing table `{table}`"
+            );
+        }
+        for index in REQUIRED_INDEXES {
+            assert!(
+                schema_exists(&conn, "index", index)
+                    .await
+                    .expect("schema check should work"),
+                "missing index `{index}`"
+            );
+        }
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    fn local_memory_config(db_path: &str) -> MemoryConfig {
+        MemoryConfig {
+            enabled: true,
+            db_path: db_path.to_owned(),
+            remote_url: None,
+            auth_token: None,
+        }
+    }
+
+    fn temp_db_path(label: &str) -> String {
+        let mut path = env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should move forward")
+            .as_nanos();
+        path.push(format!(
+            "oxydra-memory-{label}-{}-{unique}.db",
+            std::process::id()
+        ));
+        path.to_string_lossy().to_string()
     }
 }

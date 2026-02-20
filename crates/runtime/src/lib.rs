@@ -1,10 +1,11 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
 use types::{
-    Context, Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError,
-    SafetyTier, StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    Context, Memory, MemoryError, MemoryRecallRequest, MemoryStoreRequest, Message, MessageRole,
+    Provider, ProviderError, ProviderId, Response, RuntimeError, SafetyTier, StreamItem, ToolCall,
+    ToolCallDelta, ToolError, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -41,6 +42,7 @@ pub struct AgentRuntime {
     tool_registry: ToolRegistry,
     limits: RuntimeLimits,
     stream_buffer_size: usize,
+    memory: Option<Arc<dyn Memory>>,
 }
 
 impl AgentRuntime {
@@ -54,7 +56,13 @@ impl AgentRuntime {
             tool_registry,
             limits,
             stream_buffer_size: DEFAULT_STREAM_BUFFER_SIZE,
+            memory: None,
         }
+    }
+
+    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     pub fn with_stream_buffer_size(mut self, stream_buffer_size: usize) -> Self {
@@ -71,9 +79,63 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
+        self.run_session_internal(None, context, cancellation).await
+    }
+
+    pub async fn run_session_for_session(
+        &self,
+        session_id: &str,
+        context: &mut Context,
+        cancellation: &CancellationToken,
+    ) -> Result<Response, RuntimeError> {
+        self.run_session_internal(Some(session_id), context, cancellation)
+            .await
+    }
+
+    pub async fn restore_session(
+        &self,
+        session_id: &str,
+        context: &mut Context,
+        limit: Option<u64>,
+    ) -> Result<(), RuntimeError> {
+        let Some(memory) = &self.memory else {
+            return Ok(());
+        };
+
+        let restored = match memory
+            .recall(MemoryRecallRequest {
+                session_id: session_id.to_owned(),
+                limit,
+            })
+            .await
+        {
+            Ok(records) => records,
+            Err(MemoryError::NotFound { .. }) => return Ok(()),
+            Err(error) => return Err(RuntimeError::from(error)),
+        };
+
+        let restored_messages = restored
+            .into_iter()
+            .map(|record| serde_json::from_value::<Message>(record.payload))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MemoryError::from)
+            .map_err(RuntimeError::from)?;
+        context.messages = restored_messages;
+        Ok(())
+    }
+
+    async fn run_session_internal(
+        &self,
+        session_id: Option<&str>,
+        context: &mut Context,
+        cancellation: &CancellationToken,
+    ) -> Result<Response, RuntimeError> {
         if context.tools.is_empty() {
             context.tools = self.tool_registry.schemas();
         }
+        let mut next_memory_sequence = self.next_memory_sequence(session_id).await?;
+        self.persist_context_tail_if_needed(session_id, &mut next_memory_sequence, context)
+            .await?;
         self.validate_guard_preconditions()?;
         let mut turn = 0usize;
         let mut accumulated_cost = 0.0;
@@ -110,6 +172,12 @@ impl AgentRuntime {
             assistant_message.tool_calls = tool_calls.clone();
             self.enforce_cost_budget(usage.as_ref(), &mut accumulated_cost)?;
             context.messages.push(assistant_message.clone());
+            self.persist_message_if_needed(
+                session_id,
+                &mut next_memory_sequence,
+                &assistant_message,
+            )
+            .await?;
 
             if tool_calls.is_empty() {
                 let state = TurnState::Yielding;
@@ -146,7 +214,14 @@ impl AgentRuntime {
                             .map(|tc| self.execute_tool_and_format(tc, cancellation));
                         let batch_results = futures::future::join_all(futures).await;
                         for result in batch_results {
-                            context.messages.push(result?);
+                            let message = result?;
+                            context.messages.push(message.clone());
+                            self.persist_message_if_needed(
+                                session_id,
+                                &mut next_memory_sequence,
+                                &message,
+                            )
+                            .await?;
                         }
                     }
 
@@ -163,7 +238,9 @@ impl AgentRuntime {
                     let result = self
                         .execute_tool_and_format(tool_call, cancellation)
                         .await?;
-                    context.messages.push(result);
+                    context.messages.push(result.clone());
+                    self.persist_message_if_needed(session_id, &mut next_memory_sequence, &result)
+                        .await?;
                 }
             }
 
@@ -173,10 +250,81 @@ impl AgentRuntime {
                     .map(|tc| self.execute_tool_and_format(tc, cancellation));
                 let batch_results = futures::future::join_all(futures).await;
                 for result in batch_results {
-                    context.messages.push(result?);
+                    let message = result?;
+                    context.messages.push(message.clone());
+                    self.persist_message_if_needed(session_id, &mut next_memory_sequence, &message)
+                        .await?;
                 }
             }
         }
+    }
+
+    async fn next_memory_sequence(&self, session_id: Option<&str>) -> Result<u64, RuntimeError> {
+        let (Some(memory), Some(session_id)) = (&self.memory, session_id) else {
+            return Ok(1);
+        };
+
+        match memory
+            .recall(MemoryRecallRequest {
+                session_id: session_id.to_owned(),
+                limit: Some(1),
+            })
+            .await
+        {
+            Ok(records) => Ok(records
+                .last()
+                .map(|record| record.sequence.saturating_add(1))
+                .unwrap_or(1)),
+            Err(MemoryError::NotFound { .. }) => Ok(1),
+            Err(error) => Err(RuntimeError::from(error)),
+        }
+    }
+
+    async fn persist_context_tail_if_needed(
+        &self,
+        session_id: Option<&str>,
+        next_sequence: &mut u64,
+        context: &Context,
+    ) -> Result<(), RuntimeError> {
+        if session_id.is_none() || self.memory.is_none() {
+            return Ok(());
+        }
+
+        let already_persisted = next_sequence.saturating_sub(1);
+        let start_index = match usize::try_from(already_persisted) {
+            Ok(index) => index,
+            Err(_) => context.messages.len(),
+        };
+        for message in context.messages.iter().skip(start_index) {
+            self.persist_message_if_needed(session_id, next_sequence, message)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn persist_message_if_needed(
+        &self,
+        session_id: Option<&str>,
+        next_sequence: &mut u64,
+        message: &Message,
+    ) -> Result<(), RuntimeError> {
+        let (Some(memory), Some(session_id)) = (&self.memory, session_id) else {
+            return Ok(());
+        };
+
+        let payload = serde_json::to_value(message)
+            .map_err(MemoryError::from)
+            .map_err(RuntimeError::from)?;
+        memory
+            .store(MemoryStoreRequest {
+                session_id: session_id.to_owned(),
+                sequence: *next_sequence,
+                payload,
+            })
+            .await
+            .map_err(RuntimeError::from)?;
+        *next_sequence = next_sequence.saturating_add(1);
+        Ok(())
     }
 
     fn validate_guard_preconditions(&self) -> Result<(), RuntimeError> {
@@ -520,7 +668,11 @@ impl std::fmt::Display for StreamCollectError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex, time::Duration};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use mockall::mock;
@@ -529,9 +681,11 @@ mod tests {
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
     use types::{
-        Context, FunctionDecl, JsonSchema, JsonSchemaType, Message, MessageRole, ModelCatalog,
-        ModelDescriptor, ModelId, Provider, ProviderCaps, ProviderError, ProviderId, Response,
-        SafetyTier, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+        Context, FunctionDecl, JsonSchema, JsonSchemaType, Memory, MemoryError,
+        MemoryForgetRequest, MemoryRecallRequest, MemoryRecord, MemoryStoreRequest, Message,
+        MessageRole, ModelCatalog, ModelDescriptor, ModelId, Provider, ProviderCaps, ProviderError,
+        ProviderId, Response, SafetyTier, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError,
+        UsageUpdate,
     };
 
     use super::{AgentRuntime, RuntimeLimits};
@@ -707,6 +861,77 @@ mod tests {
 
         fn safety_tier(&self) -> SafetyTier {
             SafetyTier::ReadOnly
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingMemory {
+        records: Mutex<Vec<MemoryRecord>>,
+    }
+
+    impl RecordingMemory {
+        fn with_records(records: Vec<MemoryRecord>) -> Self {
+            Self {
+                records: Mutex::new(records),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Memory for RecordingMemory {
+        async fn store(&self, request: MemoryStoreRequest) -> Result<MemoryRecord, MemoryError> {
+            let record = MemoryRecord {
+                session_id: request.session_id,
+                sequence: request.sequence,
+                payload: request.payload,
+            };
+            self.records
+                .lock()
+                .expect("memory test mutex should not be poisoned")
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn recall(
+            &self,
+            request: MemoryRecallRequest,
+        ) -> Result<Vec<MemoryRecord>, MemoryError> {
+            let mut records: Vec<MemoryRecord> = self
+                .records
+                .lock()
+                .expect("memory test mutex should not be poisoned")
+                .iter()
+                .filter(|record| record.session_id == request.session_id)
+                .cloned()
+                .collect();
+            records.sort_by_key(|record| record.sequence);
+            if let Some(limit) = request.limit {
+                let keep = usize::try_from(limit).unwrap_or(usize::MAX);
+                if records.len() > keep {
+                    records = records[records.len().saturating_sub(keep)..].to_vec();
+                }
+            }
+            if records.is_empty() {
+                return Err(MemoryError::NotFound {
+                    session_id: request.session_id,
+                });
+            }
+            Ok(records)
+        }
+
+        async fn forget(&self, request: MemoryForgetRequest) -> Result<(), MemoryError> {
+            let mut records = self
+                .records
+                .lock()
+                .expect("memory test mutex should not be poisoned");
+            let before = records.len();
+            records.retain(|record| record.session_id != request.session_id);
+            if records.len() == before {
+                return Err(MemoryError::NotFound {
+                    session_id: request.session_id,
+                });
+            }
+            Ok(())
         }
     }
 
@@ -927,6 +1152,136 @@ mod tests {
             Some("tool schema seen")
         );
         assert!(context.tools.iter().any(|tool| tool.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn run_session_for_session_persists_initial_context_and_new_turns() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), false),
+            vec![ProviderStep::Complete(assistant_response(
+                "final answer",
+                vec![],
+            ))],
+        );
+        let memory = Arc::new(RecordingMemory::default());
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits::default(),
+        )
+        .with_memory(memory.clone());
+        let mut context = test_context(provider_id, model_id);
+
+        let response = runtime
+            .run_session_for_session("session-persist", &mut context, &CancellationToken::new())
+            .await
+            .expect("runtime turn should complete");
+        assert_eq!(response.message.content.as_deref(), Some("final answer"));
+
+        let stored = memory
+            .recall(MemoryRecallRequest {
+                session_id: "session-persist".to_owned(),
+                limit: None,
+            })
+            .await
+            .expect("persisted records should be recallable");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].sequence, 1);
+        assert_eq!(stored[1].sequence, 2);
+        let restored_first: Message =
+            serde_json::from_value(stored[0].payload.clone()).expect("payload should deserialize");
+        let restored_second: Message =
+            serde_json::from_value(stored[1].payload.clone()).expect("payload should deserialize");
+        assert_eq!(restored_first.role, MessageRole::User);
+        assert_eq!(restored_second.role, MessageRole::Assistant);
+    }
+
+    #[tokio::test]
+    async fn restore_session_hydrates_context_when_memory_is_configured() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let memory = Arc::new(RecordingMemory::with_records(vec![
+            MemoryRecord {
+                session_id: "session-restore".to_owned(),
+                sequence: 1,
+                payload: serde_json::to_value(Message {
+                    role: MessageRole::User,
+                    content: Some("hello".to_owned()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                })
+                .expect("message should serialize"),
+            },
+            MemoryRecord {
+                session_id: "session-restore".to_owned(),
+                sequence: 2,
+                payload: serde_json::to_value(Message {
+                    role: MessageRole::Assistant,
+                    content: Some("world".to_owned()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                })
+                .expect("message should serialize"),
+            },
+        ]));
+        let runtime = AgentRuntime::new(
+            Box::new(FakeProvider::new(
+                provider_id.clone(),
+                test_catalog(provider_id.clone(), model_id.clone(), false),
+                vec![ProviderStep::Complete(assistant_response("unused", vec![]))],
+            )),
+            ToolRegistry::default(),
+            RuntimeLimits::default(),
+        )
+        .with_memory(memory);
+        let mut context = Context {
+            provider: provider_id,
+            model: model_id,
+            tools: vec![],
+            messages: vec![],
+        };
+
+        runtime
+            .restore_session("session-restore", &mut context, None)
+            .await
+            .expect("restore should succeed");
+
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(context.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(context.messages[1].content.as_deref(), Some("world"));
+    }
+
+    #[tokio::test]
+    async fn run_session_for_session_keeps_existing_behavior_without_memory_backend() {
+        let provider_id = ProviderId::from("openai");
+        let model_id = ModelId::from("gpt-4o-mini");
+        let provider = FakeProvider::new(
+            provider_id.clone(),
+            test_catalog(provider_id.clone(), model_id.clone(), false),
+            vec![ProviderStep::Complete(assistant_response(
+                "no memory configured",
+                vec![],
+            ))],
+        );
+        let runtime = AgentRuntime::new(
+            Box::new(provider),
+            ToolRegistry::default(),
+            RuntimeLimits::default(),
+        );
+        let mut context = test_context(provider_id, model_id);
+
+        let response = runtime
+            .run_session_for_session("session-disabled", &mut context, &CancellationToken::new())
+            .await
+            .expect("session run should still succeed without configured memory");
+        assert_eq!(
+            response.message.content.as_deref(),
+            Some("no memory configured")
+        );
+        assert_eq!(context.messages.len(), 2);
     }
 
     #[tokio::test]

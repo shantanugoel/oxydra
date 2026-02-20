@@ -13,6 +13,12 @@ turn_timeout_secs = 60
 max_turns = 8
 # max_cost = 1000.0
 
+[memory]
+enabled = false
+db_path = ".oxydra/memory.db"
+# remote_url = "libsql://your-database.turso.io"
+# auth_token = "set-me-or-use-OXYDRA__MEMORY__AUTH_TOKEN"
+
 [reliability]
 max_attempts = 3
 backoff_base_ms = 250
@@ -26,4 +32,3 @@ base_url = "https://api.openai.com"
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
 # api_key = "set-me-or-use-ANTHROPIC_API_KEY"
-

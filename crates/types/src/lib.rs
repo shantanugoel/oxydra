@@ -8,7 +8,7 @@ mod tracing;
 
 pub use config::{
     ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_PROVIDER_ID, AgentConfig, AnthropicProviderConfig,
-    ConfigError, OPENAI_DEFAULT_BASE_URL, OPENAI_PROVIDER_ID, OpenAIProviderConfig,
+    ConfigError, MemoryConfig, OPENAI_DEFAULT_BASE_URL, OPENAI_PROVIDER_ID, OpenAIProviderConfig,
     ProviderConfigs, ProviderSelection, ReliabilityConfig, RuntimeConfig,
     SUPPORTED_CONFIG_MAJOR_VERSION, validate_config_version,
 };

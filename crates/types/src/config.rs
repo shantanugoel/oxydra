@@ -16,6 +16,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
     pub selection: ProviderSelection,
     #[serde(default)]
     pub providers: ProviderConfigs,
@@ -28,6 +30,7 @@ impl Default for AgentConfig {
         Self {
             config_version: default_config_version(),
             runtime: RuntimeConfig::default(),
+            memory: MemoryConfig::default(),
             selection: ProviderSelection::default(),
             providers: ProviderConfigs::default(),
             reliability: ReliabilityConfig::default(),
@@ -83,6 +86,8 @@ impl AgentConfig {
             });
         }
 
+        self.memory.validate()?;
+
         Ok(())
     }
 }
@@ -104,6 +109,62 @@ impl Default for RuntimeConfig {
             max_turns: default_max_turns(),
             max_cost: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_memory_db_path")]
+    pub db_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            db_path: default_memory_db_path(),
+            remote_url: None,
+            auth_token: None,
+        }
+    }
+}
+
+impl MemoryConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let remote_url = self
+            .remote_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        if let Some(remote_url) = remote_url {
+            if self
+                .auth_token
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+            {
+                return Err(ConfigError::MissingMemoryAuthToken {
+                    remote_url: remote_url.to_owned(),
+                });
+            }
+            return Ok(());
+        }
+
+        if self.db_path.trim().is_empty() {
+            return Err(ConfigError::InvalidMemoryDatabasePath);
+        }
+
+        Ok(())
     }
 }
 
@@ -210,6 +271,10 @@ pub enum ConfigError {
         "invalid reliability backoff bounds base={base_ms}ms max={max_ms}ms (both must be >0 and base<=max)"
     )]
     InvalidReliabilityBackoff { base_ms: u64, max_ms: u64 },
+    #[error("memory database path must not be empty when memory is enabled in local mode")]
+    InvalidMemoryDatabasePath,
+    #[error("memory remote mode requires an auth token for `{remote_url}`")]
+    MissingMemoryAuthToken { remote_url: String },
 }
 
 pub fn validate_config_version(config_version: &str) -> Result<(), ConfigError> {
@@ -280,6 +345,10 @@ fn default_anthropic_base_url() -> String {
 
 fn default_turn_timeout_secs() -> u64 {
     60
+}
+
+fn default_memory_db_path() -> String {
+    ".oxydra/memory.db".to_owned()
 }
 
 fn default_max_turns() -> usize {

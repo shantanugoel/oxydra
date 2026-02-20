@@ -1,6 +1,7 @@
 use std::{
     env, io,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -8,6 +9,7 @@ use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
+use memory::LibsqlMemory;
 use provider::{
     AnthropicConfig, AnthropicProvider, OpenAIConfig, OpenAIProvider, ReliableProvider, RetryPolicy,
 };
@@ -15,7 +17,8 @@ use runtime::RuntimeLimits;
 use serde::Serialize;
 use thiserror::Error;
 use types::{
-    ANTHROPIC_PROVIDER_ID, AgentConfig, ConfigError, OPENAI_PROVIDER_ID, Provider, ProviderError,
+    ANTHROPIC_PROVIDER_ID, AgentConfig, ConfigError, Memory, MemoryError, OPENAI_PROVIDER_ID,
+    Provider, ProviderError,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -54,6 +57,8 @@ pub struct CliOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeOverrides>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<SelectionOverrides>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub providers: Option<ProviderOverrides>,
@@ -69,6 +74,18 @@ pub struct RuntimeOverrides {
     pub max_turns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cost: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MemoryOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -123,6 +140,8 @@ pub enum CliError {
     ConfigExtract(#[source] Box<figment::Error>),
     #[error(transparent)]
     ConfigValidation(#[from] ConfigError),
+    #[error(transparent)]
+    Memory(#[from] MemoryError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error("unsupported provider `{provider}` in provider selection")]
@@ -201,6 +220,14 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
 
 pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, CliError> {
     Ok(Box::new(build_reliable_provider(config)?))
+}
+
+pub async fn build_memory_backend(
+    config: &AgentConfig,
+) -> Result<Option<Arc<dyn Memory>>, CliError> {
+    config.validate()?;
+    let backend = LibsqlMemory::from_config(&config.memory).await?;
+    Ok(backend.map(|memory| Arc::new(memory) as Arc<dyn Memory>))
 }
 
 pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
@@ -455,6 +482,37 @@ model = "gpt-4o-mini"
     }
 
     #[test]
+    fn load_agent_config_rejects_remote_memory_without_auth_token() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("memory-remote-auth");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[memory]
+enabled = true
+remote_url = "libsql://example-org.turso.io"
+"#,
+        );
+
+        let error = load_agent_config_with_paths(&paths, None, CliOverrides::default())
+            .expect_err("remote memory mode without auth token should fail validation");
+        assert!(matches!(
+            error,
+            CliError::ConfigValidation(ConfigError::MissingMemoryAuthToken { .. })
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn provider_factory_switches_by_config_selection() {
         let mut openai_config = AgentConfig::default();
         openai_config.selection.provider = ProviderId::from("openai");
@@ -474,6 +532,14 @@ model = "gpt-4o-mini"
         anthropic_config.providers.anthropic.api_key = Some("anthropic-test-key".to_owned());
         let provider = build_provider(&anthropic_config).expect("anthropic provider should build");
         assert_eq!(provider.provider_id(), &ProviderId::from("anthropic"));
+    }
+
+    #[tokio::test]
+    async fn build_memory_backend_returns_none_when_memory_is_disabled() {
+        let backend = build_memory_backend(&AgentConfig::default())
+            .await
+            .expect("disabled memory config should not fail");
+        assert!(backend.is_none());
     }
 
     fn temp_dir(label: &str) -> PathBuf {

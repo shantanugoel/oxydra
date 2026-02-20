@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -13,6 +13,11 @@ use types::{
 const OPENAI_PROVIDER_ID: &str = "openai";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
+const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 1024;
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -260,6 +265,390 @@ impl Provider for OpenAIProvider {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AnthropicConfig {
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub max_tokens: u32,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: ANTHROPIC_DEFAULT_BASE_URL.to_owned(),
+            max_tokens: DEFAULT_ANTHROPIC_MAX_TOKENS,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicProvider {
+    client: Client,
+    provider_id: ProviderId,
+    model_catalog: ModelCatalog,
+    base_url: String,
+    api_key: String,
+    max_tokens: u32,
+}
+
+impl AnthropicProvider {
+    pub fn new(config: AnthropicConfig) -> Result<Self, ProviderError> {
+        let model_catalog = ModelCatalog::from_pinned_snapshot()?;
+        Self::with_catalog(config, model_catalog)
+    }
+
+    pub fn with_catalog(
+        config: AnthropicConfig,
+        model_catalog: ModelCatalog,
+    ) -> Result<Self, ProviderError> {
+        let provider_id = ProviderId::from(ANTHROPIC_PROVIDER_ID);
+        let api_key = resolve_anthropic_api_key(config.api_key).ok_or_else(|| {
+            ProviderError::MissingApiKey {
+                provider: provider_id.clone(),
+            }
+        })?;
+
+        Ok(Self {
+            client: Client::new(),
+            provider_id,
+            model_catalog,
+            base_url: normalize_base_url_or_default(&config.base_url, ANTHROPIC_DEFAULT_BASE_URL),
+            api_key,
+            max_tokens: config.max_tokens.max(1),
+        })
+    }
+
+    fn validate_context(&self, context: &Context) -> Result<(), ProviderError> {
+        if context.provider != self.provider_id {
+            return Err(ProviderError::RequestFailed {
+                provider: self.provider_id.clone(),
+                message: format!(
+                    "context provider `{}` does not match provider `{}`",
+                    context.provider, self.provider_id
+                ),
+            });
+        }
+        self.model_catalog
+            .validate(&self.provider_id, &context.model)?;
+        Ok(())
+    }
+
+    fn messages_url(&self) -> String {
+        format!("{}{}", self.base_url, ANTHROPIC_MESSAGES_PATH)
+    }
+}
+
+#[async_trait]
+impl Provider for AnthropicProvider {
+    fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    fn model_catalog(&self) -> &ModelCatalog {
+        &self.model_catalog
+    }
+
+    async fn complete(&self, context: &Context) -> Result<Response, ProviderError> {
+        self.validate_context(context)?;
+        tracing::debug!(
+            provider = %self.provider_id,
+            model = %context.model,
+            "sending Anthropic messages request"
+        );
+
+        let request = AnthropicMessagesRequest::from_context(context, self.max_tokens)?;
+        let http_response = self
+            .client
+            .post(self.messages_url())
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| ProviderError::Transport {
+                provider: self.provider_id.clone(),
+                message: error.to_string(),
+            })?;
+
+        if !http_response.status().is_success() {
+            let status = http_response.status().as_u16();
+            let body = match http_response.text().await {
+                Ok(text) => text,
+                Err(error) => format!("unable to read error body: {error}"),
+            };
+            return Err(ProviderError::HttpStatus {
+                provider: self.provider_id.clone(),
+                status,
+                message: extract_http_error_message(&body),
+            });
+        }
+
+        let response: AnthropicMessagesResponse =
+            http_response
+                .json()
+                .await
+                .map_err(|error| ProviderError::ResponseParse {
+                    provider: self.provider_id.clone(),
+                    message: error.to_string(),
+                })?;
+        normalize_anthropic_response(response, &self.provider_id)
+    }
+
+    async fn stream(
+        &self,
+        context: &Context,
+        buffer_size: usize,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.validate_context(context)?;
+        let Response {
+            message,
+            tool_calls,
+            finish_reason,
+            usage,
+        } = self.complete(context).await?;
+
+        let channel_size = if buffer_size == 0 {
+            DEFAULT_STREAM_BUFFER_SIZE
+        } else {
+            buffer_size
+        };
+        let (sender, receiver) = mpsc::channel(channel_size);
+
+        if let Some(content) = message.content.filter(|content| !content.is_empty()) {
+            let _ = sender.send(Ok(StreamItem::Text(content))).await;
+        }
+
+        for (index, tool_call) in tool_calls.into_iter().enumerate() {
+            let arguments = serde_json::to_string(&tool_call.arguments).map_err(|error| {
+                ProviderError::ResponseParse {
+                    provider: self.provider_id.clone(),
+                    message: format!(
+                        "failed to serialize Anthropic tool call arguments for `{}`: {error}",
+                        tool_call.id
+                    ),
+                }
+            })?;
+            let _ = sender
+                .send(Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index,
+                    id: Some(tool_call.id),
+                    name: Some(tool_call.name),
+                    arguments: Some(arguments),
+                })))
+                .await;
+        }
+
+        if let Some(usage) = usage {
+            let _ = sender.send(Ok(StreamItem::UsageUpdate(usage))).await;
+        }
+        if let Some(finish_reason) = finish_reason {
+            let _ = sender
+                .send(Ok(StreamItem::FinishReason(finish_reason)))
+                .await;
+        }
+        drop(sender);
+
+        Ok(receiver)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub backoff_base: Duration,
+    pub backoff_max: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            backoff_base: Duration::from_millis(250),
+            backoff_max: Duration::from_secs(2),
+        }
+    }
+}
+
+impl RetryPolicy {
+    fn normalized(self) -> Self {
+        let max_attempts = self.max_attempts.max(1);
+        let backoff_base = if self.backoff_base.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            self.backoff_base
+        };
+        let backoff_max = if self.backoff_max < backoff_base {
+            backoff_base
+        } else {
+            self.backoff_max
+        };
+        Self {
+            max_attempts,
+            backoff_base,
+            backoff_max,
+        }
+    }
+
+    fn backoff_delay_for_attempt(&self, attempt: u32) -> Duration {
+        let shift = attempt.saturating_sub(1).min(31);
+        let factor = 1_u128 << shift;
+        let base = self.backoff_base.as_millis();
+        let max = self.backoff_max.as_millis();
+        let delay_ms = (base.saturating_mul(factor)).min(max);
+        let delay_ms_u64 = u64::try_from(delay_ms).unwrap_or(u64::MAX);
+        Duration::from_millis(delay_ms_u64)
+    }
+}
+
+pub struct ReliableProvider {
+    inner: Arc<dyn Provider>,
+    retry_policy: RetryPolicy,
+}
+
+impl ReliableProvider {
+    pub fn with_defaults(inner: Box<dyn Provider>) -> Self {
+        Self::new(inner, RetryPolicy::default())
+    }
+
+    pub fn new(inner: Box<dyn Provider>, retry_policy: RetryPolicy) -> Self {
+        Self::from_arc(Arc::from(inner), retry_policy)
+    }
+
+    pub fn from_arc(inner: Arc<dyn Provider>, retry_policy: RetryPolicy) -> Self {
+        Self {
+            inner,
+            retry_policy: retry_policy.normalized(),
+        }
+    }
+
+    pub fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy
+    }
+
+    async fn complete_with_retry(&self, context: &Context) -> Result<Response, ProviderError> {
+        let mut attempt = 1_u32;
+        loop {
+            match self.inner.complete(context).await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    if !is_retriable_provider_error(&error)
+                        || attempt >= self.retry_policy.max_attempts
+                    {
+                        return Err(error);
+                    }
+
+                    let delay = self.retry_policy.backoff_delay_for_attempt(attempt);
+                    tracing::warn!(
+                        provider = %self.inner.provider_id(),
+                        attempt,
+                        max_attempts = self.retry_policy.max_attempts,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %error,
+                        "retrying provider completion after transient failure"
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ReliableProvider {
+    fn provider_id(&self) -> &ProviderId {
+        self.inner.provider_id()
+    }
+
+    fn model_catalog(&self) -> &ModelCatalog {
+        self.inner.model_catalog()
+    }
+
+    async fn complete(&self, context: &Context) -> Result<Response, ProviderError> {
+        self.complete_with_retry(context).await
+    }
+
+    async fn stream(
+        &self,
+        context: &Context,
+        buffer_size: usize,
+    ) -> Result<ProviderStream, ProviderError> {
+        let channel_size = if buffer_size == 0 {
+            DEFAULT_STREAM_BUFFER_SIZE
+        } else {
+            buffer_size
+        };
+        let (sender, receiver) = mpsc::channel(channel_size);
+        let context = context.clone();
+        let inner = Arc::clone(&self.inner);
+        let retry_policy = self.retry_policy;
+
+        tokio::spawn(async move {
+            let mut attempt = 1_u32;
+            'retry_stream: loop {
+                let mut stream = match inner.stream(&context, buffer_size).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        if !is_retriable_provider_error(&error)
+                            || attempt >= retry_policy.max_attempts
+                        {
+                            let _ = sender.send(Err(error)).await;
+                            return;
+                        }
+
+                        let delay = retry_policy.backoff_delay_for_attempt(attempt);
+                        tracing::warn!(
+                            provider = %inner.provider_id(),
+                            attempt,
+                            max_attempts = retry_policy.max_attempts,
+                            delay_ms = delay.as_millis() as u64,
+                            error = %error,
+                            "retrying provider stream setup after transient failure"
+                        );
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                };
+
+                while let Some(item) = stream.recv().await {
+                    match item {
+                        Ok(StreamItem::ConnectionLost(message)) => {
+                            if attempt >= retry_policy.max_attempts {
+                                let _ = sender.send(Ok(StreamItem::ConnectionLost(message))).await;
+                                return;
+                            }
+
+                            let delay = retry_policy.backoff_delay_for_attempt(attempt);
+                            tracing::warn!(
+                                provider = %inner.provider_id(),
+                                attempt,
+                                max_attempts = retry_policy.max_attempts,
+                                delay_ms = delay.as_millis() as u64,
+                                message = %message,
+                                "retrying provider stream after connection loss"
+                            );
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue 'retry_stream;
+                        }
+                        other => {
+                            if sender.send(other).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                return;
+            }
+        });
+
+        Ok(receiver)
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct OpenAIChatCompletionRequest {
     model: String,
@@ -498,10 +887,214 @@ struct OpenAIErrorBody {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct AnthropicMessagesRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicMessageRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<AnthropicRequestToolDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<AnthropicToolChoice>,
+}
+
+impl AnthropicMessagesRequest {
+    fn from_context(context: &Context, max_tokens: u32) -> Result<Self, ProviderError> {
+        let mut system_chunks = Vec::new();
+        let mut messages = Vec::new();
+
+        for message in &context.messages {
+            match message.role {
+                MessageRole::System => {
+                    if let Some(content) = message.content.clone().and_then(non_empty) {
+                        system_chunks.push(content);
+                    }
+                }
+                MessageRole::User | MessageRole::Assistant => {
+                    let mut content = Vec::new();
+                    if let Some(text) = message.content.clone().and_then(non_empty) {
+                        content.push(AnthropicRequestContentBlock::Text { text });
+                    }
+                    for tool_call in &message.tool_calls {
+                        content.push(AnthropicRequestContentBlock::ToolUse {
+                            id: tool_call.id.clone(),
+                            name: tool_call.name.clone(),
+                            input: tool_call.arguments.clone(),
+                        });
+                    }
+                    if content.is_empty() {
+                        return Err(ProviderError::RequestFailed {
+                            provider: context.provider.clone(),
+                            message: format!(
+                                "cannot convert {:?} message with empty content and no tool calls to Anthropic payload",
+                                message.role
+                            ),
+                        });
+                    }
+                    messages.push(AnthropicMessageRequest {
+                        role: message_role_to_anthropic_role(&message.role).to_owned(),
+                        content,
+                    });
+                }
+                MessageRole::Tool => {
+                    let tool_use_id = message.tool_call_id.clone().ok_or_else(|| {
+                        ProviderError::RequestFailed {
+                            provider: context.provider.clone(),
+                            message: "tool message is missing tool_call_id for Anthropic payload"
+                                .to_owned(),
+                        }
+                    })?;
+                    messages.push(AnthropicMessageRequest {
+                        role: "user".to_owned(),
+                        content: vec![AnthropicRequestContentBlock::ToolResult {
+                            tool_use_id,
+                            content: message.content.clone().unwrap_or_default(),
+                        }],
+                    });
+                }
+            }
+        }
+
+        let tools = context
+            .tools
+            .iter()
+            .map(AnthropicRequestToolDefinition::from)
+            .collect::<Vec<_>>();
+        if messages.is_empty() {
+            return Err(ProviderError::RequestFailed {
+                provider: context.provider.clone(),
+                message: "Anthropic request requires at least one non-system message".to_owned(),
+            });
+        }
+        let tool_choice = (!tools.is_empty()).then_some(AnthropicToolChoice::auto());
+        let system = (!system_chunks.is_empty()).then(|| system_chunks.join("\n\n"));
+
+        Ok(Self {
+            model: context.model.0.clone(),
+            max_tokens: max_tokens.max(1),
+            system,
+            messages,
+            tools,
+            tool_choice,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessageRequest {
+    role: String,
+    content: Vec<AnthropicRequestContentBlock>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicRequestContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicRequestToolDefinition {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    input_schema: JsonSchema,
+}
+
+impl From<&FunctionDecl> for AnthropicRequestToolDefinition {
+    fn from(value: &FunctionDecl) -> Self {
+        Self {
+            name: value.name.clone(),
+            description: value.description.clone(),
+            input_schema: value.parameters.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicToolChoice {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+impl AnthropicToolChoice {
+    fn auto() -> Self {
+        Self {
+            kind: "auto".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicMessagesResponse {
+    role: String,
+    content: Vec<AnthropicResponseContentBlock>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponseContentBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    input: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicErrorEnvelope {
+    #[serde(default)]
+    error: Option<AnthropicErrorBody>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicErrorBody {
+    #[serde(default)]
+    message: Option<String>,
+}
+
 fn resolve_api_key(explicit_api_key: Option<String>) -> Option<String> {
     resolve_api_key_from_sources(
         explicit_api_key,
         env::var("OPENAI_API_KEY").ok(),
+        env::var("API_KEY").ok(),
+    )
+}
+
+fn resolve_anthropic_api_key(explicit_api_key: Option<String>) -> Option<String> {
+    resolve_api_key_from_sources(
+        explicit_api_key,
+        env::var("ANTHROPIC_API_KEY").ok(),
         env::var("API_KEY").ok(),
     )
 }
@@ -527,9 +1120,13 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 fn normalize_base_url(base_url: &str) -> String {
+    normalize_base_url_or_default(base_url, OPENAI_DEFAULT_BASE_URL)
+}
+
+fn normalize_base_url_or_default(base_url: &str, default_base_url: &str) -> String {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
-        OPENAI_DEFAULT_BASE_URL.to_owned()
+        default_base_url.to_owned()
     } else {
         trimmed.trim_end_matches('/').to_owned()
     }
@@ -544,6 +1141,14 @@ fn message_role_to_openai_role(role: &MessageRole) -> &'static str {
     }
 }
 
+fn message_role_to_anthropic_role(role: &MessageRole) -> &'static str {
+    match role {
+        MessageRole::User | MessageRole::Tool => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "user",
+    }
+}
+
 fn openai_role_to_message_role(role: &str) -> Option<MessageRole> {
     match role {
         "system" => Some(MessageRole::System),
@@ -551,6 +1156,22 @@ fn openai_role_to_message_role(role: &str) -> Option<MessageRole> {
         "assistant" => Some(MessageRole::Assistant),
         "tool" => Some(MessageRole::Tool),
         _ => None,
+    }
+}
+
+fn anthropic_role_to_message_role(role: &str) -> Option<MessageRole> {
+    match role {
+        "user" => Some(MessageRole::User),
+        "assistant" => Some(MessageRole::Assistant),
+        _ => None,
+    }
+}
+
+fn is_retriable_provider_error(error: &ProviderError) -> bool {
+    match error {
+        ProviderError::Transport { .. } => true,
+        ProviderError::HttpStatus { status, .. } => *status == 429 || *status >= 500,
+        _ => false,
     }
 }
 
@@ -619,6 +1240,78 @@ fn normalize_openai_message(
         content: message.content,
         tool_calls,
         tool_call_id: None,
+    })
+}
+
+fn normalize_anthropic_response(
+    response: AnthropicMessagesResponse,
+    provider: &ProviderId,
+) -> Result<Response, ProviderError> {
+    let role = anthropic_role_to_message_role(&response.role).ok_or_else(|| {
+        ProviderError::ResponseParse {
+            provider: provider.clone(),
+            message: format!("unsupported Anthropic role `{}`", response.role),
+        }
+    })?;
+
+    let mut text_chunks = Vec::new();
+    let mut tool_calls = Vec::new();
+    for block in response.content {
+        match block.kind.as_str() {
+            "text" => {
+                if let Some(text) = block.text.and_then(non_empty) {
+                    text_chunks.push(text);
+                }
+            }
+            "tool_use" => {
+                let id = block.id.ok_or_else(|| ProviderError::ResponseParse {
+                    provider: provider.clone(),
+                    message: "Anthropic tool_use block missing id".to_owned(),
+                })?;
+                let name = block.name.ok_or_else(|| ProviderError::ResponseParse {
+                    provider: provider.clone(),
+                    message: format!("Anthropic tool_use block `{id}` missing name"),
+                })?;
+                let arguments = block.input.ok_or_else(|| ProviderError::ResponseParse {
+                    provider: provider.clone(),
+                    message: format!("Anthropic tool_use block `{id}` missing input"),
+                })?;
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let usage = response.usage.map(|usage| {
+        let total_tokens = match (usage.input_tokens, usage.output_tokens) {
+            (Some(input_tokens), Some(output_tokens)) => {
+                Some(input_tokens.saturating_add(output_tokens))
+            }
+            _ => None,
+        };
+        UsageUpdate {
+            prompt_tokens: usage.input_tokens,
+            completion_tokens: usage.output_tokens,
+            total_tokens,
+        }
+    });
+
+    let message = Message {
+        role,
+        content: (!text_chunks.is_empty()).then(|| text_chunks.join("\n")),
+        tool_calls: tool_calls.clone(),
+        tool_call_id: None,
+    };
+
+    Ok(Response {
+        tool_calls,
+        message,
+        finish_reason: response.stop_reason,
+        usage,
     })
 }
 
@@ -844,6 +1537,16 @@ fn extract_http_error_message(body: &str) -> String {
     {
         return truncate_message(&message);
     }
+    if let Ok(parsed) = serde_json::from_str::<AnthropicErrorEnvelope>(body) {
+        if let Some(error) = parsed.error
+            && let Some(message) = error.message.and_then(non_empty)
+        {
+            return truncate_message(&message);
+        }
+        if let Some(message) = parsed.message.and_then(non_empty) {
+            return truncate_message(&message);
+        }
+    }
     let trimmed = body.trim();
     if trimmed.is_empty() {
         "empty error response from provider".to_owned()
@@ -864,8 +1567,14 @@ fn truncate_message(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         io::{Read, Write},
         net::TcpListener,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use insta::assert_json_snapshot;
@@ -909,6 +1618,151 @@ mod tests {
     #[test]
     fn default_openai_config_uses_openai_base_url() {
         assert_eq!(OpenAIConfig::default().base_url, OPENAI_DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn default_anthropic_config_uses_anthropic_base_url() {
+        let config = AnthropicConfig::default();
+        assert_eq!(config.base_url, ANTHROPIC_DEFAULT_BASE_URL);
+        assert_eq!(config.max_tokens, DEFAULT_ANTHROPIC_MAX_TOKENS);
+    }
+
+    #[test]
+    fn anthropic_api_key_resolution_uses_expected_precedence() {
+        let resolved = resolve_api_key_from_sources(
+            Some("explicit".to_owned()),
+            Some("anthropic-env".to_owned()),
+            Some("fallback".to_owned()),
+        );
+        assert_eq!(resolved.as_deref(), Some("explicit"));
+
+        let resolved = resolve_api_key_from_sources(
+            None,
+            Some("anthropic-env".to_owned()),
+            Some("fallback".to_owned()),
+        );
+        assert_eq!(resolved.as_deref(), Some("anthropic-env"));
+
+        let resolved = resolve_api_key_from_sources(None, None, Some("fallback".to_owned()));
+        assert_eq!(resolved.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn anthropic_request_normalization_snapshot_is_stable() {
+        let context = Context {
+            provider: ProviderId::from("anthropic"),
+            model: ModelId::from("claude-3-5-sonnet-latest"),
+            tools: vec![FunctionDecl::new(
+                "read_file",
+                Some("Read UTF-8 text from a file".to_owned()),
+                JsonSchema::object(
+                    std::collections::BTreeMap::from([(
+                        "path".to_owned(),
+                        JsonSchema::new(types::JsonSchemaType::String),
+                    )]),
+                    vec!["path".to_owned()],
+                ),
+            )],
+            messages: vec![
+                Message {
+                    role: MessageRole::System,
+                    content: Some("You are concise".to_owned()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: Some("List project files".to_owned()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".to_owned(),
+                        name: "read_file".to_owned(),
+                        arguments: json!({"path": "Cargo.toml"}),
+                    }],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some("{\"ok\":true}".to_owned()),
+                    tool_calls: vec![],
+                    tool_call_id: Some("call_1".to_owned()),
+                },
+            ],
+        };
+        let request =
+            AnthropicMessagesRequest::from_context(&context, DEFAULT_ANTHROPIC_MAX_TOKENS)
+                .expect("request should normalize");
+        let request_json = serde_json::to_value(request).expect("request should serialize");
+        assert_json_snapshot!(
+            request_json,
+            @r###"
+        {
+          "max_tokens": 1024,
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "List project files",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            },
+            {
+              "content": [
+                {
+                  "id": "call_1",
+                  "input": {
+                    "path": "Cargo.toml"
+                  },
+                  "name": "read_file",
+                  "type": "tool_use"
+                }
+              ],
+              "role": "assistant"
+            },
+            {
+              "content": [
+                {
+                  "content": "{\"ok\":true}",
+                  "tool_use_id": "call_1",
+                  "type": "tool_result"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "claude-3-5-sonnet-latest",
+          "system": "You are concise",
+          "tool_choice": {
+            "type": "auto"
+          },
+          "tools": [
+            {
+              "description": "Read UTF-8 text from a file",
+              "input_schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "name": "read_file"
+            }
+          ]
+        }
+        "###
+        );
     }
 
     #[test]
@@ -1380,6 +2234,233 @@ data: [DONE]
     }
 
     #[test]
+    fn anthropic_response_normalization_maps_text_and_tool_use() {
+        let response = AnthropicMessagesResponse {
+            role: "assistant".to_owned(),
+            content: vec![
+                AnthropicResponseContentBlock {
+                    kind: "text".to_owned(),
+                    text: Some("Done".to_owned()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+                AnthropicResponseContentBlock {
+                    kind: "tool_use".to_owned(),
+                    text: None,
+                    id: Some("call_1".to_owned()),
+                    name: Some("read_file".to_owned()),
+                    input: Some(json!({"path":"Cargo.toml"})),
+                },
+            ],
+            stop_reason: Some("tool_use".to_owned()),
+            usage: Some(AnthropicUsage {
+                input_tokens: Some(5),
+                output_tokens: Some(2),
+            }),
+        };
+
+        let normalized = normalize_anthropic_response(response, &ProviderId::from("anthropic"))
+            .expect("should parse");
+        assert_eq!(normalized.message.role, MessageRole::Assistant);
+        assert_eq!(normalized.message.content.as_deref(), Some("Done"));
+        assert_eq!(normalized.finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(
+            normalized.usage,
+            Some(UsageUpdate {
+                prompt_tokens: Some(5),
+                completion_tokens: Some(2),
+                total_tokens: Some(7),
+            })
+        );
+        assert_eq!(normalized.tool_calls.len(), 1);
+        assert_eq!(normalized.tool_calls[0].id, "call_1");
+        assert_eq!(normalized.tool_calls[0].name, "read_file");
+        assert_eq!(
+            normalized.tool_calls[0].arguments,
+            json!({"path": "Cargo.toml"})
+        );
+    }
+
+    #[test]
+    fn anthropic_unknown_models_are_rejected_before_network_request() {
+        let provider = AnthropicProvider::with_catalog(
+            AnthropicConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url: "http://127.0.0.1:9".to_owned(),
+                max_tokens: 64,
+            },
+            test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
+        )
+        .expect("provider should initialize");
+
+        let context = test_context_for("anthropic", "unknown-model", "Ping");
+        let validation = run_complete_anthropic(&provider, &context);
+        assert!(matches!(
+            validation,
+            Err(ProviderError::UnknownModel { .. })
+        ));
+    }
+
+    #[test]
+    fn anthropic_transport_errors_are_mapped() {
+        let provider = AnthropicProvider::with_catalog(
+            AnthropicConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url: "http://127.0.0.1:9".to_owned(),
+                max_tokens: 64,
+            },
+            test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
+        )
+        .expect("provider should initialize");
+        let completion = run_complete_anthropic(
+            &provider,
+            &test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping"),
+        );
+        assert!(matches!(completion, Err(ProviderError::Transport { .. })));
+    }
+
+    #[test]
+    fn anthropic_http_status_errors_are_mapped() {
+        let base_url = spawn_one_shot_server(
+            "429 Too Many Requests",
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}"#,
+            "application/json",
+        );
+        let provider = AnthropicProvider::with_catalog(
+            AnthropicConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url,
+                max_tokens: 64,
+            },
+            test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
+        )
+        .expect("provider should initialize");
+        let completion = run_complete_anthropic(
+            &provider,
+            &test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping"),
+        );
+        assert!(matches!(
+            completion,
+            Err(ProviderError::HttpStatus {
+                status: 429,
+                message,
+                ..
+            }) if message == "rate limited"
+        ));
+    }
+
+    #[test]
+    fn anthropic_response_parse_errors_are_mapped() {
+        let base_url = spawn_one_shot_server("200 OK", "not-json", "text/plain");
+        let provider = AnthropicProvider::with_catalog(
+            AnthropicConfig {
+                api_key: Some("test-key".to_owned()),
+                base_url,
+                max_tokens: 64,
+            },
+            test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
+        )
+        .expect("provider should initialize");
+        let completion = run_complete_anthropic(
+            &provider,
+            &test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping"),
+        );
+        assert!(matches!(
+            completion,
+            Err(ProviderError::ResponseParse { .. })
+        ));
+    }
+
+    #[test]
+    fn reliable_provider_retries_transport_failures_then_succeeds() {
+        let provider = Arc::new(SequencedProvider::new(
+            "openai",
+            "gpt-4o-mini",
+            vec![
+                Err(ProviderError::Transport {
+                    provider: ProviderId::from("openai"),
+                    message: "timeout".to_owned(),
+                }),
+                Ok(sample_response("Recovered")),
+            ],
+        ));
+        let reliable = ReliableProvider::from_arc(
+            provider.clone(),
+            RetryPolicy {
+                max_attempts: 3,
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(1),
+            },
+        );
+
+        let response = run_complete_with(&reliable, &test_context("gpt-4o-mini"))
+            .expect("retry should recover");
+        assert_eq!(response.message.content.as_deref(), Some("Recovered"));
+        assert_eq!(provider.complete_call_count(), 2);
+    }
+
+    #[test]
+    fn reliable_provider_does_not_retry_non_retriable_errors() {
+        let provider = Arc::new(SequencedProvider::new(
+            "openai",
+            "gpt-4o-mini",
+            vec![
+                Err(ProviderError::ResponseParse {
+                    provider: ProviderId::from("openai"),
+                    message: "schema mismatch".to_owned(),
+                }),
+                Ok(sample_response("ignored")),
+            ],
+        ));
+        let reliable = ReliableProvider::from_arc(
+            provider.clone(),
+            RetryPolicy {
+                max_attempts: 3,
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(1),
+            },
+        );
+
+        let error = run_complete_with(&reliable, &test_context("gpt-4o-mini"))
+            .expect_err("non-retriable error should be surfaced");
+        assert!(matches!(error, ProviderError::ResponseParse { .. }));
+        assert_eq!(provider.complete_call_count(), 1);
+    }
+
+    #[test]
+    fn reliable_provider_enforces_max_attempts() {
+        let provider = Arc::new(SequencedProvider::new(
+            "openai",
+            "gpt-4o-mini",
+            vec![
+                Err(ProviderError::Transport {
+                    provider: ProviderId::from("openai"),
+                    message: "timeout-1".to_owned(),
+                }),
+                Err(ProviderError::Transport {
+                    provider: ProviderId::from("openai"),
+                    message: "timeout-2".to_owned(),
+                }),
+                Ok(sample_response("should not be reached")),
+            ],
+        ));
+        let reliable = ReliableProvider::from_arc(
+            provider.clone(),
+            RetryPolicy {
+                max_attempts: 2,
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(1),
+            },
+        );
+
+        let error = run_complete_with(&reliable, &test_context("gpt-4o-mini"))
+            .expect_err("max attempts should stop retries");
+        assert!(matches!(error, ProviderError::Transport { .. }));
+        assert_eq!(provider.complete_call_count(), 2);
+    }
+
+    #[test]
     #[ignore = "requires OPENAI_API_KEY and network access"]
     fn live_openai_smoke_normalizes_response() {
         let _api_key = env::var("OPENAI_API_KEY")
@@ -1401,11 +2482,91 @@ data: [DONE]
         );
     }
 
+    struct SequencedProvider {
+        provider_id: ProviderId,
+        model_catalog: ModelCatalog,
+        complete_steps: Mutex<VecDeque<Result<Response, ProviderError>>>,
+        complete_calls: AtomicUsize,
+    }
+
+    impl SequencedProvider {
+        fn new(
+            provider_id: &str,
+            model_id: &str,
+            complete_steps: Vec<Result<Response, ProviderError>>,
+        ) -> Self {
+            Self {
+                provider_id: ProviderId::from(provider_id),
+                model_catalog: test_model_catalog_for(provider_id, model_id, model_id),
+                complete_steps: Mutex::new(VecDeque::from(complete_steps)),
+                complete_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn complete_call_count(&self) -> usize {
+            self.complete_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SequencedProvider {
+        fn provider_id(&self) -> &ProviderId {
+            &self.provider_id
+        }
+
+        fn model_catalog(&self) -> &ModelCatalog {
+            &self.model_catalog
+        }
+
+        async fn complete(&self, _context: &Context) -> Result<Response, ProviderError> {
+            self.complete_calls.fetch_add(1, Ordering::SeqCst);
+            let mut steps = self
+                .complete_steps
+                .lock()
+                .expect("sequenced provider complete steps mutex should not be poisoned");
+            steps.pop_front().unwrap_or_else(|| {
+                Err(ProviderError::RequestFailed {
+                    provider: self.provider_id.clone(),
+                    message: "sequenced provider had no remaining completion steps".to_owned(),
+                })
+            })
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context,
+            _buffer_size: usize,
+        ) -> Result<types::ProviderStream, ProviderError> {
+            Err(ProviderError::RequestFailed {
+                provider: self.provider_id.clone(),
+                message: "sequenced provider stream is not configured".to_owned(),
+            })
+        }
+    }
+
+    fn sample_response(content: &str) -> Response {
+        Response {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: Some(content.to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            tool_calls: vec![],
+            finish_reason: Some("stop".to_owned()),
+            usage: None,
+        }
+    }
+
     fn test_model_catalog() -> ModelCatalog {
+        test_model_catalog_for("openai", "gpt-4o-mini", "GPT-4o mini")
+    }
+
+    fn test_model_catalog_for(provider: &str, model: &str, display_name: &str) -> ModelCatalog {
         ModelCatalog::new(vec![ModelDescriptor {
-            provider: ProviderId::from("openai"),
-            model: ModelId::from("gpt-4o-mini"),
-            display_name: Some("GPT-4o mini".to_owned()),
+            provider: ProviderId::from(provider),
+            model: ModelId::from(model),
+            display_name: Some(display_name.to_owned()),
             caps: ProviderCaps::default(),
             deprecated: false,
         }])
@@ -1416,8 +2577,12 @@ data: [DONE]
     }
 
     fn test_context_with_prompt(model: &str, prompt: &str) -> Context {
+        test_context_for("openai", model, prompt)
+    }
+
+    fn test_context_for(provider: &str, model: &str, prompt: &str) -> Context {
         Context {
-            provider: ProviderId::from("openai"),
+            provider: ProviderId::from(provider),
             model: ModelId::from(model),
             tools: vec![],
             messages: vec![Message {
@@ -1431,6 +2596,20 @@ data: [DONE]
 
     fn run_complete(
         provider: &OpenAIProvider,
+        context: &Context,
+    ) -> Result<Response, ProviderError> {
+        run_complete_with(provider, context)
+    }
+
+    fn run_complete_anthropic(
+        provider: &AnthropicProvider,
+        context: &Context,
+    ) -> Result<Response, ProviderError> {
+        run_complete_with(provider, context)
+    }
+
+    fn run_complete_with<P: Provider>(
+        provider: &P,
         context: &Context,
     ) -> Result<Response, ProviderError> {
         tokio::runtime::Builder::new_current_thread()

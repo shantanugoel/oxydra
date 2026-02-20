@@ -197,6 +197,9 @@ struct RecordingMemory {
     records: Mutex<Vec<MemoryRecord>>,
     hybrid_query_requests: Mutex<Vec<MemoryHybridQueryRequest>>,
     hybrid_query_results: Mutex<Vec<MemoryHybridQueryResult>>,
+    summary_state: Mutex<Option<MemorySummaryState>>,
+    summary_write_requests: Mutex<Vec<MemorySummaryWriteRequest>>,
+    force_stale_summary_write: bool,
 }
 
 impl RecordingMemory {
@@ -205,6 +208,9 @@ impl RecordingMemory {
             records: Mutex::new(records),
             hybrid_query_requests: Mutex::new(Vec::new()),
             hybrid_query_results: Mutex::new(Vec::new()),
+            summary_state: Mutex::new(None),
+            summary_write_requests: Mutex::new(Vec::new()),
+            force_stale_summary_write: false,
         }
     }
 
@@ -213,11 +219,32 @@ impl RecordingMemory {
             records: Mutex::new(Vec::new()),
             hybrid_query_requests: Mutex::new(Vec::new()),
             hybrid_query_results: Mutex::new(results),
+            summary_state: Mutex::new(None),
+            summary_write_requests: Mutex::new(Vec::new()),
+            force_stale_summary_write: false,
+        }
+    }
+
+    fn with_stale_summary_writes(results: Vec<MemoryHybridQueryResult>) -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+            hybrid_query_requests: Mutex::new(Vec::new()),
+            hybrid_query_results: Mutex::new(results),
+            summary_state: Mutex::new(None),
+            summary_write_requests: Mutex::new(Vec::new()),
+            force_stale_summary_write: true,
         }
     }
 
     fn recorded_hybrid_queries(&self) -> Vec<MemoryHybridQueryRequest> {
         self.hybrid_query_requests
+            .lock()
+            .expect("memory test mutex should not be poisoned")
+            .clone()
+    }
+
+    fn recorded_summary_writes(&self) -> Vec<MemorySummaryWriteRequest> {
+        self.summary_write_requests
             .lock()
             .expect("memory test mutex should not be poisoned")
             .clone()
@@ -308,18 +335,52 @@ impl MemoryRetrieval for RecordingMemory {
 
     async fn read_summary_state(
         &self,
-        _request: MemorySummaryReadRequest,
+        request: MemorySummaryReadRequest,
     ) -> Result<Option<MemorySummaryState>, MemoryError> {
-        Ok(None)
+        Ok(self
+            .summary_state
+            .lock()
+            .expect("memory test mutex should not be poisoned")
+            .clone()
+            .filter(|state| state.session_id == request.session_id))
     }
 
     async fn write_summary_state(
         &self,
         request: MemorySummaryWriteRequest,
     ) -> Result<MemorySummaryWriteResult, MemoryError> {
+        self.summary_write_requests
+            .lock()
+            .expect("memory test mutex should not be poisoned")
+            .push(request.clone());
+        if self.force_stale_summary_write {
+            return Ok(MemorySummaryWriteResult {
+                applied: false,
+                current_epoch: request.expected_epoch.saturating_add(1),
+            });
+        }
+
+        let mut state = self
+            .summary_state
+            .lock()
+            .expect("memory test mutex should not be poisoned");
+        let current_epoch = state.as_ref().map_or(0, |current| current.epoch);
+        if current_epoch != request.expected_epoch {
+            return Ok(MemorySummaryWriteResult {
+                applied: false,
+                current_epoch,
+            });
+        }
+        *state = Some(MemorySummaryState {
+            session_id: request.session_id,
+            epoch: request.next_epoch,
+            upper_sequence: request.upper_sequence,
+            summary: request.summary,
+            metadata: request.metadata,
+        });
         Ok(MemorySummaryWriteResult {
-            applied: false,
-            current_epoch: request.expected_epoch,
+            applied: true,
+            current_epoch: request.next_epoch,
         })
     }
 }
@@ -1389,6 +1450,205 @@ async fn run_session_for_session_injects_retrieved_memory_snippets() {
     assert_eq!(request.top_k, Some(3));
     assert_eq!(request.vector_weight, Some(0.6));
     assert_eq!(request.fts_weight, Some(0.4));
+}
+
+#[tokio::test]
+async fn run_session_for_session_triggers_rolling_summary_when_threshold_exceeded() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let summary_prefix = format!("{}\n", super::budget::ROLLING_SUMMARY_PREFIX);
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            Some(256),
+        ));
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(move |provider_context| {
+            provider_context.messages.iter().any(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.starts_with(summary_prefix.as_str()))
+            })
+        })
+        .returning(|_| Ok(assistant_response("summary applied", vec![])));
+
+    let memory = Arc::new(RecordingMemory::with_hybrid_query_results(vec![]));
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.trigger_ratio = 0.2;
+    limits.context_budget.safety_buffer_tokens = 8;
+    limits.summarization.target_ratio = 0.45;
+    limits.summarization.min_turns = 4;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits)
+        .with_memory_retrieval(memory.clone());
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::User,
+                content: Some("older user detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("older assistant detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("middle user detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("middle assistant detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("latest user question".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let response = runtime
+        .run_session_for_session("session-summary", &mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should trigger rolling summary flow");
+    assert_eq!(response.message.content.as_deref(), Some("summary applied"));
+
+    let writes = memory.recorded_summary_writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].session_id, "session-summary");
+    assert_eq!(writes[0].expected_epoch, 0);
+    assert!(writes[0].upper_sequence > 0);
+    assert!(writes[0].summary.contains("Recent condensed turns:"));
+
+    let summary_state = memory
+        .read_summary_state(MemorySummaryReadRequest {
+            session_id: "session-summary".to_owned(),
+        })
+        .await
+        .expect("summary state should be readable")
+        .expect("summary state should be persisted");
+    assert_eq!(summary_state.epoch, 1);
+    assert_eq!(summary_state.upper_sequence, writes[0].upper_sequence);
+}
+
+#[tokio::test]
+async fn run_session_for_session_discards_stale_rolling_summary_writes() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let summary_prefix = format!("{}\n", super::budget::ROLLING_SUMMARY_PREFIX);
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            Some(256),
+        ));
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(move |provider_context| {
+            !provider_context.messages.iter().any(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.starts_with(summary_prefix.as_str()))
+            })
+        })
+        .returning(|_| Ok(assistant_response("stale ignored", vec![])));
+
+    let memory = Arc::new(RecordingMemory::with_stale_summary_writes(vec![]));
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.trigger_ratio = 0.2;
+    limits.context_budget.safety_buffer_tokens = 8;
+    limits.summarization.target_ratio = 0.45;
+    limits.summarization.min_turns = 4;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits)
+        .with_memory_retrieval(memory.clone());
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::User,
+                content: Some("older user detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("older assistant detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("middle user detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("middle assistant detail ".repeat(80)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("latest user question".to_owned()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let response = runtime
+        .run_session_for_session(
+            "session-summary-stale",
+            &mut context,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("runtime should tolerate stale summary writes");
+    assert_eq!(response.message.content.as_deref(), Some("stale ignored"));
+
+    let writes = memory.recorded_summary_writes();
+    assert_eq!(writes.len(), 1);
+    let summary_state = memory
+        .read_summary_state(MemorySummaryReadRequest {
+            session_id: "session-summary-stale".to_owned(),
+        })
+        .await
+        .expect("summary read should succeed");
+    assert!(summary_state.is_none());
 }
 
 fn test_catalog(

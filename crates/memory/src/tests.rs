@@ -7,7 +7,8 @@ use libsql::{Builder, params};
 use serde_json::json;
 use types::{
     Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
-    MemoryRecallRequest, MemoryRetrieval, MemoryStoreRequest, Message, MessageRole,
+    MemoryRecallRequest, MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest,
+    MemorySummaryWriteRequest, Message, MessageRole,
 };
 
 use crate::{
@@ -691,6 +692,174 @@ async fn hybrid_query_breaks_ties_by_recency_then_chunk_id() {
     assert_eq!(results[1].sequence_end, Some(5));
     assert_eq!(results[2].sequence_end, Some(3));
 
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn summary_state_write_uses_epoch_compare_and_swap() {
+    let db_path = temp_db_path("summary-state-cas");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    backend
+        .store(MemoryStoreRequest {
+            session_id: "session-summary-cas".to_owned(),
+            sequence: 1,
+            payload: json!({"role":"user","content":"seed"}),
+        })
+        .await
+        .expect("seed message should store");
+
+    let first = MemoryRetrieval::write_summary_state(
+        &backend,
+        MemorySummaryWriteRequest {
+            session_id: "session-summary-cas".to_owned(),
+            expected_epoch: 0,
+            next_epoch: 1,
+            upper_sequence: 1,
+            summary: "initial summary".to_owned(),
+            metadata: Some(json!({"kind":"rolling"})),
+        },
+    )
+    .await
+    .expect("first summary write should apply");
+    assert!(first.applied);
+    assert_eq!(first.current_epoch, 1);
+
+    let stale = MemoryRetrieval::write_summary_state(
+        &backend,
+        MemorySummaryWriteRequest {
+            session_id: "session-summary-cas".to_owned(),
+            expected_epoch: 0,
+            next_epoch: 2,
+            upper_sequence: 1,
+            summary: "stale summary".to_owned(),
+            metadata: None,
+        },
+    )
+    .await
+    .expect("stale summary write should return compare-and-swap miss");
+    assert!(!stale.applied);
+    assert_eq!(stale.current_epoch, 1);
+
+    backend
+        .store(MemoryStoreRequest {
+            session_id: "session-summary-cas".to_owned(),
+            sequence: 2,
+            payload: json!({"role":"assistant","content":"follow up"}),
+        })
+        .await
+        .expect("second event should store");
+
+    let second = MemoryRetrieval::write_summary_state(
+        &backend,
+        MemorySummaryWriteRequest {
+            session_id: "session-summary-cas".to_owned(),
+            expected_epoch: 1,
+            next_epoch: 2,
+            upper_sequence: 2,
+            summary: "updated summary".to_owned(),
+            metadata: None,
+        },
+    )
+    .await
+    .expect("second summary write should apply with current epoch");
+    assert!(second.applied);
+    assert_eq!(second.current_epoch, 2);
+
+    let state = MemoryRetrieval::read_summary_state(
+        &backend,
+        MemorySummaryReadRequest {
+            session_id: "session-summary-cas".to_owned(),
+        },
+    )
+    .await
+    .expect("summary read should succeed")
+    .expect("summary state should exist");
+    assert_eq!(state.epoch, 2);
+    assert_eq!(state.upper_sequence, 2);
+    assert_eq!(state.summary, "updated summary");
+    assert_eq!(state.metadata, None);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn store_preserves_existing_summary_state_in_session_state() {
+    let db_path = temp_db_path("summary-state-preserve");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    backend
+        .store(MemoryStoreRequest {
+            session_id: "session-summary-preserve".to_owned(),
+            sequence: 1,
+            payload: json!({"role":"user","content":"seed"}),
+        })
+        .await
+        .expect("seed message should store");
+    MemoryRetrieval::write_summary_state(
+        &backend,
+        MemorySummaryWriteRequest {
+            session_id: "session-summary-preserve".to_owned(),
+            expected_epoch: 0,
+            next_epoch: 1,
+            upper_sequence: 1,
+            summary: "persisted summary".to_owned(),
+            metadata: Some(json!({"source":"test"})),
+        },
+    )
+    .await
+    .expect("summary write should apply");
+
+    backend
+        .store(MemoryStoreRequest {
+            session_id: "session-summary-preserve".to_owned(),
+            sequence: 2,
+            payload: json!({"role":"assistant","content":"follow up"}),
+        })
+        .await
+        .expect("second event should update last_sequence");
+
+    let summary_state = MemoryRetrieval::read_summary_state(
+        &backend,
+        MemorySummaryReadRequest {
+            session_id: "session-summary-preserve".to_owned(),
+        },
+    )
+    .await
+    .expect("summary read should succeed")
+    .expect("summary state should still exist");
+    assert_eq!(summary_state.epoch, 1);
+    assert_eq!(summary_state.upper_sequence, 1);
+    assert_eq!(summary_state.summary, "persisted summary");
+
+    let conn = backend.connect().expect("backend should connect");
+    let mut rows = conn
+        .query(
+            "SELECT json_extract(state_json, '$.last_sequence')
+             FROM session_state WHERE session_id = ?1",
+            params!["session-summary-preserve"],
+        )
+        .await
+        .expect("state query should run");
+    let row = rows
+        .next()
+        .await
+        .expect("state row should read")
+        .expect("state row should exist");
+    let last_sequence = row
+        .get::<i64>(0)
+        .expect("last_sequence should deserialize as integer");
+    assert_eq!(last_sequence, 2);
+
+    drop(conn);
     let _ = fs::remove_file(db_path);
 }
 

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use libsql::{Builder, Connection, Database, params};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use types::{
     Memory, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryConfig, MemoryError,
     MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
@@ -363,9 +363,6 @@ impl Memory for LibsqlMemory {
         let payload = request.payload;
         let sequence_u64 = request.sequence;
         let payload_json = serde_json::to_string(&payload)?;
-        let session_state = serde_json::to_string(&json!({
-            "last_sequence": sequence_u64
-        }))?;
         let sequence = i64::try_from(sequence_u64)
             .map_err(|_| query_error("store sequence exceeds sqlite integer range".to_owned()))?;
         let prepared_index = prepare_index_document(
@@ -398,13 +395,19 @@ impl Memory for LibsqlMemory {
             .await
             .map_err(|error| query_error(error.to_string()))?;
 
+            let mut session_state = load_session_state_map(&conn, session_id.as_str())
+                .await?
+                .unwrap_or_default();
+            session_state.insert("last_sequence".to_owned(), Value::from(sequence_u64));
+            let session_state_json = serde_json::to_string(&Value::Object(session_state))?;
+
             conn.execute(
                 "INSERT INTO session_state (session_id, state_json, updated_at)
                  VALUES (?1, ?2, CURRENT_TIMESTAMP)
                  ON CONFLICT(session_id) DO UPDATE SET
-                     state_json = excluded.state_json,
-                     updated_at = CURRENT_TIMESTAMP",
-                params![session_id.as_str(), session_state],
+                      state_json = excluded.state_json,
+                      updated_at = CURRENT_TIMESTAMP",
+                params![session_id.as_str(), session_state_json],
             )
             .await
             .map_err(|error| query_error(error.to_string()))?;
@@ -550,20 +553,111 @@ impl MemoryRetrieval for LibsqlMemory {
 
     async fn read_summary_state(
         &self,
-        _request: MemorySummaryReadRequest,
+        request: MemorySummaryReadRequest,
     ) -> Result<Option<MemorySummaryState>, MemoryError> {
-        Err(query_error(
-            "summary state read API is not implemented yet for libsql memory".to_owned(),
-        ))
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        let Some(session_state) =
+            load_session_state_map(&conn, request.session_id.as_str()).await?
+        else {
+            return Ok(None);
+        };
+        read_summary_state_from_map(request.session_id.as_str(), &session_state)
     }
 
     async fn write_summary_state(
         &self,
-        _request: MemorySummaryWriteRequest,
+        request: MemorySummaryWriteRequest,
     ) -> Result<MemorySummaryWriteResult, MemoryError> {
-        Err(query_error(
-            "summary state write API is not implemented yet for libsql memory".to_owned(),
-        ))
+        let MemorySummaryWriteRequest {
+            session_id,
+            expected_epoch,
+            next_epoch,
+            upper_sequence,
+            summary,
+            metadata,
+        } = request;
+        if next_epoch <= expected_epoch {
+            return Err(query_error(format!(
+                "summary write next_epoch must be greater than expected_epoch; got expected_epoch={expected_epoch} next_epoch={next_epoch}"
+            )));
+        }
+
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            conn.execute(
+                "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
+                 VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+                params![session_id.as_str()],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            let mut session_state = load_session_state_map(&conn, session_id.as_str())
+                .await?
+                .unwrap_or_default();
+            let existing_summary = read_summary_state_from_map(session_id.as_str(), &session_state)?;
+            let current_epoch = existing_summary.as_ref().map_or(0, |state| state.epoch);
+            if current_epoch != expected_epoch {
+                return Ok(MemorySummaryWriteResult {
+                    applied: false,
+                    current_epoch,
+                });
+            }
+            if let Some(existing_summary) = existing_summary
+                && upper_sequence < existing_summary.upper_sequence
+            {
+                return Err(query_error(format!(
+                    "summary write upper_sequence must be monotonic; got {upper_sequence} but existing upper_sequence is {}",
+                    existing_summary.upper_sequence
+                )));
+            }
+
+            session_state.insert(
+                "summary_state".to_owned(),
+                json!({
+                    "epoch": next_epoch,
+                    "upper_sequence": upper_sequence,
+                    "summary": summary,
+                    "metadata": metadata,
+                }),
+            );
+            let session_state_json = serde_json::to_string(&Value::Object(session_state))?;
+            conn.execute(
+                "INSERT INTO session_state (session_id, state_json, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     state_json = excluded.state_json,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![session_id.as_str(), session_state_json],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            Ok::<MemorySummaryWriteResult, MemoryError>(MemorySummaryWriteResult {
+                applied: true,
+                current_epoch: next_epoch,
+            })
+        }
+        .await;
+        let result = match transaction_result {
+            Ok(result) => result,
+            Err(error) => {
+                rollback_quietly(&conn).await;
+                return Err(error);
+            }
+        };
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(result)
     }
 }
 
@@ -635,6 +729,106 @@ impl MemoryRetrieval for UnconfiguredMemory {
     ) -> Result<MemorySummaryWriteResult, MemoryError> {
         Err(Self::backend_unavailable())
     }
+}
+
+async fn load_session_state_map(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<Map<String, Value>>, MemoryError> {
+    let mut rows = conn
+        .query(
+            "SELECT state_json FROM session_state WHERE session_id = ?1 LIMIT 1",
+            params![session_id],
+        )
+        .await
+        .map_err(|error| query_error(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| query_error(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let state_json = row
+        .get::<String>(0)
+        .map_err(|error| query_error(error.to_string()))?;
+    let state_value: Value = serde_json::from_str(state_json.as_str()).map_err(|error| {
+        query_error(format!(
+            "session_state for session `{session_id}` is not valid JSON: {error}"
+        ))
+    })?;
+    let state_map = state_value.as_object().cloned().ok_or_else(|| {
+        query_error(format!(
+            "session_state for session `{session_id}` must be a JSON object"
+        ))
+    })?;
+    Ok(Some(state_map))
+}
+
+fn read_summary_state_from_map(
+    session_id: &str,
+    state: &Map<String, Value>,
+) -> Result<Option<MemorySummaryState>, MemoryError> {
+    let Some(summary_value) = state.get("summary_state") else {
+        return Ok(None);
+    };
+    if summary_value.is_null() {
+        return Ok(None);
+    }
+    let summary_state = summary_value.as_object().ok_or_else(|| {
+        query_error(format!(
+            "summary_state for session `{session_id}` must be a JSON object"
+        ))
+    })?;
+    let epoch = read_summary_u64_field(session_id, summary_state, "epoch")?;
+    let upper_sequence = read_summary_u64_field(session_id, summary_state, "upper_sequence")?;
+    let summary = read_summary_string_field(session_id, summary_state, "summary")?;
+    let metadata = summary_state
+        .get("metadata")
+        .cloned()
+        .filter(|value| !value.is_null());
+
+    Ok(Some(MemorySummaryState {
+        session_id: session_id.to_owned(),
+        epoch,
+        upper_sequence,
+        summary,
+        metadata,
+    }))
+}
+
+fn read_summary_u64_field(
+    session_id: &str,
+    summary_state: &Map<String, Value>,
+    field_name: &str,
+) -> Result<u64, MemoryError> {
+    let value = summary_state.get(field_name).ok_or_else(|| {
+        query_error(format!(
+            "summary_state for session `{session_id}` is missing `{field_name}`"
+        ))
+    })?;
+    value.as_u64().ok_or_else(|| {
+        query_error(format!(
+            "summary_state field `{field_name}` for session `{session_id}` must be an unsigned integer"
+        ))
+    })
+}
+
+fn read_summary_string_field(
+    session_id: &str,
+    summary_state: &Map<String, Value>,
+    field_name: &str,
+) -> Result<String, MemoryError> {
+    let value = summary_state.get(field_name).ok_or_else(|| {
+        query_error(format!(
+            "summary_state for session `{session_id}` is missing `{field_name}`"
+        ))
+    })?;
+    value.as_str().map(str::to_owned).ok_or_else(|| {
+        query_error(format!(
+            "summary_state field `{field_name}` for session `{session_id}` must be a string"
+        ))
+    })
 }
 
 async fn ensure_monotonic_sequence(

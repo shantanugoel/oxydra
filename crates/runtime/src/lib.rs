@@ -4,8 +4,9 @@ use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
 use types::{
     Context, Memory, MemoryError, MemoryHybridQueryRequest, MemoryRecallRequest, MemoryRetrieval,
-    MemoryStoreRequest, Message, MessageRole, Provider, ProviderError, ProviderId, Response,
-    RuntimeError, SafetyTier, StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
+    Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError, SafetyTier,
+    StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -208,6 +209,8 @@ impl AgentRuntime {
             let state = TurnState::Streaming;
             tracing::debug!(turn, ?state, "running provider turn");
 
+            self.maybe_trigger_rolling_summary(session_id, context)
+                .await?;
             let provider_context = self.prepare_provider_context(session_id, context).await?;
             let provider_response = self
                 .request_provider_response(&provider_context, cancellation)

@@ -713,6 +713,7 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 - Background summarisation for better latency with epoch retries
 - User scoped memories/db/sessions?
 - Full schema for models.dev catalog with code for snapshot generation
+- Option or command to start a new session? when do sessions change now?
 
 ### Test Strategy Across All Phases
 

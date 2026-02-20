@@ -2,6 +2,8 @@ use std::sync::OnceLock;
 
 use super::*;
 
+pub(crate) const ROLLING_SUMMARY_PREFIX: &str = "Rolling session summary:";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ContextBudgetBreakdown {
     pub(crate) max_context_tokens: u64,
@@ -30,7 +32,9 @@ impl AgentRuntime {
     ) -> Result<Context, RuntimeError> {
         let max_context_tokens = self.resolve_max_context_tokens(context)?;
         let safety_buffer_tokens = self.limits.context_budget.safety_buffer_tokens;
+        let summary_state = self.load_summary_state(session_id).await?;
         if self.memory_retrieval.is_none()
+            && summary_state.is_none()
             && self.is_obviously_within_budget(context, max_context_tokens, safety_buffer_tokens)
         {
             return Ok(context.clone());
@@ -55,17 +59,23 @@ impl AgentRuntime {
             }
         }
 
-        let system_messages: Vec<Message> = context
+        let mut system_messages: Vec<Message> = context
             .messages
             .iter()
             .filter(|message| message.role == MessageRole::System)
             .cloned()
             .collect();
+        if let Some(summary_message) = summary_state.as_ref().and_then(Self::summary_state_message)
+        {
+            system_messages.push(summary_message);
+        }
         let history_messages: Vec<Message> = context
             .messages
             .iter()
-            .filter(|message| message.role != MessageRole::System)
-            .cloned()
+            .enumerate()
+            .filter(|(_, message)| message.role != MessageRole::System)
+            .filter(|(index, _)| !Self::is_summarized_sequence(summary_state.as_ref(), *index))
+            .map(|(_, message)| message.clone())
             .collect();
 
         let message_budget = max_context_tokens
@@ -111,6 +121,248 @@ impl AgentRuntime {
         }
 
         Ok(provider_context)
+    }
+
+    pub(crate) async fn maybe_trigger_rolling_summary(
+        &self,
+        session_id: Option<&str>,
+        context: &Context,
+    ) -> Result<(), RuntimeError> {
+        let (Some(memory), Some(session_id)) = (&self.memory_retrieval, session_id) else {
+            return Ok(());
+        };
+        if context.messages.len() < self.limits.summarization.min_turns {
+            return Ok(());
+        }
+
+        let summary_state = self.load_summary_state(Some(session_id)).await?;
+        let mut unsummarized_history = Vec::new();
+        for (index, message) in context.messages.iter().enumerate() {
+            if message.role == MessageRole::System {
+                continue;
+            }
+            if Self::is_summarized_sequence(summary_state.as_ref(), index) {
+                continue;
+            }
+            let message_tokens = self.estimate_message_tokens(message)?;
+            unsummarized_history.push((Self::sequence_from_index(index), message, message_tokens));
+        }
+        if unsummarized_history.len() < self.limits.summarization.min_turns {
+            return Ok(());
+        }
+
+        let mut system_messages: Vec<Message> = context
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::System)
+            .cloned()
+            .collect();
+        if let Some(summary_message) = summary_state.as_ref().and_then(Self::summary_state_message)
+        {
+            system_messages.push(summary_message);
+        }
+        let system_tokens = self.estimate_messages_tokens(system_messages.as_slice())?;
+        let history_tokens = unsummarized_history
+            .iter()
+            .fold(0_u64, |accumulator, entry| {
+                accumulator.saturating_add(entry.2)
+            });
+        let retrieval_message = self
+            .fetch_retrieved_memory_message(Some(session_id), context)
+            .await?;
+        let retrieved_memory_tokens = retrieval_message
+            .as_ref()
+            .map(|message| self.estimate_message_tokens(message))
+            .transpose()?
+            .unwrap_or_default();
+        let tool_schema_tokens = self.estimate_tool_schema_tokens(context)?;
+        let max_context_tokens = self.resolve_max_context_tokens(context)?;
+        let total_tokens = system_tokens
+            .saturating_add(history_tokens)
+            .saturating_add(retrieved_memory_tokens)
+            .saturating_add(tool_schema_tokens)
+            .saturating_add(self.limits.context_budget.safety_buffer_tokens);
+        let utilization = if max_context_tokens == 0 {
+            0.0
+        } else {
+            total_tokens as f64 / max_context_tokens as f64
+        };
+        if utilization <= self.limits.context_budget.trigger_ratio {
+            return Ok(());
+        }
+
+        let target_tokens =
+            ((max_context_tokens as f64) * self.limits.summarization.target_ratio).floor() as u64;
+        let minimum_unsummarized_messages = 2_usize;
+        let mut summarize_count = 0_usize;
+        let mut remaining_total = total_tokens;
+        while remaining_total > target_tokens
+            && unsummarized_history.len().saturating_sub(summarize_count)
+                > minimum_unsummarized_messages
+        {
+            let (_, _, message_tokens) = unsummarized_history[summarize_count];
+            remaining_total = remaining_total.saturating_sub(message_tokens);
+            summarize_count = summarize_count.saturating_add(1);
+        }
+        if summarize_count == 0 {
+            return Ok(());
+        }
+
+        let summarized_entries = &unsummarized_history[..summarize_count];
+        let upper_sequence = summarized_entries
+            .last()
+            .map(|(sequence, _, _)| *sequence)
+            .unwrap_or_default();
+        let expected_epoch = summary_state.as_ref().map_or(0, |state| state.epoch);
+        let next_epoch = expected_epoch
+            .checked_add(1)
+            .ok_or(RuntimeError::BudgetExceeded)?;
+        let summary = Self::compose_rolling_summary(summary_state.as_ref(), summarized_entries);
+        let write_result = memory
+            .write_summary_state(MemorySummaryWriteRequest {
+                session_id: session_id.to_owned(),
+                expected_epoch,
+                next_epoch,
+                upper_sequence,
+                summary,
+                metadata: None,
+            })
+            .await
+            .map_err(RuntimeError::from)?;
+        if write_result.applied {
+            tracing::debug!(
+                session_id,
+                expected_epoch,
+                next_epoch,
+                upper_sequence,
+                "applied rolling summary update"
+            );
+        } else {
+            tracing::debug!(
+                session_id,
+                expected_epoch,
+                observed_epoch = write_result.current_epoch,
+                "discarded stale rolling summary update"
+            );
+        }
+        Ok(())
+    }
+
+    async fn load_summary_state(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Option<MemorySummaryState>, RuntimeError> {
+        let (Some(memory), Some(session_id)) = (&self.memory_retrieval, session_id) else {
+            return Ok(None);
+        };
+        memory
+            .read_summary_state(MemorySummaryReadRequest {
+                session_id: session_id.to_owned(),
+            })
+            .await
+            .map_err(RuntimeError::from)
+    }
+
+    fn compose_rolling_summary(
+        previous: Option<&MemorySummaryState>,
+        summarized_entries: &[(u64, &Message, u64)],
+    ) -> String {
+        let mut summary = String::new();
+        if let Some(previous) = previous {
+            let existing = previous.summary.trim();
+            if !existing.is_empty() {
+                summary.push_str(existing);
+                summary.push('\n');
+            }
+        }
+        summary.push_str("Recent condensed turns:\n");
+        for (sequence, message, _) in summarized_entries.iter().take(24) {
+            summary.push_str("- [");
+            summary.push_str(sequence.to_string().as_str());
+            summary.push_str("] ");
+            summary.push_str(Self::message_role_label(&message.role));
+            summary.push_str(": ");
+            summary.push_str(Self::summary_message_content(message).as_str());
+            summary.push('\n');
+        }
+        if summary.ends_with('\n') {
+            summary.pop();
+        }
+        if summary.chars().count() > 4_000 {
+            let truncated = summary.chars().take(4_000).collect::<String>();
+            return format!("{truncated}...");
+        }
+        summary
+    }
+
+    fn message_role_label(role: &MessageRole) -> &'static str {
+        match role {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        }
+    }
+
+    fn summary_message_content(message: &Message) -> String {
+        let normalized = message
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut content = if normalized.is_empty() {
+            let tool_calls = message
+                .tool_calls
+                .iter()
+                .map(|tool_call| tool_call.name.as_str())
+                .collect::<Vec<_>>();
+            if tool_calls.is_empty() {
+                "[no text]".to_owned()
+            } else {
+                format!("[tool calls: {}]", tool_calls.join(", "))
+            }
+        } else {
+            normalized
+        };
+        if content.chars().count() > 180 {
+            content = format!("{}...", content.chars().take(180).collect::<String>());
+        }
+        content
+    }
+
+    fn summary_state_message(summary_state: &MemorySummaryState) -> Option<Message> {
+        let summary = summary_state.summary.trim();
+        if summary.is_empty() {
+            return None;
+        }
+        Some(Message {
+            role: MessageRole::System,
+            content: Some(format!("{ROLLING_SUMMARY_PREFIX}\n{summary}")),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        })
+    }
+
+    fn is_summarized_sequence(summary_state: Option<&MemorySummaryState>, index: usize) -> bool {
+        let sequence = Self::sequence_from_index(index);
+        summary_state
+            .map(|summary_state| {
+                summary_state.upper_sequence > 0 && sequence <= summary_state.upper_sequence
+            })
+            .unwrap_or(false)
+    }
+
+    fn sequence_from_index(index: usize) -> u64 {
+        u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+    }
+
+    fn estimate_messages_tokens(&self, messages: &[Message]) -> Result<u64, RuntimeError> {
+        messages.iter().try_fold(0_u64, |accumulator, message| {
+            self.estimate_message_tokens(message)
+                .map(|tokens| accumulator.saturating_add(tokens))
+        })
     }
 
     fn resolve_max_context_tokens(&self, context: &Context) -> Result<u64, RuntimeError> {

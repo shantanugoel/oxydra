@@ -5,7 +5,8 @@ use std::{
 
 use serde_json::json;
 use types::{
-    Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
+    Context, MemoryError, MemoryForgetRequest, MemoryRecallRequest, MemoryRecord,
+    MemoryStoreRequest, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
     ProviderError, ProviderId, Response, RuntimeError, ToolCall, ToolError, init_tracing,
 };
 
@@ -64,6 +65,53 @@ fn runtime_error_composes_provider_and_tool_errors() {
     };
     let runtime_from_tool: RuntimeError = tool_error.into();
     assert!(matches!(runtime_from_tool, RuntimeError::Tool(_)));
+
+    let memory_error = MemoryError::NotFound {
+        session_id: "session-1".to_owned(),
+    };
+    let runtime_from_memory: RuntimeError = memory_error.into();
+    assert!(matches!(runtime_from_memory, RuntimeError::Memory(_)));
+}
+
+#[test]
+fn memory_contract_types_serialize_round_trip() {
+    let store = MemoryStoreRequest {
+        session_id: "session-1".to_owned(),
+        sequence: 7,
+        payload: json!({"kind":"assistant","content":"hello"}),
+    };
+    let recall = MemoryRecallRequest {
+        session_id: "session-1".to_owned(),
+        limit: Some(50),
+    };
+    let forget = MemoryForgetRequest {
+        session_id: "session-1".to_owned(),
+    };
+    let record = MemoryRecord {
+        session_id: store.session_id.clone(),
+        sequence: store.sequence,
+        payload: store.payload.clone(),
+    };
+
+    let store_json = serde_json::to_string(&store).expect("store request should serialize");
+    let parsed_store: MemoryStoreRequest =
+        serde_json::from_str(&store_json).expect("store request should deserialize");
+    assert_eq!(parsed_store, store);
+
+    let recall_json = serde_json::to_string(&recall).expect("recall request should serialize");
+    let parsed_recall: MemoryRecallRequest =
+        serde_json::from_str(&recall_json).expect("recall request should deserialize");
+    assert_eq!(parsed_recall, recall);
+
+    let forget_json = serde_json::to_string(&forget).expect("forget request should serialize");
+    let parsed_forget: MemoryForgetRequest =
+        serde_json::from_str(&forget_json).expect("forget request should deserialize");
+    assert_eq!(parsed_forget, forget);
+
+    let record_json = serde_json::to_string(&record).expect("record should serialize");
+    let parsed_record: MemoryRecord =
+        serde_json::from_str(&record_json).expect("record should deserialize");
+    assert_eq!(parsed_record, record);
 }
 
 #[test]

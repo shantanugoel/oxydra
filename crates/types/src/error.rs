@@ -47,11 +47,29 @@ pub enum ToolError {
 }
 
 #[derive(Debug, Error)]
+pub enum MemoryError {
+    #[error("memory connection failed: {message}")]
+    Connection { message: String },
+    #[error("memory initialization failed: {message}")]
+    Initialization { message: String },
+    #[error("memory migration failed: {message}")]
+    Migration { message: String },
+    #[error("memory query failed: {message}")]
+    Query { message: String },
+    #[error("memory serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("memory item not found for session `{session_id}`")]
+    NotFound { session_id: String },
+}
+
+#[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Tool(#[from] ToolError),
+    #[error(transparent)]
+    Memory(#[from] MemoryError),
     #[error("turn cancelled")]
     Cancelled,
     #[error("turn budget exceeded")]

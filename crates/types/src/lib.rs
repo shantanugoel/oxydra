@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod memory;
 mod model;
 mod provider;
 mod tool;
@@ -11,7 +12,10 @@ pub use config::{
     ProviderConfigs, ProviderSelection, ReliabilityConfig, RuntimeConfig,
     SUPPORTED_CONFIG_MAJOR_VERSION, validate_config_version,
 };
-pub use error::{ProviderError, RuntimeError, ToolError};
+pub use error::{MemoryError, ProviderError, RuntimeError, ToolError};
+pub use memory::{
+    Memory, MemoryForgetRequest, MemoryRecallRequest, MemoryRecord, MemoryStoreRequest,
+};
 pub use model::{
     Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
     ProviderId, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,

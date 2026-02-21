@@ -8,6 +8,7 @@ use thiserror::Error;
 use types::init_tracing;
 
 const DEFAULT_RUNNER_CONFIG_PATH: &str = ".oxydra/runner.toml";
+const TUI_BINARY_NAME: &str = "oxydra-tui";
 
 #[derive(Debug, Clone, Parser, PartialEq, Eq)]
 #[command(name = "runner", about = "Oxydra runner control CLI")]
@@ -20,6 +21,10 @@ struct CliArgs {
     insecure: bool,
     #[arg(long = "tui")]
     tui: bool,
+    /// Print gateway connection metadata and exit without launching the
+    /// interactive TUI. Only meaningful with --tui.
+    #[arg(long = "probe")]
+    probe: bool,
     #[arg(long = "daemon")]
     daemon: bool,
 }
@@ -32,6 +37,17 @@ enum CliError {
     Runner(#[from] RunnerError),
     #[error(transparent)]
     ControlTransport(#[from] RunnerControlTransportError),
+    #[error(
+        "`{binary}` was not found in PATH. \
+         Install it with `cargo install --path crates/tui` or ensure it is on your PATH."
+    )]
+    TuiBinaryNotFound { binary: String },
+    #[error("failed to launch `{binary}`: {source}")]
+    TuiLaunchFailed {
+        binary: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 fn main() -> ExitCode {
@@ -51,12 +67,17 @@ fn run() -> Result<(), CliError> {
 
     if args.tui {
         let connection = runner.connect_tui(RunnerTuiConnectRequest::new(&user_id))?;
-        println!("mode=tui");
-        println!("user_id={}", connection.user_id);
-        println!("gateway_endpoint={}", connection.gateway_endpoint);
-        println!("runtime_session_id={}", connection.runtime_session_id);
-        println!("workspace_root={}", connection.workspace.root.display());
-        return Ok(());
+
+        if args.probe {
+            println!("mode=tui");
+            println!("user_id={}", connection.user_id);
+            println!("gateway_endpoint={}", connection.gateway_endpoint);
+            println!("runtime_session_id={}", connection.runtime_session_id);
+            println!("workspace_root={}", connection.workspace.root.display());
+            return Ok(());
+        }
+
+        return launch_tui_binary(&connection.gateway_endpoint, &connection.user_id);
     }
 
     let mut startup = runner.start_user(RunnerStartRequest {
@@ -144,6 +165,62 @@ fn resolve_user_id(user_id: Option<String>, runner: &Runner) -> Result<String, C
     }
 }
 
+/// Locate the `oxydra-tui` binary in PATH and spawn it with the discovered
+/// gateway endpoint and user id. The runner process waits for the child to
+/// exit and forwards its exit status.
+fn launch_tui_binary(gateway_endpoint: &str, user_id: &str) -> Result<(), CliError> {
+    let binary_path = which_tui_binary()?;
+
+    let mut child = std::process::Command::new(&binary_path)
+        .arg("--gateway-endpoint")
+        .arg(gateway_endpoint)
+        .arg("--user")
+        .arg(user_id)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|source| CliError::TuiLaunchFailed {
+            binary: binary_path.display().to_string(),
+            source,
+        })?;
+
+    let status = child.wait().map_err(|source| CliError::TuiLaunchFailed {
+        binary: binary_path.display().to_string(),
+        source,
+    })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        // Propagate the child's non-zero exit via a descriptive error.
+        Err(CliError::Arguments(format!(
+            "{TUI_BINARY_NAME} exited with {}",
+            status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |c| c.to_string()),
+        )))
+    }
+}
+
+/// Search PATH for the `oxydra-tui` binary. Returns an error with an
+/// installation hint when the binary is not found.
+fn which_tui_binary() -> Result<PathBuf, CliError> {
+    // Check PATH entries manually to avoid pulling in an extra crate.
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(TUI_BINARY_NAME);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(CliError::TuiBinaryNotFound {
+        binary: TUI_BINARY_NAME.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +232,7 @@ mod tests {
         assert_eq!(args.user_id, None);
         assert!(!args.insecure);
         assert!(!args.tui);
+        assert!(!args.probe);
         assert!(!args.daemon);
     }
 
@@ -163,7 +241,25 @@ mod tests {
         let args = CliArgs::try_parse_from(["runner", "--tui", "--user", "alice"])
             .expect("args should parse");
         assert!(args.tui);
+        assert!(!args.probe);
         assert_eq!(args.user_id.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_tui_with_probe_flag() {
+        let args = CliArgs::try_parse_from(["runner", "--tui", "--probe", "--user", "alice"])
+            .expect("tui+probe args should parse");
+        assert!(args.tui);
+        assert!(args.probe);
+        assert_eq!(args.user_id.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_probe_without_tui() {
+        let args =
+            CliArgs::try_parse_from(["runner", "--probe"]).expect("standalone probe should parse");
+        assert!(!args.tui);
+        assert!(args.probe);
     }
 
     #[test]
@@ -172,6 +268,7 @@ mod tests {
             CliArgs::try_parse_from(["runner", "--daemon"]).expect("daemon args should parse");
         assert!(args.daemon);
         assert!(!args.tui);
+        assert!(!args.probe);
     }
 
     #[test]
@@ -179,6 +276,47 @@ mod tests {
         assert!(
             CliArgs::try_parse_from(["runner", "--config"]).is_err(),
             "missing value should fail clap parsing"
+        );
+    }
+
+    #[test]
+    fn which_tui_binary_returns_error_when_not_in_path() {
+        // Set PATH to an empty directory so the binary cannot be found.
+        let empty_dir = std::env::temp_dir().join("oxydra-empty-path-test");
+        let _ = std::fs::create_dir_all(&empty_dir);
+        let saved_path = std::env::var_os("PATH");
+
+        // SAFETY: test is single-threaded for this variable scope.
+        unsafe { std::env::set_var("PATH", &empty_dir) };
+        let result = which_tui_binary();
+        if let Some(saved) = saved_path {
+            unsafe { std::env::set_var("PATH", saved) };
+        }
+
+        assert!(result.is_err(), "should fail when binary is not in PATH");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(TUI_BINARY_NAME),
+            "error should mention the binary name: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("cargo install"),
+            "error should suggest installation: {err_msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(empty_dir);
+    }
+
+    #[test]
+    fn tui_binary_not_found_error_message_includes_install_hint() {
+        let err = CliError::TuiBinaryNotFound {
+            binary: "oxydra-tui".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("oxydra-tui"), "should mention binary name");
+        assert!(
+            msg.contains("cargo install"),
+            "should include install suggestion"
         );
     }
 }

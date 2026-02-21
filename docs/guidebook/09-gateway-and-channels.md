@@ -152,7 +152,55 @@ The adapter translates between gateway frames and channel events:
 
 ### Visual Rendering
 
-**Current state:** The `ratatui` + `crossterm` terminal rendering loop is not yet implemented. The TUI crate contains the channel adapter, state management, and gateway connection logic, but not the visual terminal interface. The rendering infrastructure is planned as a completion item.
+**File:** `tui/src/app.rs`, `tui/src/widgets.rs`, `tui/src/ui_model.rs`, `tui/src/event_loop.rs`
+
+The TUI rendering loop is built on `ratatui` (terminal UI framework) and `crossterm` (cross-platform terminal backend). It provides a full-screen interactive chat interface with three visual regions stacked vertically:
+
+- **Message pane** (fills remaining space): scrollable chat history with per-role styling — user messages in cyan with `you:` prefix, assistant messages in default color, errors in red, system notices in dim yellow.
+- **Input bar** (3 rows): bordered text input showing `Prompt` when idle or `Waiting...` during an active turn. The border grays out when input is disabled (active turn or disconnected). Cursor position is tracked via `unicode-width` for correct multi-byte character handling.
+- **Status bar** (1 row): connection indicator (green/red/yellow), session ID, turn state (`idle`/`streaming`), and key hints (`[Ctrl+C to cancel]` during a turn, `[Ctrl+C to exit]` when idle).
+
+#### State Ownership
+
+Two separate state structures drive the rendering:
+
+- **`TuiChannelAdapter`** (in `channel_adapter.rs`) owns `TuiUiState` — the authoritative protocol/gateway state (connected flag, runtime session ID, active turn ID, rendered output, last error). The main loop reads snapshots via `adapter.state_snapshot()` — never holding the mutex across `.await` boundaries.
+- **`TuiViewModel`** (in `ui_model.rs`) is rendering-only state: message history (`Vec<ChatMessage>`, capped at 1000 entries), scroll offset, auto-scroll flag, input buffer with cursor position, spinner tick counter, and `ConnectionState` enum (`Connected`/`Disconnected`/`Reconnecting`).
+
+The main loop bridges them: inbound gateway frames update both the adapter (protocol state) and the view model (message history), then a single `terminal.draw()` call renders the combined state.
+
+#### Main Loop Architecture
+
+`TuiApp::run()` in `app.rs` orchestrates the full lifecycle:
+
+1. **Terminal setup**: `TerminalGuard` RAII struct enables raw mode, enters the alternate screen, hides the cursor, and enables mouse capture. Its `Drop` restores everything. A panic hook provides the same restoration on unwind.
+2. **WebSocket transport**: after `connect_async()`, the stream is split into independent read/write halves. A reader task decodes `GatewayServerFrame`s into an `mpsc` channel (`gateway_rx`). A writer task receives `GatewayClientFrame`s from another channel (`ws_tx`) and sends them on the wire. The main loop never touches the WebSocket directly.
+3. **Hello handshake**: a `Hello` frame is sent via `ws_tx`; the loop waits for `HelloAck` on `gateway_rx` with a 10-second timeout.
+4. **Event reader**: `EventReader` spawns a dedicated `std::thread` that calls `crossterm::event::read()` in a blocking loop, mapping `KeyEvent`s to `AppAction` variants (character input, backspace, cursor movement, submit, scroll, cancel, quit, resize) and sending them into an `mpsc` channel.
+5. **`tokio::select!` loop** over four channels:
+   - `gateway_rx` (inbound server frames) → adapter update + view model update + auto-scroll
+   - `adapter_rx` (outbound client frames from the adapter's broadcast channel) → forward to `ws_tx`
+   - `action_rx` (user input) → handle text editing, scrolling, submit (via `adapter.submit_prompt()`), cancel (via `adapter.handle_ctrl_c()`), quit
+   - `tick` (100ms interval) → increment spinner, send `HealthCheck` via `ws_tx` every ~5 seconds
+   - After any event: single `terminal.draw()` call renders the full UI from the view model + adapter snapshot.
+
+#### No Double-Send
+
+User submits prompt → `adapter.submit_prompt()` enqueues a `GatewayClientFrame::SendTurn` into the adapter's broadcast channel → the main loop's `adapter_rx` arm receives it → forwards to `ws_tx` → writer task sends it on the wire. The main loop never sends to the WebSocket directly except through `ws_tx`.
+
+#### Reconnection
+
+When the reader task's channel closes (WebSocket disconnect):
+
+1. `ConnectionState` transitions to `Disconnected`, then `Reconnecting` with exponential backoff (250ms → 5s cap, with jitter).
+2. Old reader/writer task handles are aborted.
+3. On successful reconnect: new socket is split, new tasks spawned, `Hello` is sent with the prior `runtime_session_id` for session resume.
+4. On `HelloAck`: `ConnectionState` returns to `Connected`, input re-enabled.
+5. Queued outbound frames are dropped during reconnection — the user must re-submit.
+
+#### Standalone Binary
+
+`oxydra-tui` (`tui/src/bin/oxydra-tui.rs`) is a thin CLI entry point that parses `--gateway-endpoint` and `--user` arguments, generates a UUID connection ID, and runs `TuiApp` inside a multi-threaded tokio runtime. Runner-based endpoint discovery (`runner --tui`) execs this binary.
 
 ## Channel Registry
 

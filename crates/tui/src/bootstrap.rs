@@ -759,7 +759,7 @@ remote_url = "libsql://example-org.turso.io"
             .expect("clock should be monotonic")
             .as_nanos();
         path.push(format!(
-            "oxydra-cli-{label}-{}-{unique}",
+            "oxydra-tui-{label}-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("temp dir should be creatable");

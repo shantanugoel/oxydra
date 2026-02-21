@@ -1,6 +1,6 @@
 # Oxydra Configuration
 
-This repository now includes a Phase 10 runner-era bootstrap path in `crates/cli` (`bootstrap_vm_runtime*`) that owns config/provider/memory/runtime/tool assembly, plus deterministic config layering and startup validation.
+This repository now includes a Phase 10 runner-era bootstrap path in `crates/tui` (`bootstrap_vm_runtime*`) that owns config/provider/memory/runtime/tool assembly, plus deterministic config layering and startup validation.
 
 ## Quick start
 

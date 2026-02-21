@@ -17,6 +17,7 @@ use bollard::{
         CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode, Uri, body::Bytes};
 use hyper_util::client::legacy::Client;
@@ -24,11 +25,16 @@ use hyperlocal::{UnixClientExt, UnixConnector, Uri as HyperlocalUri};
 use sandbox::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
+};
 use tracing::{info, warn};
 use types::{
-    BootstrapEnvelopeError, RunnerBootstrapEnvelope, RunnerConfigError, RunnerGlobalConfig,
-    RunnerGuestImages, RunnerUserConfig, RunnerUserRegistration, SandboxTier, SidecarEndpoint,
-    SidecarTransport,
+    BootstrapEnvelopeError, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame, GatewayClientHello,
+    GatewayHealthCheck, GatewayServerFrame, RunnerBootstrapEnvelope, RunnerConfigError,
+    RunnerGlobalConfig, RunnerGuestImages, RunnerUserConfig, RunnerUserRegistration, SandboxTier,
+    SidecarEndpoint, SidecarTransport,
 };
 
 pub const PROCESS_TIER_WARNING: &str = "Process tier is insecure: isolation is degraded and not production-safe; shell/browser tools are disabled.";
@@ -36,6 +42,7 @@ pub const PROCESS_TIER_WARNING: &str = "Process tier is insecure: isolation is d
 const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
+const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
 
 const FIRECRACKER_BINARY: &str = "firecracker";
 const PROCESS_EXECUTABLE_ENV_KEY: &str = "OXYDRA_VM_PROCESS_EXECUTABLE";
@@ -152,6 +159,25 @@ impl Runner {
             launch: launch.launch,
             bootstrap,
             warnings: launch.warnings,
+        })
+    }
+
+    pub fn connect_tui(
+        &self,
+        request: RunnerTuiConnectRequest,
+    ) -> Result<RunnerTuiConnection, RunnerError> {
+        let user_id = validate_user_id(&request.user_id)?.to_owned();
+        let _user_config = self.load_user_config(&user_id)?;
+        let workspace = self.provision_user_workspace(&user_id)?;
+        let endpoint_path = workspace.tmp.join(GATEWAY_ENDPOINT_MARKER_FILE);
+        let gateway_endpoint = read_gateway_endpoint_marker(&endpoint_path, &user_id)?;
+        let runtime_session_id = probe_gateway_health(&gateway_endpoint, &user_id)?;
+
+        Ok(RunnerTuiConnection {
+            user_id,
+            workspace,
+            gateway_endpoint,
+            runtime_session_id,
         })
     }
 
@@ -483,6 +509,27 @@ impl RunnerStartRequest {
             insecure: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerTuiConnectRequest {
+    pub user_id: String,
+}
+
+impl RunnerTuiConnectRequest {
+    pub fn new(user_id: impl Into<String>) -> Self {
+        Self {
+            user_id: user_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerTuiConnection {
+    pub user_id: String,
+    pub workspace: UserWorkspace,
+    pub gateway_endpoint: String,
+    pub runtime_session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,6 +989,23 @@ pub enum RunnerError {
         #[source]
         source: io::Error,
     },
+    #[error(
+        "no running guest found for user `{user_id}`; expected gateway endpoint marker at `{endpoint_path}`"
+    )]
+    NoRunningGuest {
+        user_id: String,
+        endpoint_path: PathBuf,
+    },
+    #[error("failed to read gateway endpoint marker `{path}`: {source}")]
+    ReadGatewayEndpoint {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("gateway endpoint marker `{path}` is empty")]
+    InvalidGatewayEndpoint { path: PathBuf },
+    #[error("failed to probe gateway endpoint `{endpoint}`: {message}")]
+    GatewayProbeFailed { endpoint: String, message: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1378,6 +1442,184 @@ fn sanitize_container_component(value: &str) -> String {
     }
 }
 
+fn read_gateway_endpoint_marker(path: &Path, user_id: &str) -> Result<String, RunnerError> {
+    let raw = fs::read_to_string(path).map_err(|source| {
+        if source.kind() == io::ErrorKind::NotFound {
+            RunnerError::NoRunningGuest {
+                user_id: user_id.to_owned(),
+                endpoint_path: path.to_path_buf(),
+            }
+        } else {
+            RunnerError::ReadGatewayEndpoint {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+    let endpoint = raw.trim();
+    if endpoint.is_empty() {
+        return Err(RunnerError::InvalidGatewayEndpoint {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(endpoint.to_owned())
+}
+
+fn probe_gateway_health(gateway_endpoint: &str, user_id: &str) -> Result<String, RunnerError> {
+    let gateway_endpoint = gateway_endpoint.to_owned();
+    let user_id = user_id.to_owned();
+    run_async(async move {
+        let (mut socket, _) = connect_async(&gateway_endpoint).await.map_err(|error| {
+            RunnerError::GatewayProbeFailed {
+                endpoint: gateway_endpoint.clone(),
+                message: format!("websocket connect failed: {error}"),
+            }
+        })?;
+
+        send_gateway_client_frame(
+            &mut socket,
+            &GatewayClientFrame::Hello(GatewayClientHello {
+                request_id: "runner-connect-hello".to_owned(),
+                protocol_version: GATEWAY_PROTOCOL_VERSION,
+                user_id,
+                runtime_session_id: None,
+            }),
+            &gateway_endpoint,
+        )
+        .await?;
+
+        let runtime_session_id =
+            match receive_gateway_server_frame(&mut socket, &gateway_endpoint).await? {
+                GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+                GatewayServerFrame::Error(error) => {
+                    return Err(RunnerError::GatewayProbeFailed {
+                        endpoint: gateway_endpoint,
+                        message: format!("gateway rejected hello: {}", error.message),
+                    });
+                }
+                frame => {
+                    return Err(RunnerError::GatewayProbeFailed {
+                        endpoint: gateway_endpoint,
+                        message: format!("expected hello_ack, got {frame:?}"),
+                    });
+                }
+            };
+
+        send_gateway_client_frame(
+            &mut socket,
+            &GatewayClientFrame::HealthCheck(GatewayHealthCheck {
+                request_id: "runner-connect-health".to_owned(),
+            }),
+            &gateway_endpoint,
+        )
+        .await?;
+
+        loop {
+            match receive_gateway_server_frame(&mut socket, &gateway_endpoint).await? {
+                GatewayServerFrame::HealthStatus(status) if status.healthy => {
+                    let _ = socket.close(None).await;
+                    return Ok(runtime_session_id);
+                }
+                GatewayServerFrame::HealthStatus(status) => {
+                    return Err(RunnerError::GatewayProbeFailed {
+                        endpoint: gateway_endpoint,
+                        message: status.message.unwrap_or_else(|| {
+                            "gateway health check reported unhealthy".to_owned()
+                        }),
+                    });
+                }
+                GatewayServerFrame::Error(error) => {
+                    return Err(RunnerError::GatewayProbeFailed {
+                        endpoint: gateway_endpoint,
+                        message: error.message,
+                    });
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+async fn send_gateway_client_frame(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    frame: &GatewayClientFrame,
+    endpoint: &str,
+) -> Result<(), RunnerError> {
+    let payload =
+        serde_json::to_string(frame).map_err(|error| RunnerError::GatewayProbeFailed {
+            endpoint: endpoint.to_owned(),
+            message: format!("gateway client frame serialization failed: {error}"),
+        })?;
+    socket
+        .send(WsMessage::Text(payload.into()))
+        .await
+        .map_err(|error| RunnerError::GatewayProbeFailed {
+            endpoint: endpoint.to_owned(),
+            message: format!("gateway frame send failed: {error}"),
+        })
+}
+
+async fn receive_gateway_server_frame(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    endpoint: &str,
+) -> Result<GatewayServerFrame, RunnerError> {
+    loop {
+        let Some(message) = socket.next().await else {
+            return Err(RunnerError::GatewayProbeFailed {
+                endpoint: endpoint.to_owned(),
+                message: "gateway websocket closed before probe completed".to_owned(),
+            });
+        };
+
+        match message {
+            Ok(WsMessage::Text(payload)) => {
+                return serde_json::from_str::<GatewayServerFrame>(payload.as_ref()).map_err(
+                    |error| RunnerError::GatewayProbeFailed {
+                        endpoint: endpoint.to_owned(),
+                        message: format!("gateway frame decode failed: {error}"),
+                    },
+                );
+            }
+            Ok(WsMessage::Binary(payload)) => {
+                return serde_json::from_slice::<GatewayServerFrame>(&payload).map_err(|error| {
+                    RunnerError::GatewayProbeFailed {
+                        endpoint: endpoint.to_owned(),
+                        message: format!("gateway frame decode failed: {error}"),
+                    }
+                });
+            }
+            Ok(WsMessage::Ping(payload)) => {
+                socket
+                    .send(WsMessage::Pong(payload))
+                    .await
+                    .map_err(|error| RunnerError::GatewayProbeFailed {
+                        endpoint: endpoint.to_owned(),
+                        message: format!("gateway websocket pong failed: {error}"),
+                    })?;
+            }
+            Ok(WsMessage::Pong(_)) => {}
+            Ok(WsMessage::Close(_)) => {
+                return Err(RunnerError::GatewayProbeFailed {
+                    endpoint: endpoint.to_owned(),
+                    message: "gateway websocket closed during probe".to_owned(),
+                });
+            }
+            Ok(_) => {
+                return Err(RunnerError::GatewayProbeFailed {
+                    endpoint: endpoint.to_owned(),
+                    message: "unsupported websocket message type during probe".to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(RunnerError::GatewayProbeFailed {
+                    endpoint: endpoint.to_owned(),
+                    message: format!("gateway websocket receive failed: {error}"),
+                });
+            }
+        }
+    }
+}
+
 fn validate_user_id(user_id: &str) -> Result<&str, RunnerError> {
     let user_id = user_id.trim();
     if user_id.is_empty()
@@ -1397,10 +1639,14 @@ fn validate_user_id(user_id: &str) -> Result<&str, RunnerError> {
 mod tests {
     use std::{
         env, fs,
+        net::TcpListener,
         path::{Path, PathBuf},
         sync::Mutex,
+        thread,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    use tokio_tungstenite::tungstenite::{Message as WsMessage, accept};
 
     use super::*;
 
@@ -1677,6 +1923,91 @@ mod tests {
     }
 
     #[test]
+    fn tui_connect_only_succeeds_against_running_gateway_endpoint() {
+        let root = temp_dir("tui-connect-success");
+        let global_path = write_runner_config_fixture(&root, "container");
+        write_user_config(&root.join("users/alice.toml"), "");
+
+        let backend = Arc::new(MockSandboxBackend::default());
+        let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+            .expect("runner should initialize");
+        let workspace = runner
+            .provision_user_workspace("alice")
+            .expect("workspace should provision");
+
+        let (gateway_endpoint, server_task) = spawn_mock_gateway_probe_server(true);
+        fs::write(
+            workspace.tmp.join(GATEWAY_ENDPOINT_MARKER_FILE),
+            &gateway_endpoint,
+        )
+        .expect("gateway endpoint marker should be writable");
+
+        let connection = runner
+            .connect_tui(RunnerTuiConnectRequest::new("alice"))
+            .expect("connect-only path should succeed with running gateway");
+        assert_eq!(connection.user_id, "alice");
+        assert_eq!(connection.workspace.root, workspace.root);
+        assert_eq!(connection.gateway_endpoint, gateway_endpoint);
+        assert_eq!(connection.runtime_session_id, "runtime-alice");
+        assert!(backend.recorded_launches().is_empty());
+
+        server_task.join().expect("mock gateway should shut down");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tui_connect_only_fails_with_clear_error_when_guest_is_absent() {
+        let root = temp_dir("tui-connect-missing-guest");
+        let global_path = write_runner_config_fixture(&root, "container");
+        write_user_config(&root.join("users/alice.toml"), "");
+
+        let backend = Arc::new(MockSandboxBackend::default());
+        let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+            .expect("runner should initialize");
+
+        let error = runner
+            .connect_tui(RunnerTuiConnectRequest::new("alice"))
+            .expect_err("missing running guest should fail connect-only path");
+        assert!(matches!(
+            error,
+            RunnerError::NoRunningGuest {
+                ref user_id,
+                ref endpoint_path
+            } if user_id == "alice" && endpoint_path.ends_with(GATEWAY_ENDPOINT_MARKER_FILE)
+        ));
+        assert!(backend.recorded_launches().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tui_connect_only_never_spawns_guest_when_probe_fails() {
+        let root = temp_dir("tui-connect-probe-fail");
+        let global_path = write_runner_config_fixture(&root, "container");
+        write_user_config(&root.join("users/alice.toml"), "");
+
+        let backend = Arc::new(MockSandboxBackend::default());
+        let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+            .expect("runner should initialize");
+        let workspace = runner
+            .provision_user_workspace("alice")
+            .expect("workspace should provision");
+        fs::write(
+            workspace.tmp.join(GATEWAY_ENDPOINT_MARKER_FILE),
+            "ws://127.0.0.1:9/ws",
+        )
+        .expect("gateway endpoint marker should be writable");
+
+        let error = runner
+            .connect_tui(RunnerTuiConnectRequest::new("alice"))
+            .expect_err("unreachable gateway probe should fail");
+        assert!(matches!(error, RunnerError::GatewayProbeFailed { .. }));
+        assert!(backend.recorded_launches().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn startup_rejects_microvm_on_unsupported_host() {
         let root = temp_dir("unsupported-host");
         let global_path = write_runner_config_fixture(&root, "micro_vm");
@@ -1705,6 +2036,91 @@ mod tests {
             extract_socket_path(&payload),
             Some(PathBuf::from("/tmp/sandbox/docker.sock"))
         );
+    }
+
+    fn spawn_mock_gateway_probe_server(healthy: bool) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock gateway should bind");
+        let address = listener
+            .local_addr()
+            .expect("mock gateway should expose address");
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("mock gateway should accept");
+            let mut socket = accept(stream).expect("mock websocket handshake should succeed");
+
+            let hello = parse_client_frame(
+                socket
+                    .read()
+                    .expect("mock gateway should receive hello frame"),
+            );
+            let user_id = match hello {
+                GatewayClientFrame::Hello(hello) => hello.user_id,
+                other => panic!("expected hello frame, got {other:?}"),
+            };
+            send_server_frame(
+                &mut socket,
+                GatewayServerFrame::HelloAck(types::GatewayHelloAck {
+                    request_id: "runner-connect-hello".to_owned(),
+                    protocol_version: GATEWAY_PROTOCOL_VERSION,
+                    session: types::GatewaySession {
+                        user_id: user_id.clone(),
+                        runtime_session_id: format!("runtime-{user_id}"),
+                    },
+                    active_turn: None,
+                }),
+            );
+
+            let health_check = parse_client_frame(
+                socket
+                    .read()
+                    .expect("mock gateway should receive health check"),
+            );
+            let request_id = match health_check {
+                GatewayClientFrame::HealthCheck(request) => request.request_id,
+                other => panic!("expected health_check frame, got {other:?}"),
+            };
+            send_server_frame(
+                &mut socket,
+                GatewayServerFrame::HealthStatus(types::GatewayHealthStatus {
+                    request_id,
+                    healthy,
+                    session: Some(types::GatewaySession {
+                        user_id: user_id.clone(),
+                        runtime_session_id: format!("runtime-{user_id}"),
+                    }),
+                    active_turn: None,
+                    message: Some(if healthy {
+                        "ready".to_owned()
+                    } else {
+                        "unhealthy".to_owned()
+                    }),
+                }),
+            );
+            let _ = socket.close(None);
+        });
+
+        (format!("ws://{address}/ws"), handle)
+    }
+
+    fn parse_client_frame(message: WsMessage) -> GatewayClientFrame {
+        match message {
+            WsMessage::Text(payload) => {
+                serde_json::from_str::<GatewayClientFrame>(payload.as_ref())
+                    .expect("mock gateway should decode text client frame")
+            }
+            WsMessage::Binary(payload) => serde_json::from_slice::<GatewayClientFrame>(&payload)
+                .expect("mock gateway should decode binary client frame"),
+            other => panic!("unexpected client websocket message: {other:?}"),
+        }
+    }
+
+    fn send_server_frame(
+        socket: &mut tokio_tungstenite::tungstenite::WebSocket<std::net::TcpStream>,
+        frame: GatewayServerFrame,
+    ) {
+        let payload = serde_json::to_string(&frame).expect("mock server frame should encode");
+        socket
+            .send(WsMessage::Text(payload.into()))
+            .expect("mock gateway should send server frame");
     }
 
     fn write_runner_config_fixture(root: &Path, default_tier: &str) -> PathBuf {

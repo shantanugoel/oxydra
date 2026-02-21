@@ -12,5 +12,5 @@ members = [
   "crates/shell-daemon",
   "crates/channels",
   "crates/gateway",
-  "crates/cli",
+  "crates/tui",
 ]

@@ -695,22 +695,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "figment",
- "memory",
- "provider",
- "runtime",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.0.3+spec-1.1.0",
- "tools",
- "types",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3729,6 +3713,7 @@ name = "runner"
 version = "0.1.0"
 dependencies = [
  "bollard",
+ "futures-util",
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
@@ -3738,6 +3723,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "toml 1.0.3+spec-1.1.0",
  "tracing",
  "types",
@@ -4967,6 +4953,26 @@ dependencies = [
  "target-triple",
  "termcolor",
  "toml 1.0.3+spec-1.1.0",
+]
+
+[[package]]
+name = "tui"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "figment",
+ "futures-util",
+ "memory",
+ "provider",
+ "runtime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 1.0.3+spec-1.1.0",
+ "tools",
+ "types",
 ]
 
 [[package]]

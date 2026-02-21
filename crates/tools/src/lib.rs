@@ -143,6 +143,7 @@ struct WebSearchArgs {
     query: String,
     count: Option<u64>,
     freshness: Option<String>,
+    config: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,10 +624,16 @@ impl Tool for WebSearchTool {
             JsonSchema::new(JsonSchemaType::String)
                 .with_description("Optional freshness filter: day, week, month, year"),
         );
+        properties.insert(
+            "config".to_owned(),
+            JsonSchema::new(JsonSchemaType::Object).with_description(
+                "Optional provider config: provider, base_url/base_urls, allow_private_base_urls, query_params, and provider-specific fields",
+            ),
+        );
 
         FunctionDecl::new(
             WEB_SEARCH_TOOL_NAME,
-            Some("Run a web search and return normalized provider results".to_owned()),
+            Some("Run a web search and return normalized provider results with optional provider config".to_owned()),
             JsonSchema::object(properties, vec!["query".to_owned()]),
         )
     }
@@ -640,7 +647,8 @@ impl Tool for WebSearchTool {
             &json!({
                 "query": request.query,
                 "count": request.count,
-                "freshness": request.freshness
+                "freshness": request.freshness,
+                "config": request.config
             }),
             None,
         )

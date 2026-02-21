@@ -29,6 +29,8 @@ use types::{
 
 mod policy;
 mod wasm_runner;
+mod web_fetch;
+mod web_search;
 
 pub use policy::{
     SecurityPolicy, SecurityPolicyViolation, SecurityPolicyViolationReason, WorkspaceSecurityPolicy,

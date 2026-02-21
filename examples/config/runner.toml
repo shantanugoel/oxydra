@@ -26,7 +26,7 @@ shell_vm  = "shell-vm:latest"    # The shell/browser sidecar image
 # See examples/config/runner-user.toml for the per-user config format.
 
 [users.alice]
-config_path = ".oxydra/users/alice.toml"
+config_path = "users/alice.toml"
 
 # [users.bob]
-# config_path = ".oxydra/users/bob.toml"
+# config_path = "users/bob.toml"

@@ -3654,6 +3654,7 @@ dependencies = [
  "jsonschema",
  "mockall",
  "provider",
+ "regex",
  "serde_json",
  "shell-daemon",
  "tiktoken-rs",

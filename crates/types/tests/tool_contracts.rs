@@ -12,7 +12,7 @@ fn function_decl_serializes_to_expected_json_shape() {
     );
 
     let schema = FunctionDecl::new(
-        "read_file",
+        "file_read",
         Some("Read UTF-8 text from a file".to_owned()),
         JsonSchema::object(properties, vec!["path".to_owned()]),
     );
@@ -21,7 +21,7 @@ fn function_decl_serializes_to_expected_json_shape() {
     assert_eq!(
         encoded,
         json!({
-            "name": "read_file",
+            "name": "file_read",
             "description": "Read UTF-8 text from a file",
             "parameters": {
                 "type": "object",

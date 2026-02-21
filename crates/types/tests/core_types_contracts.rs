@@ -17,7 +17,7 @@ use types::{
 fn serde_round_trip_for_core_types() {
     let tool_call = ToolCall {
         id: "call_1".to_owned(),
-        name: "read_file".to_owned(),
+        name: "file_read".to_owned(),
         arguments: json!({ "path": "Cargo.toml" }),
     };
 
@@ -63,7 +63,7 @@ fn runtime_error_composes_provider_and_tool_errors() {
     assert!(matches!(runtime_from_provider, RuntimeError::Provider(_)));
 
     let tool_error = ToolError::InvalidArguments {
-        tool: "read_file".to_owned(),
+        tool: "file_read".to_owned(),
         message: "path is required".to_owned(),
     };
     let runtime_from_tool: RuntimeError = tool_error.into();

@@ -1,7 +1,7 @@
 use tools_macros::tool;
 
 #[tool]
-fn read_file(path: String) -> String {
+fn file_read(path: String) -> String {
     path
 }
 

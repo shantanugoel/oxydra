@@ -197,6 +197,35 @@ impl Tool for SlowTool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SensitiveOutputTool;
+
+#[async_trait]
+impl Tool for SensitiveOutputTool {
+    fn schema(&self) -> FunctionDecl {
+        FunctionDecl::new(
+            "sensitive_output",
+            None,
+            JsonSchema::object(std::collections::BTreeMap::new(), vec![]),
+        )
+    }
+
+    async fn execute(&self, _args: &str) -> Result<String, ToolError> {
+        Ok(
+            "api_key=sk_live_ABC123DEF456GHI789JKL012MNO345PQR678\nartifact_id=A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2\nstatus=ok"
+                .to_owned(),
+        )
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
 #[derive(Default)]
 struct RecordingMemory {
     records: Mutex<Vec<MemoryRecord>>,
@@ -734,6 +763,57 @@ async fn run_session_injects_unknown_tool_error_for_legacy_alias_after_cutover()
             .as_deref()
             .is_some_and(|content| content.contains("unknown tool `read_file`"))
     );
+}
+
+#[tokio::test]
+async fn run_session_scrubs_credential_like_tool_output_before_context_injection() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("sensitive_call".to_owned()),
+                    name: Some("sensitive_output".to_owned()),
+                    arguments: Some("{}".to_owned()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("scrubbed".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+    let mut registry = ToolRegistry::new(1024);
+    registry.register("sensitive_output", SensitiveOutputTool);
+
+    let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
+    let mut context = test_context(provider_id, model_id);
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should continue after scrubbing sensitive output");
+    assert_eq!(response.message.content.as_deref(), Some("scrubbed"));
+
+    let tool_result = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("tool result should be appended");
+    let scrubbed = tool_result
+        .content
+        .as_ref()
+        .expect("tool result should include scrubbed content");
+    assert!(scrubbed.contains("api_key=[REDACTED]"));
+    assert!(scrubbed.contains("artifact_id=[REDACTED]"));
+    assert!(scrubbed.contains("status=ok"));
+    assert!(!scrubbed.contains("sk_live_ABC123DEF456GHI789JKL012MNO345PQR678"));
+    assert!(!scrubbed.contains("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2"));
 }
 
 #[tokio::test]

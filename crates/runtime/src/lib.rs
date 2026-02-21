@@ -16,6 +16,7 @@ const INVALID_TOOL_ARGS_ERROR_KEY: &str = "__oxydra_invalid_tool_args_error";
 mod budget;
 mod memory;
 mod provider_response;
+mod scrubbing;
 mod tool_execution;
 
 #[cfg(test)]

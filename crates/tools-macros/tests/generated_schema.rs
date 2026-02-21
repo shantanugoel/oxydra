@@ -4,25 +4,25 @@ use tools_macros::tool;
 #[tool]
 /// Read UTF-8 text from a file.
 /// Returns full file content.
-async fn read_file(path: String) -> String {
+async fn file_read(path: String) -> String {
     path
 }
 
 #[tool]
 /// Execute a shell command with retry controls.
-async fn bash(command: &str, retries: u32, dry_run: bool, timeout_secs: f64) -> String {
+async fn shell_exec(command: &str, retries: u32, dry_run: bool, timeout_secs: f64) -> String {
     format!("{command}:{retries}:{dry_run}:{timeout_secs}")
 }
 
 #[test]
-fn generated_schema_for_read_file_is_deterministic() {
-    std::mem::drop(read_file("placeholder".to_owned()));
+fn generated_schema_for_file_read_is_deterministic() {
+    std::mem::drop(file_read("placeholder".to_owned()));
     let encoded =
-        serde_json::to_value(__tool_function_decl_read_file()).expect("schema should serialize");
+        serde_json::to_value(__tool_function_decl_file_read()).expect("schema should serialize");
     assert_eq!(
         encoded,
         json!({
-            "name": "read_file",
+            "name": "file_read",
             "description": "Read UTF-8 text from a file.\nReturns full file content.",
             "parameters": {
                 "type": "object",
@@ -40,13 +40,13 @@ fn generated_schema_for_read_file_is_deterministic() {
 
 #[test]
 fn generated_schema_maps_supported_rust_types() {
-    std::mem::drop(bash("echo hi", 2, false, 1.5));
+    std::mem::drop(shell_exec("echo hi", 2, false, 1.5));
     let encoded =
-        serde_json::to_value(__tool_function_decl_bash()).expect("schema should serialize");
+        serde_json::to_value(__tool_function_decl_shell_exec()).expect("schema should serialize");
     assert_eq!(
         encoded,
         json!({
-            "name": "bash",
+            "name": "shell_exec",
             "description": "Execute a shell command with retry controls.",
             "parameters": {
                 "type": "object",

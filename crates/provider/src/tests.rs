@@ -85,7 +85,7 @@ fn anthropic_request_normalization_snapshot_is_stable() {
         provider: ProviderId::from("anthropic"),
         model: ModelId::from("claude-3-5-sonnet-latest"),
         tools: vec![FunctionDecl::new(
-            "read_file",
+            "file_read",
             Some("Read UTF-8 text from a file".to_owned()),
             JsonSchema::object(
                 std::collections::BTreeMap::from([(
@@ -113,7 +113,7 @@ fn anthropic_request_normalization_snapshot_is_stable() {
                 content: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_owned(),
-                    name: "read_file".to_owned(),
+                    name: "file_read".to_owned(),
                     arguments: json!({"path": "Cargo.toml"}),
                 }],
                 tool_call_id: None,
@@ -151,7 +151,7 @@ fn anthropic_request_normalization_snapshot_is_stable() {
                   "input": {
                     "path": "Cargo.toml"
                   },
-                  "name": "read_file",
+                  "name": "file_read",
                   "type": "tool_use"
                 }
               ],
@@ -188,7 +188,7 @@ fn anthropic_request_normalization_snapshot_is_stable() {
                 ],
                 "type": "object"
               },
-              "name": "read_file"
+              "name": "file_read"
             }
           ]
         }
@@ -202,7 +202,7 @@ fn request_normalization_maps_messages_and_tools() {
         provider: ProviderId::from("openai"),
         model: ModelId::from("gpt-4o-mini"),
         tools: vec![FunctionDecl::new(
-            "read_file",
+            "file_read",
             Some("Read UTF-8 text from a file".to_owned()),
             JsonSchema::object(
                 std::collections::BTreeMap::from([(
@@ -224,7 +224,7 @@ fn request_normalization_maps_messages_and_tools() {
                 content: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_owned(),
-                    name: "read_file".to_owned(),
+                    name: "file_read".to_owned(),
                     arguments: json!({"path": "Cargo.toml"}),
                 }],
                 tool_call_id: None,
@@ -239,10 +239,10 @@ fn request_normalization_maps_messages_and_tools() {
     assert_eq!(request_json["messages"][0]["role"], "user");
     assert_eq!(
         request_json["messages"][1]["tool_calls"][0]["function"]["name"],
-        "read_file"
+        "file_read"
     );
     assert_eq!(request_json["tools"][0]["type"], "function");
-    assert_eq!(request_json["tools"][0]["function"]["name"], "read_file");
+    assert_eq!(request_json["tools"][0]["function"]["name"], "file_read");
     assert_eq!(request_json["tool_choice"], "auto");
     assert_eq!(
         request_json["messages"][1]["tool_calls"][0]["function"]["arguments"],
@@ -296,7 +296,7 @@ fn stream_payload_normalization_maps_text_tool_usage_and_finish_reason() {
                     "index": 0,
                     "id": "call_1",
                     "function": {
-                        "name": "read_file",
+                        "name": "file_read",
                         "arguments": "{\"path\":\"Cargo.toml\"}"
                     }
                 }]
@@ -330,7 +330,7 @@ fn stream_payload_normalization_maps_text_tool_usage_and_finish_reason() {
             StreamItem::ToolCallDelta(ToolCallDelta {
                 index: 0,
                 id: Some("call_1".to_owned()),
-                name: Some("read_file".to_owned()),
+                name: Some("file_read".to_owned()),
                 arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
             }),
             StreamItem::FinishReason("tool_calls".to_owned()),
@@ -347,7 +347,7 @@ fn tool_call_deltas_reassemble_arguments_across_payloads() {
                     "index": 0,
                     "id": "call_1",
                     "function": {
-                        "name": "read_file",
+                        "name": "file_read",
                         "arguments": "{\"path\":\"Car"
                     }
                 }]
@@ -551,7 +551,7 @@ fn response_normalization_maps_message_and_finish_reason() {
                     id: "call_1".to_owned(),
                     kind: "function".to_owned(),
                     function: OpenAIResponseFunction {
-                        name: "read_file".to_owned(),
+                        name: "file_read".to_owned(),
                         arguments: "{\"path\":\"Cargo.toml\"}".to_owned(),
                     },
                 }],
@@ -578,7 +578,7 @@ fn response_normalization_maps_message_and_finish_reason() {
         })
     );
     assert_eq!(normalized.tool_calls.len(), 1);
-    assert_eq!(normalized.tool_calls[0].name, "read_file");
+    assert_eq!(normalized.tool_calls[0].name, "file_read");
     assert_eq!(
         normalized.tool_calls[0].arguments,
         json!({"path": "Cargo.toml"})
@@ -678,7 +678,7 @@ fn anthropic_response_normalization_maps_text_and_tool_use() {
                 kind: "tool_use".to_owned(),
                 text: None,
                 id: Some("call_1".to_owned()),
-                name: Some("read_file".to_owned()),
+                name: Some("file_read".to_owned()),
                 input: Some(json!({"path":"Cargo.toml"})),
             },
         ],
@@ -704,7 +704,7 @@ fn anthropic_response_normalization_maps_text_and_tool_use() {
     );
     assert_eq!(normalized.tool_calls.len(), 1);
     assert_eq!(normalized.tool_calls[0].id, "call_1");
-    assert_eq!(normalized.tool_calls[0].name, "read_file");
+    assert_eq!(normalized.tool_calls[0].name, "file_read");
     assert_eq!(
         normalized.tool_calls[0].arguments,
         json!({"path": "Cargo.toml"})

@@ -1,4 +1,4 @@
-use super::*;
+use super::{scrubbing::scrub_tool_output, *};
 
 impl AgentRuntime {
     pub(crate) fn invalid_streamed_arguments(arguments: &serde_json::Value) -> Option<String> {
@@ -82,6 +82,7 @@ impl AgentRuntime {
             }
             Err(e) => return Err(e),
         };
+        let output = scrub_tool_output(&output);
 
         Ok(Message {
             role: MessageRole::Tool,

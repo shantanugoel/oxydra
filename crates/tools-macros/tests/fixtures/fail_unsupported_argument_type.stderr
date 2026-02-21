@@ -1,5 +1,5 @@
 error: #[tool] currently supports String, &str, bool, integer, and float arguments
  --> tests/fixtures/fail_unsupported_argument_type.rs:4:26
   |
-4 | async fn read_file(path: std::path::PathBuf) -> String {
+4 | async fn file_read(path: std::path::PathBuf) -> String {
   |                          ^^^

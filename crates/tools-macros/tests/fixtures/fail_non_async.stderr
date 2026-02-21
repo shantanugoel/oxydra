@@ -1,5 +1,5 @@
 error: #[tool] can only be applied to async functions
  --> tests/fixtures/fail_non_async.rs:4:1
   |
-4 | fn read_file(path: String) -> String {
+4 | fn file_read(path: String) -> String {
   | ^^

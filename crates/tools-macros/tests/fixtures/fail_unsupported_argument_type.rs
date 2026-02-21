@@ -1,7 +1,7 @@
 use tools_macros::tool;
 
 #[tool]
-async fn read_file(path: std::path::PathBuf) -> String {
+async fn file_read(path: std::path::PathBuf) -> String {
     path.display().to_string()
 }
 

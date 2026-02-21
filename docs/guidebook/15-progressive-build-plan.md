@@ -20,7 +20,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. **Gaps:** non-process bootstrapping incomplete (container/microvm args + bootstrap), linux microvm config mismatch, runner control plane not wired (logs/shutdown) |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. **Gap: WASM isolation is simulated (host-based)** |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server. **Gaps:** TUI rendering + interactive client missing; `runner --tui` is probe-only |
-| 13 | Model catalog governance | Planned | |
+| 13 | Model catalog + provider registry | Planned | |
 | 14 | External channels + identity mapping | Planned | |
 | 15 | Multi-agent orchestration | Planned | |
 | 16 | Observability (OpenTelemetry) | Planned | |
@@ -255,18 +255,20 @@ Built the foundation layer with zero internal dependencies:
 
 ## Forward Plan: Phases 13-21
 
-### Phase 13: Model Catalog Governance
+### Phase 13: Model Catalog Governance + Provider Flexibility
 
 **Crates:** `types`, `provider`, `runner`, `tui`
 **Builds on:** Phases 1, 2, 12
 
 **Scope:**
-- Promote pinned model metadata to a complete typed schema (`ModelDescriptor` with deprecation state, pricing, capability flags)
-- Implement deterministic snapshot generation command invokable through TUI/runner
-- Ensure snapshot regeneration is reproducible in CI
-- Runtime rejects unknown/invalid model metadata at startup
+- Promote pinned model metadata to a complete typed schema (`ModelDescriptor` with deprecation state, pricing, capability flags) and enforce validation at startup
+- Implement deterministic snapshot generation command invokable through TUI/runner and reproducible in CI
+- Replace per-provider config blocks with a provider registry: named providers with `provider_type`, `base_url`, `api_key_env`, and optional headers
+- Allow multiple providers per type; models reference `provider_id` instead of hard-coded provider keys
+- Add Google Gemini provider with configurable base URLs
+- Implement OpenAI Responses API provider (Gap 5) with `previous_response_id` chaining and SSE parsing
 
-**Verification gate:** Catalog snapshot command produces deterministic typed artifact; config validation rejects unknown/invalid model metadata; snapshot regeneration is reproducible in CI.
+**Verification gate:** Catalog snapshot command produces deterministic typed artifact; config validation rejects unknown/invalid model metadata and provider references; model selection resolves to a named provider; Gemini and OpenAI Responses providers pass contract tests; snapshot regeneration is reproducible in CI.
 
 ### Phase 14: External Channels + Identity Mapping
 
@@ -385,7 +387,7 @@ The five identified gaps are incorporated as additional work items:
 | Anthropic SSE streaming | Phase 7 | Before Phase 14 (external channels need reliable streaming) | High |
 | TUI ratatui rendering + interactive client | Phase 12 | Before Phase 14 (TUI must be usable before adding more channels) | High |
 | WASM tool isolation (simulated → real) | Phase 11 | Before Phase 15 (multi-agent needs hard isolation boundaries) | High |
-| OpenAI ResponsesProvider | Phase 2 | Before Phase 15 (subagent delegation benefits from server-side state) | Medium |
+| OpenAI ResponsesProvider | Phase 2 | Phase 13 (provider registry + Responses provider implementation) | Medium |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
 | Runner control plane + persistent daemon + VM log capture | Phase 10 | Before Phase 12 (TUI/ops need lifecycle control) | High |
 | Container/microvm bootstrap wiring (args + envelope) | Phase 10 | Before Phase 12 (runtime needs correct startup status) | High |

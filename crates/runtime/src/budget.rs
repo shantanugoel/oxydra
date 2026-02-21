@@ -554,7 +554,7 @@ impl AgentRuntime {
         let Some(max_cost) = self.limits.max_cost else {
             return Ok(());
         };
-        // Phase 5 interim accounting: use provider-reported token usage as cost units.
+        // Interim accounting uses provider-reported token usage as cost units.
         let turn_cost = usage
             .and_then(Self::usage_to_cost)
             .ok_or(RuntimeError::BudgetExceeded)?;

@@ -211,7 +211,7 @@ async fn store_indexes_message_content_into_chunks_and_vectors() {
     let payload = serde_json::to_value(Message {
         role: MessageRole::Assistant,
         content: Some(
-            "phase nine indexing pipeline should normalize and chunk this message body".to_owned(),
+            "hybrid indexing pipeline should normalize and chunk this message body".to_owned(),
         ),
         tool_calls: vec![],
         tool_call_id: None,
@@ -482,110 +482,110 @@ async fn initialization_applies_pending_migrations_and_verifies_schema() {
 }
 
 #[tokio::test]
-async fn phase8_database_migrates_to_phase9_without_data_loss() {
-    let db_path = temp_db_path("phase8-migration-continuity");
+async fn legacy_database_migrates_to_hybrid_schema_without_data_loss() {
+    let db_path = temp_db_path("legacy-schema-migration-continuity");
     let config = local_memory_config(&db_path);
 
     let db = Builder::new_local(db_path.clone())
         .build()
         .await
-        .expect("phase8 seed db should initialize");
-    let conn = db.connect().expect("phase8 seed db should connect");
+        .expect("legacy seed db should initialize");
+    let conn = db.connect().expect("legacy seed db should connect");
     enable_foreign_keys(&conn)
         .await
-        .expect("phase8 seed db should enable fk support");
+        .expect("legacy seed db should enable fk support");
     ensure_migration_bookkeeping(&conn)
         .await
-        .expect("phase8 seed db should create migration bookkeeping");
+        .expect("legacy seed db should create migration bookkeeping");
     for migration in MIGRATIONS.iter().take(5) {
         conn.execute(migration.sql, params![])
             .await
-            .expect("phase8 migration should apply");
+            .expect("legacy migration should apply");
         conn.execute(
             "INSERT INTO memory_migrations (version) VALUES (?1)",
             params![migration.version],
         )
         .await
-        .expect("phase8 migration should be marked");
+        .expect("legacy migration should be marked");
     }
 
     conn.execute(
         "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
          VALUES (?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-        params!["session-phase8", "legacy-agent"],
+        params!["session-legacy", "legacy-agent"],
     )
     .await
-    .expect("phase8 session row should insert");
+    .expect("legacy session row should insert");
     conn.execute(
         "INSERT INTO conversation_events (session_id, sequence, payload_json, created_at)
          VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
         params![
-            "session-phase8",
+            "session-legacy",
             1_i64,
-            json!({"role":"user","content":"phase8 user"}).to_string()
+            json!({"role":"user","content":"legacy user"}).to_string()
         ],
     )
     .await
-    .expect("phase8 event row should insert");
+    .expect("legacy event row should insert");
     conn.execute(
         "INSERT INTO conversation_events (session_id, sequence, payload_json, created_at)
          VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
         params![
-            "session-phase8",
+            "session-legacy",
             2_i64,
-            json!({"role":"assistant","content":"phase8 assistant"}).to_string()
+            json!({"role":"assistant","content":"legacy assistant"}).to_string()
         ],
     )
     .await
-    .expect("phase8 event row should insert");
+    .expect("legacy event row should insert");
     conn.execute(
         "INSERT INTO session_state (session_id, state_json, updated_at)
          VALUES (?1, ?2, CURRENT_TIMESTAMP)",
         params![
-            "session-phase8",
+            "session-legacy",
             json!({"last_sequence":2,"legacy_key":"preserve"}).to_string()
         ],
     )
     .await
-    .expect("phase8 session_state row should insert");
+    .expect("legacy session_state row should insert");
     drop(conn);
     drop(db);
 
     let backend = LibsqlMemory::from_config(&config)
         .await
-        .expect("phase9 migration pass should succeed")
+        .expect("hybrid-schema migration pass should succeed")
         .expect("memory should be enabled");
 
     let recalled = backend
         .recall(MemoryRecallRequest {
-            session_id: "session-phase8".to_owned(),
+            session_id: "session-legacy".to_owned(),
             limit: None,
         })
         .await
-        .expect("phase8 events should remain queryable after migration");
+        .expect("legacy events should remain queryable after migration");
     assert_eq!(recalled.len(), 2);
     assert_eq!(recalled[0].sequence, 1);
     assert_eq!(recalled[1].sequence, 2);
     assert_eq!(
         recalled[0].payload,
-        json!({"role":"user","content":"phase8 user"})
+        json!({"role":"user","content":"legacy user"})
     );
     assert_eq!(
         recalled[1].payload,
-        json!({"role":"assistant","content":"phase8 assistant"})
+        json!({"role":"assistant","content":"legacy assistant"})
     );
 
     backend
         .store(MemoryStoreRequest {
-            session_id: "session-phase8".to_owned(),
+            session_id: "session-legacy".to_owned(),
             sequence: 3,
-            payload: json!({"role":"user","content":"phase9 continuation"}),
+            payload: json!({"role":"user","content":"post-migration continuation"}),
         })
         .await
         .expect("post-migration store should append to existing session");
     let recalled_after_append = backend
         .recall(MemoryRecallRequest {
-            session_id: "session-phase8".to_owned(),
+            session_id: "session-legacy".to_owned(),
             limit: None,
         })
         .await
@@ -617,7 +617,7 @@ async fn phase8_database_migrates_to_phase9_without_data_loss() {
         .query(
             "SELECT json_extract(state_json, '$.legacy_key'), json_extract(state_json, '$.last_sequence')
              FROM session_state WHERE session_id = ?1",
-            params!["session-phase8"],
+            params!["session-legacy"],
         )
         .await
         .expect("state query should run");

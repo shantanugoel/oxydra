@@ -148,7 +148,7 @@ fn map_parameter_type_to_schema_type(
 
     Err(Error::new(
         parameter_type.span(),
-        "#[tool] only supports String, &str, bool, integer, and float arguments in this phase",
+        "#[tool] currently supports String, &str, bool, integer, and float arguments",
     ))
 }
 

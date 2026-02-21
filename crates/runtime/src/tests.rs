@@ -2104,7 +2104,7 @@ fn assistant_response(content: &str, tool_calls: Vec<ToolCall>) -> Response {
 }
 
 #[test]
-fn runtime_limits_default_matches_phase5_baseline() {
+fn runtime_limits_default_matches_turn_guard_baseline() {
     let limits = RuntimeLimits::default();
     assert_eq!(limits.turn_timeout, Duration::from_secs(60));
     assert_eq!(limits.max_turns, 8);

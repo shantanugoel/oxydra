@@ -196,7 +196,7 @@ impl ModelCatalog {
     /// Canonicalizes and writes a pinned catalog snapshot from already-fetched JSON data.
     ///
     /// This intentionally does not fetch `https://models.dev/api.json`.
-    /// Network retrieval is deferred to a later operator-facing refresh path (CLI phase),
+    /// Network retrieval is deferred to a later operator-facing refresh path (CLI workflow),
     /// while runtime/startup continue using committed offline snapshots.
     pub fn regenerate_snapshot(
         source_snapshot: &str,

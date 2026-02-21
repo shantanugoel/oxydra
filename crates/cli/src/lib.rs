@@ -648,7 +648,7 @@ remote_url = "libsql://example-org.turso.io"
     }
 
     #[test]
-    fn runtime_limits_maps_phase9_budget_retrieval_and_summarization_settings() {
+    fn runtime_limits_maps_budget_retrieval_and_summarization_settings() {
         let mut config = AgentConfig::default();
         config.runtime.turn_timeout_secs = 30;
         config.runtime.max_turns = 5;

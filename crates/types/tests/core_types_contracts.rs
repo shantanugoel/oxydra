@@ -14,7 +14,7 @@ use types::{
 };
 
 #[test]
-fn serde_round_trip_for_phase1_types() {
+fn serde_round_trip_for_core_types() {
     let tool_call = ToolCall {
         id: "call_1".to_owned(),
         name: "read_file".to_owned(),
@@ -229,9 +229,9 @@ fn memory_contract_types_serialize_round_trip() {
 #[test]
 fn tracing_subscriber_initializes_and_emits() {
     init_tracing();
-    let span = tracing::info_span!("phase1_tracing_smoke");
+    let span = tracing::info_span!("core_types_tracing_smoke");
     let _guard = span.enter();
-    tracing::info!("phase1 tracing smoke");
+    tracing::info!("core types tracing smoke");
 }
 
 #[test]

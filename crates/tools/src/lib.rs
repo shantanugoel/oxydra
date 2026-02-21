@@ -777,7 +777,7 @@ impl ToolRegistry {
 
     pub fn register_core_tools(&mut self) {
         let wasm_runner = default_wasm_runner();
-        register_phase11_tools(self, wasm_runner, BashTool::default());
+        register_runtime_tools(self, wasm_runner, BashTool::default());
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
@@ -857,7 +857,7 @@ pub async fn bootstrap_runtime_tools(
     let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
     let wasm_runner = runtime_wasm_runner(bootstrap);
     let mut registry = ToolRegistry::default();
-    register_phase11_tools(&mut registry, wasm_runner, bash_tool);
+    register_runtime_tools(&mut registry, wasm_runner, bash_tool);
     registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap)));
 
     RuntimeToolsBootstrap {
@@ -869,7 +869,7 @@ pub async fn bootstrap_runtime_tools(
     }
 }
 
-fn register_phase11_tools(
+fn register_runtime_tools(
     registry: &mut ToolRegistry,
     wasm_runner: Arc<dyn WasmToolRunner>,
     shell_tool: BashTool,
@@ -1350,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn core_tool_schemas_and_metadata_match_phase4_contract() {
+    fn core_tool_schemas_and_metadata_match_tool_contract() {
         let read = ReadTool::default();
         let write = WriteTool::default();
         let edit = EditTool::default();
@@ -1547,7 +1547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_registry_exposes_phase11_tool_surface_only() {
+    async fn bootstrap_registry_exposes_runtime_tool_surface_only() {
         let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None).await;
         let exposed = registry
             .schemas()

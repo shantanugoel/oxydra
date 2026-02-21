@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    env,
     io::{Read, Write},
     net::TcpListener,
     sync::{
@@ -193,6 +194,60 @@ fn anthropic_request_normalization_snapshot_is_stable() {
           ]
         }
         "###
+    );
+}
+
+#[test]
+fn anthropic_streaming_request_includes_stream_field() {
+    let context = Context {
+        provider: ProviderId::from("anthropic"),
+        model: ModelId::from("claude-3-5-sonnet-latest"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("Hello".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }],
+    };
+    let request = AnthropicMessagesRequest::from_context_with_stream(
+        &context,
+        DEFAULT_ANTHROPIC_MAX_TOKENS,
+        true,
+    )
+    .expect("streaming request should normalize");
+    let request_json = serde_json::to_value(&request).expect("request should serialize");
+    assert_json_snapshot!(
+        request_json,
+        @r###"
+        {
+          "max_tokens": 1024,
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "Hello",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "claude-3-5-sonnet-latest",
+          "stream": true
+        }
+        "###
+    );
+
+    // Non-streaming request should omit the stream field entirely (skip_serializing_if)
+    let non_stream_request =
+        AnthropicMessagesRequest::from_context(&context, DEFAULT_ANTHROPIC_MAX_TOKENS)
+            .expect("request should normalize");
+    let non_stream_json =
+        serde_json::to_value(&non_stream_request).expect("request should serialize");
+    assert!(
+        non_stream_json.get("stream").is_none(),
+        "stream field should be omitted when false"
     );
 }
 
@@ -911,6 +966,34 @@ fn live_openai_smoke_normalizes_response() {
     );
 }
 
+#[test]
+#[ignore = "requires ANTHROPIC_API_KEY and network access"]
+fn live_anthropic_stream_smoke_emits_text_or_tool_calls() {
+    let _api_key = env::var("ANTHROPIC_API_KEY").expect(
+        "set ANTHROPIC_API_KEY to run live_anthropic_stream_smoke_emits_text_or_tool_calls",
+    );
+    let provider = AnthropicProvider::new(AnthropicConfig::default())
+        .expect("provider should initialize from ANTHROPIC_API_KEY");
+    let context = test_context_for(
+        "anthropic",
+        "claude-3-5-sonnet-latest",
+        "Reply with exactly: PONG",
+    );
+    let items = run_stream_collect_anthropic(&provider, &context);
+
+    assert!(
+        items.iter().any(|item| {
+            matches!(
+                item,
+                Ok(StreamItem::Text(text)) if !text.trim().is_empty()
+            )
+        }) || items
+            .iter()
+            .any(|item| matches!(item, Ok(StreamItem::ToolCallDelta(_)))),
+        "live stream should include text or tool call deltas"
+    );
+}
+
 struct SequencedProvider {
     provider_id: ProviderId,
     model_catalog: ModelCatalog,
@@ -1066,6 +1149,513 @@ fn run_stream_collect(
         })
 }
 
+// ---------------------------------------------------------------------------
+// Anthropic SSE stream payload parsing tests
+// ---------------------------------------------------------------------------
+
+fn anthropic_provider_id() -> ProviderId {
+    ProviderId::from("anthropic")
+}
+
+/// Helper to extract items from an `AnthropicEventAction::Items` variant.
+fn expect_items(action: AnthropicEventAction) -> Vec<StreamItem> {
+    match action {
+        AnthropicEventAction::Items(items) => items,
+        other => panic!("expected Items, got: {other:?}"),
+    }
+}
+
+/// Helper to extract a `ProviderError` from an `AnthropicEventAction::Error`.
+fn expect_error(action: AnthropicEventAction) -> ProviderError {
+    match action {
+        AnthropicEventAction::Error(err) => err,
+        other => panic!("expected Error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn anthropic_stream_text_delta_emits_text() {
+    let payload =
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        payload,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(items, vec![StreamItem::Text("Hello".to_owned())]);
+}
+
+#[test]
+fn anthropic_stream_tool_call_accumulation() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // Start tool_use block at content block index 1.
+    let start_payload = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather"}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        start_payload,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items,
+        vec![StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            id: Some("toolu_1".to_owned()),
+            name: Some("get_weather".to_owned()),
+            arguments: None,
+        })]
+    );
+
+    // First argument fragment.
+    let delta1 = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"loc"}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        delta1,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items,
+        vec![StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            id: Some("toolu_1".to_owned()),
+            name: Some("get_weather".to_owned()),
+            arguments: Some(r#"{"loc"#.to_owned()),
+        })]
+    );
+
+    // Second argument fragment — arguments accumulate.
+    let delta2 = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ation\":\"NYC\"}"}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        delta2,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items,
+        vec![StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            id: Some("toolu_1".to_owned()),
+            name: Some("get_weather".to_owned()),
+            arguments: Some(r#"{"location":"NYC"}"#.to_owned()),
+        })]
+    );
+}
+
+#[test]
+fn anthropic_stream_tool_call_index_remapping() {
+    // Simulates: text@0, tool_use@1, text@2, tool_use@3
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // text block at index 0 — no emission
+    let text_start =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        text_start,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+
+    // tool_use at index 1 → ordinal 0
+    let tool1 = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"fn1"}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        tool1,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items[0],
+        StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            id: Some("t1".to_owned()),
+            name: Some("fn1".to_owned()),
+            arguments: None,
+        })
+    );
+
+    // tool_use at index 3 → ordinal 1
+    let tool2 = r#"{"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"t2","name":"fn2"}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        tool2,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items[0],
+        StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 1,
+            id: Some("t2".to_owned()),
+            name: Some("fn2".to_owned()),
+            arguments: None,
+        })
+    );
+}
+
+#[test]
+fn anthropic_stream_multiple_tools_interleaved_with_text() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // tool_use@0
+    let _ = parse_anthropic_stream_payload(
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"read"}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+    // text@1
+    let _ = parse_anthropic_stream_payload(
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+    // tool_use@2
+    let _ = parse_anthropic_stream_payload(
+        r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"b","name":"write"}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+
+    // Arguments for first tool.
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"p\":1}"}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items[0],
+        StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            id: Some("a".to_owned()),
+            name: Some("read".to_owned()),
+            arguments: Some(r#"{"p":1}"#.to_owned()),
+        })
+    );
+
+    // Arguments for second tool.
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\":2}"}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items[0],
+        StreamItem::ToolCallDelta(ToolCallDelta {
+            index: 1,
+            id: Some("b".to_owned()),
+            name: Some("write".to_owned()),
+            arguments: Some(r#"{"q":2}"#.to_owned()),
+        })
+    );
+}
+
+#[test]
+fn anthropic_stream_prompt_tokens_emitted_at_message_start() {
+    let payload = r#"{"type":"message_start","message":{"usage":{"input_tokens":42}}}"#;
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        payload,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items,
+        vec![StreamItem::UsageUpdate(UsageUpdate {
+            prompt_tokens: Some(42),
+            completion_tokens: None,
+            total_tokens: None,
+        })]
+    );
+    assert_eq!(input_tokens, Some(42));
+}
+
+#[test]
+fn anthropic_stream_completion_tokens_combined_at_message_delta() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // message_start with input_tokens.
+    let _ = parse_anthropic_stream_payload(
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":10}}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+    assert_eq!(input_tokens, Some(10));
+
+    // message_delta with output_tokens.
+    let delta_payload = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        delta_payload,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+
+    assert!(items.contains(&StreamItem::FinishReason("end_turn".to_owned())));
+    assert!(items.contains(&StreamItem::UsageUpdate(UsageUpdate {
+        prompt_tokens: Some(10),
+        completion_tokens: Some(5),
+        total_tokens: Some(15),
+    })));
+}
+
+#[test]
+fn anthropic_stream_finish_reason_from_message_delta() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // With stop_reason.
+    let payload = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        payload,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.contains(&StreamItem::FinishReason("end_turn".to_owned())));
+
+    // Null stop_reason should NOT emit FinishReason.
+    let payload_null =
+        r#"{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":3}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        payload_null,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, StreamItem::FinishReason(_)))
+    );
+}
+
+#[test]
+fn anthropic_stream_error_event_produces_terminal_error() {
+    let payload = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let action = parse_anthropic_stream_payload(payload, &provider, &mut acc, &mut input_tokens);
+    let err = expect_error(action);
+    assert!(matches!(err, ProviderError::ResponseParse { message, .. } if message == "Overloaded"));
+}
+
+#[test]
+fn anthropic_stream_thinking_delta_emits_reasoning() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // thinking block start — no emission.
+    let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        start,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+
+    // thinking delta.
+    let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think..."}}"#;
+    let items = expect_items(parse_anthropic_stream_payload(
+        delta,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(
+        items,
+        vec![StreamItem::ReasoningDelta("Let me think...".to_owned())]
+    );
+}
+
+#[test]
+fn anthropic_stream_message_stop_without_prior_message_delta() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // message_start
+    let _ = parse_anthropic_stream_payload(
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+
+    // content_block_stop (skip message_delta entirely)
+    let _ = parse_anthropic_stream_payload(
+        r#"{"type":"content_block_stop","index":0}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+
+    // message_stop — should terminate cleanly.
+    let action = parse_anthropic_stream_payload(
+        r#"{"type":"message_stop"}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    );
+    assert!(matches!(action, AnthropicEventAction::Done));
+}
+
+#[test]
+fn anthropic_stream_ping_is_ignored() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"ping"}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+}
+
+#[test]
+fn anthropic_stream_unknown_event_type_is_ignored() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"future_event","data":"whatever"}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+}
+
+#[test]
+fn anthropic_stream_unknown_delta_type_is_ignored() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"future_delta","data":"x"}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+}
+
+#[test]
+fn anthropic_stream_empty_payload_returns_empty_items() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        "  ",
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+}
+
+#[test]
+fn anthropic_stream_invalid_json_returns_error() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let action =
+        parse_anthropic_stream_payload("not-valid-json", &provider, &mut acc, &mut input_tokens);
+    let err = expect_error(action);
+    assert!(matches!(err, ProviderError::ResponseParse { .. }));
+}
+
+#[test]
+fn anthropic_stream_error_without_message_uses_default() {
+    let payload = r#"{"type":"error","error":{"type":"server_error"}}"#;
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let err = expect_error(parse_anthropic_stream_payload(
+        payload,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(
+        matches!(err, ProviderError::ResponseParse { message, .. } if message.contains("unknown streaming error"))
+    );
+}
+
+#[test]
+fn anthropic_stream_message_start_without_usage_emits_nothing() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"message_start","message":{}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+    assert_eq!(input_tokens, None);
+}
+
+#[test]
+fn anthropic_stream_empty_text_delta_not_emitted() {
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    let items = expect_items(parse_anthropic_stream_payload(
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}"#,
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert!(items.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
 fn spawn_one_shot_server(status_line: &str, body: &str, content_type: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
     let address = listener
@@ -1087,4 +1677,383 @@ fn spawn_one_shot_server(status_line: &str, body: &str, content_type: &str) -> S
         }
     });
     format!("http://{address}")
+}
+
+/// Spawn a one-shot server with SSE-appropriate headers: `Content-Type:
+/// text/event-stream`, `Cache-Control: no-cache`, no `Content-Length`.
+/// The body is written directly and the connection is closed (signaling
+/// EOF to the client), which mirrors how a real SSE endpoint terminates
+/// after `message_stop`.
+fn spawn_sse_one_shot_server(status_line: &str, sse_body: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener
+        .local_addr()
+        .expect("server should expose a local address");
+    let status_line = status_line.to_owned();
+    let sse_body = sse_body.to_owned();
+    let _server = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request_buffer = [0_u8; 8_192];
+            let _ = stream.read(&mut request_buffer);
+            let header = format!(
+                "HTTP/1.1 {status_line}\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(sse_body.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    format!("http://{address}")
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end Anthropic streaming helpers
+// ---------------------------------------------------------------------------
+
+/// Build a single SSE event string with `event:` and `data:` lines.
+fn sse_event(event_type: &str, data: &serde_json::Value) -> String {
+    format!("event: {event_type}\ndata: {data}\n\n")
+}
+
+fn test_anthropic_provider(base_url: String) -> AnthropicProvider {
+    AnthropicProvider::with_catalog(
+        AnthropicConfig {
+            api_key: Some("test-key".to_owned()),
+            base_url,
+            max_tokens: 64,
+        },
+        test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
+    )
+    .expect("test provider should initialize")
+}
+
+fn test_anthropic_context() -> Context {
+    test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping")
+}
+
+fn run_stream_collect_anthropic(
+    provider: &AnthropicProvider,
+    context: &Context,
+) -> Vec<Result<StreamItem, ProviderError>> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build")
+        .block_on(async {
+            let mut stream = provider
+                .stream(context, DEFAULT_STREAM_BUFFER_SIZE)
+                .await
+                .expect("stream should start");
+            let mut items = Vec::new();
+            while let Some(item) = stream.recv().await {
+                items.push(item);
+            }
+            items
+        })
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end Anthropic streaming tests (8l–8o)
+// ---------------------------------------------------------------------------
+
+/// 8l: End-to-end streaming via one-shot server.
+///
+/// Serves a complete Anthropic SSE event sequence (message_start →
+/// content_block_start → content_block_delta → content_block_stop →
+/// message_delta → message_stop) and verifies:
+/// - Text fragments arrive incrementally
+/// - Tool call deltas have accumulated arguments with correct ordinal indices
+/// - Usage and finish reason are present
+/// - No `ConnectionLost` item when `message_stop` is received
+#[test]
+fn anthropic_end_to_end_stream_via_one_shot_server() {
+    let sse_body = [
+        sse_event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 10}}
+            }),
+        ),
+        sse_event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+        ),
+        sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Hello"}
+            }),
+        ),
+        sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": " world"}
+            }),
+        ),
+        sse_event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": 0}),
+        ),
+        sse_event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "get_weather"}
+            }),
+        ),
+        sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"location\":\"NYC\"}"}
+            }),
+        ),
+        sse_event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": 1}),
+        ),
+        sse_event(
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 5}
+            }),
+        ),
+        sse_event("message_stop", &json!({"type": "message_stop"})),
+    ]
+    .concat();
+
+    let base_url = spawn_sse_one_shot_server("200 OK", &sse_body);
+    let provider = test_anthropic_provider(base_url);
+    let context = test_anthropic_context();
+    let items = run_stream_collect_anthropic(&provider, &context);
+
+    // All items should be Ok.
+    assert!(items.iter().all(Result::is_ok), "all items should be Ok");
+
+    // Text fragments arrive incrementally.
+    let text_items: Vec<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            Ok(StreamItem::Text(text)) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text_items, vec!["Hello", " world"]);
+
+    // Tool call deltas with correct ordinal index.
+    let tool_deltas: Vec<&ToolCallDelta> = items
+        .iter()
+        .filter_map(|item| match item {
+            Ok(StreamItem::ToolCallDelta(delta)) => Some(delta),
+            _ => None,
+        })
+        .collect();
+    // At least 2: initial start + argument delta.
+    assert!(
+        tool_deltas.len() >= 2,
+        "expected at least 2 tool call deltas, got {}",
+        tool_deltas.len()
+    );
+    // The initial tool call start should have ordinal 0 (remapped from content block index 1).
+    assert_eq!(tool_deltas[0].index, 0);
+    assert_eq!(tool_deltas[0].id.as_deref(), Some("toolu_1"));
+    assert_eq!(tool_deltas[0].name.as_deref(), Some("get_weather"));
+    // The argument delta should have accumulated arguments.
+    let last_tool = tool_deltas.last().unwrap();
+    assert!(
+        last_tool.arguments.is_some(),
+        "last tool call delta should have arguments"
+    );
+
+    // Usage update present (prompt tokens from message_start + combined at message_delta).
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, Ok(StreamItem::UsageUpdate(_)))),
+        "stream should include usage update"
+    );
+
+    // Finish reason present.
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, Ok(StreamItem::FinishReason(r)) if r == "end_turn")),
+        "stream should include finish reason"
+    );
+
+    // No ConnectionLost when message_stop is received.
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, Ok(StreamItem::ConnectionLost(_)))),
+        "no ConnectionLost should be emitted after message_stop"
+    );
+}
+
+/// 8m: Connection lost when stream ends without `message_stop`.
+///
+/// Serves an incomplete SSE stream (no `message_stop`) and verifies that
+/// `StreamItem::ConnectionLost` is emitted.
+#[test]
+fn anthropic_stream_connection_lost_without_message_stop() {
+    let sse_body = [
+        sse_event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 5}}
+            }),
+        ),
+        sse_event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+        ),
+        sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Hi"}
+            }),
+        ),
+    ]
+    .concat();
+
+    let base_url = spawn_sse_one_shot_server("200 OK", &sse_body);
+    let provider = test_anthropic_provider(base_url);
+    let context = test_anthropic_context();
+    let items = run_stream_collect_anthropic(&provider, &context);
+
+    // Text should have arrived.
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, Ok(StreamItem::Text(text)) if text == "Hi")),
+        "text delta should have arrived"
+    );
+
+    // Last item should be ConnectionLost.
+    assert!(
+        matches!(items.last(), Some(Ok(StreamItem::ConnectionLost(_)))),
+        "stream should end with ConnectionLost when message_stop is missing"
+    );
+}
+
+/// 8n: HTTP error before streaming starts.
+///
+/// Serves a 429 response. Verifies `ProviderError::HttpStatus` with the
+/// correct status code is returned from `stream()` before any items flow.
+#[test]
+fn anthropic_stream_http_error_before_streaming() {
+    let base_url = spawn_one_shot_server(
+        "429 Too Many Requests",
+        r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}"#,
+        "application/json",
+    );
+    let provider = test_anthropic_provider(base_url);
+    let context = test_anthropic_context();
+
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build")
+        .block_on(provider.stream(&context, DEFAULT_STREAM_BUFFER_SIZE));
+
+    assert!(matches!(
+        result,
+        Err(ProviderError::HttpStatus { status: 429, .. })
+    ));
+}
+
+/// 8o: SSE with comment lines and CRLF line endings.
+///
+/// Feeds the SSE parser bytes containing `: keepalive\r\n` comment lines
+/// and `\r\n` line endings mixed with normal events. Verifies events parse
+/// correctly — this tests `SseDataParser` compatibility with Anthropic's
+/// actual wire format.
+#[test]
+fn anthropic_sse_parser_handles_comment_lines_and_crlf() {
+    let mut parser = SseDataParser::default();
+
+    // Build an SSE stream with CRLF line endings and comment lines.
+    let sse_data = format!(
+        ": keepalive\r\n\
+         \r\n\
+         event: message_start\r\n\
+         data: {}\r\n\
+         \r\n\
+         : another comment\r\n\
+         event: content_block_delta\r\n\
+         data: {}\r\n\
+         \r\n\
+         event: message_stop\r\n\
+         data: {}\r\n\
+         \r\n",
+        json!({"type": "message_start", "message": {"usage": {"input_tokens": 5}}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "OK"}}),
+        json!({"type": "message_stop"}),
+    );
+
+    let payloads = parser
+        .push_chunk(sse_data.as_bytes())
+        .expect("CRLF SSE stream should parse without error");
+
+    assert_eq!(
+        payloads.len(),
+        3,
+        "expected 3 data payloads from the CRLF stream, got: {payloads:?}"
+    );
+
+    // Verify each payload parses correctly through Anthropic event dispatch.
+    let provider = anthropic_provider_id();
+    let mut acc = AnthropicToolCallAccumulator::default();
+    let mut input_tokens = None;
+
+    // First payload: message_start with prompt tokens.
+    let items = expect_items(parse_anthropic_stream_payload(
+        &payloads[0],
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(items.len(), 1);
+    assert!(matches!(
+        &items[0],
+        StreamItem::UsageUpdate(usage) if usage.prompt_tokens == Some(5)
+    ));
+
+    // Second payload: content_block_delta with text.
+    let items = expect_items(parse_anthropic_stream_payload(
+        &payloads[1],
+        &provider,
+        &mut acc,
+        &mut input_tokens,
+    ));
+    assert_eq!(items, vec![StreamItem::Text("OK".to_owned())]);
+
+    // Third payload: message_stop.
+    let action =
+        parse_anthropic_stream_payload(&payloads[2], &provider, &mut acc, &mut input_tokens);
+    assert!(matches!(action, AnthropicEventAction::Done));
 }

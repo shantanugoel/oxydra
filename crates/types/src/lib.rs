@@ -3,6 +3,7 @@ mod error;
 mod memory;
 mod model;
 mod provider;
+mod runner;
 mod tool;
 mod tracing;
 
@@ -24,5 +25,13 @@ pub use model::{
     ProviderId, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
 };
 pub use provider::{Provider, ProviderStream};
+pub use runner::{
+    BootstrapEnvelopeError, ExecCommand, ExecCommandAck, KillSession, KillSessionAck,
+    RunnerBehaviorOverrides, RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl,
+    RunnerGlobalConfig, RunnerGuestImages, RunnerMountPaths, RunnerResourceLimits,
+    RunnerUserConfig, RunnerUserRegistration, SandboxTier, ShellDaemonError, ShellDaemonRequest,
+    ShellDaemonResponse, ShellOutputStream, SidecarEndpoint, SidecarTransport, SpawnSession,
+    SpawnSessionAck, StreamOutput, StreamOutputChunk,
+};
 pub use tool::{FunctionDecl, JsonSchema, JsonSchemaType, SafetyTier, Tool};
 pub use tracing::init_tracing;

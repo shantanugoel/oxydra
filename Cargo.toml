@@ -9,6 +9,7 @@ members = [
   "crates/memory",
   "crates/sandbox",
   "crates/runner",
+  "crates/shell-daemon",
   "crates/channels",
   "crates/gateway",
   "crates/cli",

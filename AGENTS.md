@@ -4,24 +4,30 @@ Minimal operating guide for AI agents in this repo.
 
 ## Canonical spec
 
-- **Single source of truth:** `oxydra-project-brief.md`
+- **Single source of truth:** `docs/guidebook/` (see [guidebook README](docs/guidebook/README.md))
 - This file is intentionally lightweight and should not duplicate architecture details.
-- If this file and the research document diverge, follow `oxydra-project-brief.md`.
+- If this file and the guidebook diverge, follow the guidebook.
 
-## How to use the research document
+## How to use the guidebook
 
 For every task:
-1. Read the relevant chapter(s) in `oxydra-project-brief.md`.
-2. Map the task to the progressive build phases in the Appendix.
-3. Make sure you understand how that task may related to other parts of the system.
+1. Read the relevant chapter(s) in `docs/guidebook/`.
+2. Map the task to the progressive build phases in Chapter 15.
+3. Make sure you understand how that task may relate to other parts of the system.
 4. Then implement the change without trying to over-engineer. Remember ease of maintenance, and readability/contribution by other developers is important.
 
 Quick section map:
-- Architecture/layering: Chapter 1 + Appendix workspace layout
-- Providers/runtime/streaming/tools: Chapters 2-5
-- Memory/security: Chapters 6-7
-- Gateway/multi-agent routing: Chapter 8
-- Phase order and verification gates: Appendix progressive build plan
+- Architecture/layering: Chapters 1-2
+- Providers/streaming: Chapter 3
+- Tools: Chapter 4
+- Runtime: Chapter 5
+- Memory: Chapter 6
+- Security/sandbox: Chapters 7-8
+- Gateway/channels: Chapter 9
+- Testing: Chapter 10
+- Multi-agent/external channels: Chapters 11-12
+- Observability/productization: Chapters 13-14
+- Phase order and verification gates: Chapter 15
 
 ## Agent execution rules
 
@@ -42,4 +48,4 @@ Quick section map:
 
 - Keep `AGENTS.md` short and process-oriented.
 - Do not restate chapter-level technical requirements here.
-- Update this file only when our core rules change; update `oxydra-project-brief.md` for architecture/design changes.
+- Update this file only when our core rules change; update `docs/guidebook/` for architecture/design changes.

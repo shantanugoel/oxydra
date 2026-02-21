@@ -49,4 +49,4 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 
 ## Canonical Source
 
-This guidebook replaces `oxydra-project-brief.md` as the living documentation for the project. The project brief remains in the repository as historical context but this guidebook reflects the actual implementation.
+This guidebook is the canonical living documentation for the project, reflecting the actual implementation.

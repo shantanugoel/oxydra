@@ -1,48 +1,67 @@
-# Example Oxydra workspace configuration.
-# Copy this to ./.oxydra/agent.toml and customize as needed.
+# Oxydra agent configuration.
+# Copy to ./.oxydra/agent.toml and customize as needed.
+#
+# All values shown below are the defaults. Uncomment and change as needed.
+# For full documentation, see docs/guidebook/02-configuration-system.md
 
 config_version = "1.0.0"
 
+# --- Provider selection ---
+# Supported providers: "openai", "anthropic"
+# Available models (from pinned catalog):
+#   OpenAI:    gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, o3-mini
+#   Anthropic: claude-3-5-haiku-latest, claude-3-5-sonnet-latest
 [selection]
-# Set to "openai" or "anthropic".
 provider = "openai"
-model = "gpt-4o-mini"
+model    = "gpt-4o-mini"
 
+# --- Runtime limits ---
 [runtime]
-turn_timeout_secs = 60
-max_turns = 8
-# max_cost = 1000.0
+turn_timeout_secs = 60   # Max seconds per LLM call
+max_turns         = 8    # Max agentic loop iterations
+# max_cost        = 1000.0  # Optional cumulative cost cap (provider-reported units)
 
+# Context window management — triggers summarization when usage exceeds trigger_ratio.
 [runtime.context_budget]
-trigger_ratio = 0.85
-safety_buffer_tokens = 1024
-fallback_max_context_tokens = 128000
+trigger_ratio              = 0.85    # Fraction of max context that triggers compaction
+safety_buffer_tokens       = 1024    # Tokens reserved below the hard limit
+fallback_max_context_tokens = 128000 # Used when the model catalog has no entry
 
+# Conversation summarization — compresses older turns to stay within budget.
 [runtime.summarization]
-target_ratio = 0.5
-min_turns = 6
+target_ratio = 0.5  # Target context usage after summarization (fraction of max)
+min_turns    = 6    # Minimum turns before summarization is eligible
 
+# --- Memory (libSQL-backed persistence) ---
 [memory]
 enabled = false
-db_path = ".oxydra/memory.db"
-# remote_url = "libsql://your-database.turso.io"
-# auth_token = "set-me-or-use-OXYDRA__MEMORY__AUTH_TOKEN"
+db_path = ".oxydra/memory.db"         # Local SQLite/libSQL path
+# remote_url = "libsql://your-database.turso.io"  # Optional Turso remote
+# auth_token = "set-me-or-use-OXYDRA__MEMORY__AUTH_TOKEN"  # Required when remote_url is set
 
+# Hybrid retrieval weights (must sum to 1.0).
 [memory.retrieval]
-top_k = 8
-vector_weight = 0.7
-fts_weight = 0.3
+top_k         = 8    # Number of results returned per query
+vector_weight = 0.7  # Weight for vector (embedding) similarity
+fts_weight    = 0.3  # Weight for full-text search scoring
 
+# --- Retry / reliability ---
 [reliability]
-max_attempts = 3
-backoff_base_ms = 250
-backoff_max_ms = 2000
-jitter = false
+max_attempts    = 3     # Total attempts per LLM call (1 = no retries)
+backoff_base_ms = 250   # Initial backoff delay
+backoff_max_ms  = 2000  # Maximum backoff delay
+jitter          = false # Add randomized jitter to backoff
 
+# --- Provider endpoints and credentials ---
+# API keys can also be set via environment variables:
+#   OPENAI_API_KEY, ANTHROPIC_API_KEY, or fallback API_KEY
+#
+# The base_url can point to any OpenAI-compatible endpoint (e.g. OpenRouter,
+# Azure OpenAI, or a local proxy).
 [providers.openai]
 base_url = "https://api.openai.com"
-# api_key = "set-me-or-use-OPENAI_API_KEY"
+# api_key = "sk-..."
 
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
-# api_key = "set-me-or-use-ANTHROPIC_API_KEY"
+# api_key = "sk-ant-..."

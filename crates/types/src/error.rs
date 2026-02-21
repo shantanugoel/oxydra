@@ -36,6 +36,16 @@ pub enum ProviderError {
     Serialization(#[from] serde_json::Error),
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ChannelError {
+    #[error("channel `{channel}` is unavailable")]
+    Unavailable { channel: String },
+    #[error("channel `{channel}` transport failed: {message}")]
+    Transport { channel: String, message: String },
+    #[error("channel `{channel}` protocol error: {message}")]
+    Protocol { channel: String, message: String },
+}
+
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error("invalid arguments for tool {tool}: {message}")]

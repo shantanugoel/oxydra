@@ -1,5 +1,7 @@
 use std::{
+    collections::BTreeSet,
     fs,
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -268,19 +270,21 @@ impl HostWasmToolRunner {
 
     async fn web_fetch(&self, arguments: &Value) -> Result<String, String> {
         let url = required_string(arguments, "url", "web_fetch")?;
+        let parsed_url = parse_and_validate_web_url(&url).await?;
+        let target_url = parsed_url.as_str().to_owned();
         let response = self
             .http_client
-            .get(&url)
+            .get(parsed_url)
             .send()
             .await
-            .map_err(|error| format!("web fetch request failed for `{url}`: {error}"))?;
+            .map_err(|error| format!("web fetch request failed for `{target_url}`: {error}"))?;
         let status = response.status();
         let body = response.text().await.map_err(|error| {
-            format!("failed to read web fetch response body for `{url}`: {error}")
+            format!("failed to read web fetch response body for `{target_url}`: {error}")
         })?;
         if !status.is_success() {
             return Err(format!(
-                "web fetch returned status {status} for `{url}`: {}",
+                "web fetch returned status {status} for `{target_url}`: {}",
                 truncate_web_body(&body)
             ));
         }
@@ -375,6 +379,86 @@ fn required_string(arguments: &Value, field: &str, tool_name: &str) -> Result<St
         .ok_or_else(|| format!("tool `{tool_name}` requires string argument `{field}`"))
 }
 
+async fn parse_and_validate_web_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let parsed_url = reqwest::Url::parse(raw_url)
+        .map_err(|error| format!("invalid url `{raw_url}`: {error}"))?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(format!(
+            "web fetch only supports http/https URLs, got scheme `{}`",
+            parsed_url.scheme()
+        ));
+    }
+
+    let host = parsed_url
+        .host_str()
+        .ok_or_else(|| format!("url `{raw_url}` does not include a hostname"))?;
+    let port = parsed_url.port_or_known_default().ok_or_else(|| {
+        format!(
+            "url `{raw_url}` is missing a known port for scheme `{}`",
+            parsed_url.scheme()
+        )
+    })?;
+    let resolved_ips = resolve_host_ips(host, port).await?;
+    enforce_web_target_ips(host, &resolved_ips)?;
+    Ok(parsed_url)
+}
+
+async fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| format!("failed to resolve host `{host}`: {error}"))?;
+    let unique_ips = resolved
+        .map(|socket_address| socket_address.ip())
+        .collect::<BTreeSet<_>>();
+    if unique_ips.is_empty() {
+        return Err(format!("host `{host}` resolved to no IP addresses"));
+    }
+    Ok(unique_ips.into_iter().collect())
+}
+
+fn enforce_web_target_ips(host: &str, resolved_ips: &[IpAddr]) -> Result<(), String> {
+    for ip in resolved_ips {
+        if let Some(reason) = blocked_ip_reason(*ip) {
+            return Err(format!(
+                "web target `{host}` resolved to blocked address `{ip}` ({reason})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn blocked_ip_reason(ip: IpAddr) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(v4) if v4 == Ipv4Addr::new(169, 254, 169, 254) => {
+            Some("metadata endpoint is blocked")
+        }
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            if octets[0] == 127 {
+                Some("loopback range 127.0.0.0/8 is blocked")
+            } else if octets[0] == 169 && octets[1] == 254 {
+                Some("link-local range 169.254.0.0/16 is blocked")
+            } else if octets[0] == 10 {
+                Some("private range 10.0.0.0/8 is blocked")
+            } else if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+                Some("private range 172.16.0.0/12 is blocked")
+            } else if octets[0] == 192 && octets[1] == 168 {
+                Some("private range 192.168.0.0/16 is blocked")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) if v6.is_loopback() => Some("loopback IPv6 addresses are blocked"),
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xfe00) == 0xfc00 => {
+            Some("unique-local IPv6 range fc00::/7 is blocked")
+        }
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
+            Some("link-local IPv6 range fe80::/10 is blocked")
+        }
+        _ => None,
+    }
+}
+
 fn truncate_web_body(body: &str) -> String {
     const MAX_BODY_PREVIEW_BYTES: usize = 256;
     if body.len() <= MAX_BODY_PREVIEW_BYTES {
@@ -436,6 +520,7 @@ fn collect_search_matches(
 mod tests {
     use std::{
         env, fs,
+        net::{IpAddr, Ipv4Addr},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -487,6 +572,72 @@ mod tests {
         assert_eq!(runner.audit_log().len(), 1);
 
         let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_metadata_endpoint_targets() {
+        let workspace = unique_workspace("web-block-meta");
+        let runner = HostWasmToolRunner::for_direct_workspace(&workspace);
+        let denied = runner
+            .invoke(
+                "web_fetch",
+                WasmCapabilityProfile::Web,
+                &json!({ "url": "http://169.254.169.254/latest/meta-data" }),
+                None,
+            )
+            .await
+            .expect_err("metadata endpoint target should be denied before request execution");
+        assert!(matches!(
+            denied,
+            SandboxError::WasmInvocationFailed { tool, message, .. }
+                if tool == "web_fetch"
+                    && message.contains("169.254.169.254")
+                    && message.contains("metadata endpoint")
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_private_rfc1918_targets() {
+        let workspace = unique_workspace("web-block-rfc1918");
+        let runner = HostWasmToolRunner::for_direct_workspace(&workspace);
+        let denied = runner
+            .invoke(
+                "web_fetch",
+                WasmCapabilityProfile::Web,
+                &json!({ "url": "http://192.168.1.25/internal" }),
+                None,
+            )
+            .await
+            .expect_err("RFC1918 target should be denied before request execution");
+        assert!(matches!(
+            denied,
+            SandboxError::WasmInvocationFailed { tool, message, .. }
+                if tool == "web_fetch"
+                    && message.contains("192.168.1.25")
+                    && message.contains("192.168.0.0/16")
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn web_target_policy_checks_all_resolved_ips() {
+        let result = enforce_web_target_ips(
+            "example.org",
+            &[
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 8)),
+            ],
+        );
+        assert!(matches!(
+            result,
+            Err(message)
+                if message.contains("example.org")
+                    && message.contains("192.168.1.8")
+                    && message.contains("192.168.0.0/16")
+        ));
     }
 
     fn unique_workspace(prefix: &str) -> PathBuf {

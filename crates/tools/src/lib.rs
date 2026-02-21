@@ -1273,6 +1273,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_copyto_uses_two_auditable_wasm_invocations_with_disjoint_mounts() {
+        let workspace_root = temp_workspace_root("vault-copyto");
+        let source_path = workspace_root.join("vault").join("source.txt");
+        let destination_path = workspace_root.join("shared").join("copied.txt");
+        fs::write(&source_path, "vault payload").expect("vault source file should be writable");
+
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace_root));
+        let tool = VaultCopyToTool::new(runner.clone());
+        let result = tool
+            .execute(
+                &json!({
+                    "source_path": source_path.to_string_lossy(),
+                    "destination_path": destination_path.to_string_lossy(),
+                })
+                .to_string(),
+            )
+            .await
+            .expect("vault_copyto should succeed");
+        assert!(result.contains("copied"));
+        assert_eq!(
+            fs::read_to_string(&destination_path).expect("destination file should be readable"),
+            "vault payload"
+        );
+
+        let audit = runner.audit_log();
+        assert_eq!(audit.len(), 2);
+        let read_step = &audit[0];
+        let write_step = &audit[1];
+        assert_eq!(read_step.tool_name, VAULT_COPYTO_READ_OPERATION);
+        assert_eq!(write_step.tool_name, VAULT_COPYTO_WRITE_OPERATION);
+        assert_eq!(read_step.profile, WasmCapabilityProfile::VaultReadStep);
+        assert_eq!(write_step.profile, WasmCapabilityProfile::VaultWriteStep);
+        assert_eq!(read_step.operation_id, write_step.operation_id);
+        assert!(read_step.operation_id.is_some());
+
+        assert_eq!(read_step.mounts.len(), 1);
+        assert_eq!(read_step.mounts[0].label, "vault");
+        assert!(read_step.mounts[0].read_only);
+
+        let write_labels = write_step
+            .mounts
+            .iter()
+            .map(|mount| mount.label)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(write_labels, BTreeSet::from(["shared", "tmp"]));
+        assert!(write_step.mounts.iter().all(|mount| !mount.read_only));
+        assert!(write_step.mounts.iter().all(|mount| mount.label != "vault"));
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn vault_copyto_propagates_read_step_errors_without_running_write_step() {
+        let workspace_root = temp_workspace_root("vault-copyto-read-error");
+        let source_path = workspace_root.join("vault").join("missing.txt");
+        let destination_path = workspace_root.join("shared").join("copied.txt");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace_root));
+        let tool = VaultCopyToTool::new(runner.clone());
+
+        let error = tool
+            .execute(
+                &json!({
+                    "source_path": source_path.to_string_lossy(),
+                    "destination_path": destination_path.to_string_lossy(),
+                })
+                .to_string(),
+            )
+            .await
+            .expect_err("missing source should fail in read step");
+        assert!(matches!(
+            error,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == VAULT_COPYTO_READ_OPERATION
+                    && message.contains("failed to read vault source")
+        ));
+        assert_eq!(runner.audit_log().len(), 1);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn vault_copyto_propagates_write_step_errors_after_read_step() {
+        let workspace_root = temp_workspace_root("vault-copyto-write-error");
+        let source_path = workspace_root.join("vault").join("source.txt");
+        let destination_path = workspace_root
+            .join("shared")
+            .join("nested")
+            .join("copied.txt");
+        fs::write(&source_path, "vault payload").expect("vault source file should be writable");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace_root));
+        let tool = VaultCopyToTool::new(runner.clone());
+
+        let error = tool
+            .execute(
+                &json!({
+                    "source_path": source_path.to_string_lossy(),
+                    "destination_path": destination_path.to_string_lossy(),
+                })
+                .to_string(),
+            )
+            .await
+            .expect_err("missing destination parent should fail in write step");
+        assert!(matches!(
+            error,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == VAULT_COPYTO_WRITE_OPERATION
+                    && message.contains("failed to write destination")
+        ));
+        assert_eq!(runner.audit_log().len(), 2);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
     async fn bash_tool_executes_command() {
         let command = if cfg!(target_os = "windows") {
             "echo hello"

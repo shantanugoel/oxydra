@@ -28,9 +28,14 @@ use types::{
 };
 
 mod policy;
+mod wasm_runner;
 
 pub use policy::{
     SecurityPolicy, SecurityPolicyViolation, SecurityPolicyViolationReason, WorkspaceSecurityPolicy,
+};
+pub use wasm_runner::{
+    HostWasmToolRunner, WasmCapabilityProfile, WasmInvocationMetadata, WasmInvocationResult,
+    WasmMount, WasmToolRunner, WasmWorkspaceMounts,
 };
 
 pub const DEFAULT_MAX_SESSION_OUTPUT_BYTES: usize = 64 * 1024;
@@ -162,6 +167,12 @@ pub enum SandboxError {
     ShellDaemonRejected { request_id: String },
     #[error("command execution timed out after {timeout_secs}s")]
     CommandTimeout { timeout_secs: u64 },
+    #[error("wasm tool invocation failed for `{tool}` request `{request_id}`: {message}")]
+    WasmInvocationFailed {
+        tool: String,
+        request_id: String,
+        message: String,
+    },
 }
 
 #[async_trait]

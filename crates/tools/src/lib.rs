@@ -1,14 +1,23 @@
 use std::{
-    collections::BTreeMap, env, fs, path::PathBuf, process::Command, sync::Arc, time::Duration,
+    collections::BTreeMap,
+    env,
+    path::PathBuf,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use sandbox::{
-    SecurityPolicy, SessionStatus, SessionUnavailable, SessionUnavailableReason, ShellSession,
-    ShellSessionConfig, VsockShellSession, WorkspaceSecurityPolicy,
+    HostWasmToolRunner, SecurityPolicy, SessionStatus, SessionUnavailable,
+    SessionUnavailableReason, ShellSession, ShellSessionConfig, VsockShellSession,
+    WasmCapabilityProfile, WasmToolRunner, WorkspaceSecurityPolicy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde_json::{Value, json};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -17,20 +26,66 @@ use types::{
     ShellOutputStream, SidecarEndpoint, SidecarTransport, Tool, ToolError,
 };
 
-pub const READ_TOOL_NAME: &str = "read_file";
-pub const WRITE_TOOL_NAME: &str = "write_file";
-pub const EDIT_TOOL_NAME: &str = "edit_file";
-pub const BASH_TOOL_NAME: &str = "bash";
+pub const FILE_READ_TOOL_NAME: &str = "file_read";
+pub const FILE_SEARCH_TOOL_NAME: &str = "file_search";
+pub const FILE_LIST_TOOL_NAME: &str = "file_list";
+pub const FILE_WRITE_TOOL_NAME: &str = "file_write";
+pub const FILE_EDIT_TOOL_NAME: &str = "file_edit";
+pub const FILE_DELETE_TOOL_NAME: &str = "file_delete";
+pub const WEB_FETCH_TOOL_NAME: &str = "web_fetch";
+pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
+pub const VAULT_COPYTO_TOOL_NAME: &str = "vault_copyto";
+pub const SHELL_EXEC_TOOL_NAME: &str = "shell_exec";
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ReadTool;
+const VAULT_COPYTO_READ_OPERATION: &str = "vault_copyto_read";
+const VAULT_COPYTO_WRITE_OPERATION: &str = "vault_copyto_write";
+static NEXT_VAULT_COPYTO_OPERATION_NUMBER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct WriteTool;
+#[derive(Clone)]
+pub struct ReadTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct EditTool;
+#[derive(Clone)]
+pub struct SearchTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct ListTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct WriteTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct EditTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct DeleteTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct WebFetchTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct WebSearchTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
+
+#[derive(Clone)]
+pub struct VaultCopyToTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
 
 pub struct BashTool {
     backend: BashBackend,
@@ -48,6 +103,17 @@ struct ReadArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct SearchArgs {
+    path: String,
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListArgs {
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WriteArgs {
     path: String,
     content: String,
@@ -61,8 +127,143 @@ struct EditArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct DeleteArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebFetchArgs {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSearchArgs {
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VaultCopyToArgs {
+    source_path: String,
+    destination_path: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct BashArgs {
     command: String,
+}
+
+impl ReadTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for ReadTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl SearchTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for SearchTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl ListTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for ListTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl WriteTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for WriteTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl EditTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for EditTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl DeleteTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for DeleteTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl WebFetchTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl WebSearchTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for WebSearchTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
+}
+
+impl VaultCopyToTool {
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+
+    fn next_operation_id() -> String {
+        let operation_number =
+            NEXT_VAULT_COPYTO_OPERATION_NUMBER.fetch_add(1, Ordering::Relaxed) + 1;
+        format!("vault-copyto-{operation_number}")
+    }
+}
+
+impl Default for VaultCopyToTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
+    }
 }
 
 impl Default for BashTool {
@@ -101,16 +302,106 @@ impl Tool for ReadTool {
         );
 
         FunctionDecl::new(
-            READ_TOOL_NAME,
+            FILE_READ_TOOL_NAME,
             Some("Read UTF-8 text from a file".to_owned()),
             JsonSchema::object(properties, vec!["path".to_owned()]),
         )
     }
 
     async fn execute(&self, args: &str) -> Result<String, ToolError> {
-        let request: ReadArgs = parse_args(READ_TOOL_NAME, args)?;
-        fs::read_to_string(&request.path)
-            .map_err(|error| execution_failed(READ_TOOL_NAME, error.to_string()))
+        let request: ReadArgs = parse_args(FILE_READ_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            FILE_READ_TOOL_NAME,
+            WasmCapabilityProfile::FileReadOnly,
+            &json!({ "path": request.path }),
+            None,
+        )
+        .await
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
+#[async_trait]
+impl Tool for SearchTool {
+    fn schema(&self) -> FunctionDecl {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "path".to_owned(),
+            JsonSchema::new(JsonSchemaType::String).with_description("Root path to search"),
+        );
+        properties.insert(
+            "query".to_owned(),
+            JsonSchema::new(JsonSchemaType::String).with_description("Search query"),
+        );
+
+        FunctionDecl::new(
+            FILE_SEARCH_TOOL_NAME,
+            Some("Search recursively for lines containing the query text".to_owned()),
+            JsonSchema::object(properties, vec!["path".to_owned(), "query".to_owned()]),
+        )
+    }
+
+    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+        let request: SearchArgs = parse_args(FILE_SEARCH_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            FILE_SEARCH_TOOL_NAME,
+            WasmCapabilityProfile::FileReadOnly,
+            &json!({ "path": request.path, "query": request.query }),
+            None,
+        )
+        .await
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(20)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
+#[async_trait]
+impl Tool for ListTool {
+    fn schema(&self) -> FunctionDecl {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "path".to_owned(),
+            JsonSchema::new(JsonSchemaType::String)
+                .with_description("Directory path to list; defaults to current directory"),
+        );
+
+        FunctionDecl::new(
+            FILE_LIST_TOOL_NAME,
+            Some("List entries in a directory".to_owned()),
+            JsonSchema::object(properties, Vec::new()),
+        )
+    }
+
+    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+        let request: ListArgs = parse_args(FILE_LIST_TOOL_NAME, args)?;
+        let payload = if let Some(path) = request.path {
+            json!({ "path": path })
+        } else {
+            json!({})
+        };
+        invoke_wasm_tool(
+            &self.runner,
+            FILE_LIST_TOOL_NAME,
+            WasmCapabilityProfile::FileReadOnly,
+            &payload,
+            None,
+        )
+        .await
     }
 
     fn timeout(&self) -> Duration {
@@ -137,21 +428,22 @@ impl Tool for WriteTool {
         );
 
         FunctionDecl::new(
-            WRITE_TOOL_NAME,
+            FILE_WRITE_TOOL_NAME,
             Some("Write UTF-8 text to a file".to_owned()),
             JsonSchema::object(properties, vec!["path".to_owned(), "content".to_owned()]),
         )
     }
 
     async fn execute(&self, args: &str) -> Result<String, ToolError> {
-        let request: WriteArgs = parse_args(WRITE_TOOL_NAME, args)?;
-        fs::write(&request.path, request.content.as_bytes())
-            .map_err(|error| execution_failed(WRITE_TOOL_NAME, error.to_string()))?;
-        Ok(format!(
-            "wrote {} bytes to {}",
-            request.content.len(),
-            request.path
-        ))
+        let request: WriteArgs = parse_args(FILE_WRITE_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            FILE_WRITE_TOOL_NAME,
+            WasmCapabilityProfile::FileReadWrite,
+            &json!({ "path": request.path, "content": request.content }),
+            None,
+        )
+        .await
     }
 
     fn timeout(&self) -> Duration {
@@ -182,7 +474,7 @@ impl Tool for EditTool {
         );
 
         FunctionDecl::new(
-            EDIT_TOOL_NAME,
+            FILE_EDIT_TOOL_NAME,
             Some("Edit a file by replacing one exact text occurrence".to_owned()),
             JsonSchema::object(
                 properties,
@@ -196,39 +488,195 @@ impl Tool for EditTool {
     }
 
     async fn execute(&self, args: &str) -> Result<String, ToolError> {
-        let request: EditArgs = parse_args(EDIT_TOOL_NAME, args)?;
-        if request.old_text.is_empty() {
-            return Err(invalid_args(EDIT_TOOL_NAME, "old_text must not be empty"));
-        }
-
-        let content = fs::read_to_string(&request.path)
-            .map_err(|error| execution_failed(EDIT_TOOL_NAME, error.to_string()))?;
-        let occurrences = content.matches(&request.old_text).count();
-
-        if occurrences == 0 {
-            return Err(execution_failed(
-                EDIT_TOOL_NAME,
-                "old_text was not found in target file",
-            ));
-        }
-        if occurrences > 1 {
-            return Err(execution_failed(
-                EDIT_TOOL_NAME,
-                format!(
-                    "old_text matched {occurrences} locations; provide a more specific snippet"
-                ),
-            ));
-        }
-
-        let updated = content.replacen(&request.old_text, &request.new_text, 1);
-        fs::write(&request.path, updated.as_bytes())
-            .map_err(|error| execution_failed(EDIT_TOOL_NAME, error.to_string()))?;
-
-        Ok(format!("updated {}", request.path))
+        let request: EditArgs = parse_args(FILE_EDIT_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            FILE_EDIT_TOOL_NAME,
+            WasmCapabilityProfile::FileReadWrite,
+            &json!({
+                "path": request.path,
+                "old_text": request.old_text,
+                "new_text": request.new_text
+            }),
+            None,
+        )
+        .await
     }
 
     fn timeout(&self) -> Duration {
         Duration::from_secs(15)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::SideEffecting
+    }
+}
+
+#[async_trait]
+impl Tool for DeleteTool {
+    fn schema(&self) -> FunctionDecl {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "path".to_owned(),
+            JsonSchema::new(JsonSchemaType::String)
+                .with_description("File or directory path to delete"),
+        );
+
+        FunctionDecl::new(
+            FILE_DELETE_TOOL_NAME,
+            Some("Delete a file or directory".to_owned()),
+            JsonSchema::object(properties, vec!["path".to_owned()]),
+        )
+    }
+
+    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+        let request: DeleteArgs = parse_args(FILE_DELETE_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            FILE_DELETE_TOOL_NAME,
+            WasmCapabilityProfile::FileReadWrite,
+            &json!({ "path": request.path }),
+            None,
+        )
+        .await
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(15)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::SideEffecting
+    }
+}
+
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn schema(&self) -> FunctionDecl {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "url".to_owned(),
+            JsonSchema::new(JsonSchemaType::String).with_description("URL to fetch"),
+        );
+
+        FunctionDecl::new(
+            WEB_FETCH_TOOL_NAME,
+            Some("Fetch a URL and return response text".to_owned()),
+            JsonSchema::object(properties, vec!["url".to_owned()]),
+        )
+    }
+
+    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+        let request: WebFetchArgs = parse_args(WEB_FETCH_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            WEB_FETCH_TOOL_NAME,
+            WasmCapabilityProfile::Web,
+            &json!({ "url": request.url }),
+            None,
+        )
+        .await
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(30)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::SideEffecting
+    }
+}
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn schema(&self) -> FunctionDecl {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "query".to_owned(),
+            JsonSchema::new(JsonSchemaType::String).with_description("Search query"),
+        );
+
+        FunctionDecl::new(
+            WEB_SEARCH_TOOL_NAME,
+            Some("Run a web search and return response text".to_owned()),
+            JsonSchema::object(properties, vec!["query".to_owned()]),
+        )
+    }
+
+    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+        let request: WebSearchArgs = parse_args(WEB_SEARCH_TOOL_NAME, args)?;
+        invoke_wasm_tool(
+            &self.runner,
+            WEB_SEARCH_TOOL_NAME,
+            WasmCapabilityProfile::Web,
+            &json!({ "query": request.query }),
+            None,
+        )
+        .await
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(30)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::SideEffecting
+    }
+}
+
+#[async_trait]
+impl Tool for VaultCopyToTool {
+    fn schema(&self) -> FunctionDecl {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "source_path".to_owned(),
+            JsonSchema::new(JsonSchemaType::String)
+                .with_description("Vault source path to read from"),
+        );
+        properties.insert(
+            "destination_path".to_owned(),
+            JsonSchema::new(JsonSchemaType::String)
+                .with_description("Destination path in shared/tmp to write to"),
+        );
+
+        FunctionDecl::new(
+            VAULT_COPYTO_TOOL_NAME,
+            Some("Copy data from vault into shared/tmp via two-step WASM invocation".to_owned()),
+            JsonSchema::object(
+                properties,
+                vec!["source_path".to_owned(), "destination_path".to_owned()],
+            ),
+        )
+    }
+
+    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+        let request: VaultCopyToArgs = parse_args(VAULT_COPYTO_TOOL_NAME, args)?;
+        let operation_id = Self::next_operation_id();
+        let read_result = invoke_wasm_tool(
+            &self.runner,
+            VAULT_COPYTO_READ_OPERATION,
+            WasmCapabilityProfile::VaultReadStep,
+            &json!({ "source_path": request.source_path }),
+            Some(operation_id.as_str()),
+        )
+        .await?;
+
+        let write_result = invoke_wasm_tool(
+            &self.runner,
+            VAULT_COPYTO_WRITE_OPERATION,
+            WasmCapabilityProfile::VaultWriteStep,
+            &json!({
+                "destination_path": request.destination_path,
+                "content": read_result
+            }),
+            Some(operation_id.as_str()),
+        )
+        .await?;
+        Ok(write_result)
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(30)
     }
 
     fn safety_tier(&self) -> SafetyTier {
@@ -247,18 +695,18 @@ impl Tool for BashTool {
         );
 
         FunctionDecl::new(
-            BASH_TOOL_NAME,
+            SHELL_EXEC_TOOL_NAME,
             Some("Execute a shell command".to_owned()),
             JsonSchema::object(properties, vec!["command".to_owned()]),
         )
     }
 
     async fn execute(&self, args: &str) -> Result<String, ToolError> {
-        let request: BashArgs = parse_args(BASH_TOOL_NAME, args)?;
+        let request: BashArgs = parse_args(SHELL_EXEC_TOOL_NAME, args)?;
         match &self.backend {
             BashBackend::Host => {
                 let output = run_shell_command(&request.command)
-                    .map_err(|error| execution_failed(BASH_TOOL_NAME, error.to_string()))?;
+                    .map_err(|error| execution_failed(SHELL_EXEC_TOOL_NAME, error.to_string()))?;
                 let combined_output = combine_command_output(&output.stdout, &output.stderr);
 
                 if output.status.success() {
@@ -277,14 +725,14 @@ impl Tool for BashTool {
                     } else {
                         format!("command exited with status {status}: {combined_output}")
                     };
-                    Err(execution_failed(BASH_TOOL_NAME, message))
+                    Err(execution_failed(SHELL_EXEC_TOOL_NAME, message))
                 }
             }
             BashBackend::Session(session) => {
                 execute_with_shell_session(session, &request.command, self.timeout()).await
             }
             BashBackend::Disabled(status) => Err(execution_failed(
-                BASH_TOOL_NAME,
+                SHELL_EXEC_TOOL_NAME,
                 shell_disabled_message(status),
             )),
         }
@@ -328,10 +776,8 @@ impl ToolRegistry {
     }
 
     pub fn register_core_tools(&mut self) {
-        self.register(READ_TOOL_NAME, ReadTool);
-        self.register(WRITE_TOOL_NAME, WriteTool);
-        self.register(EDIT_TOOL_NAME, EditTool);
-        self.register(BASH_TOOL_NAME, BashTool::default());
+        let wasm_runner = default_wasm_runner();
+        register_phase11_tools(self, wasm_runner, BashTool::default());
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
@@ -409,11 +855,9 @@ pub async fn bootstrap_runtime_tools(
     bootstrap: Option<&RunnerBootstrapEnvelope>,
 ) -> RuntimeToolsBootstrap {
     let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
+    let wasm_runner = runtime_wasm_runner(bootstrap);
     let mut registry = ToolRegistry::default();
-    registry.register(READ_TOOL_NAME, ReadTool);
-    registry.register(WRITE_TOOL_NAME, WriteTool);
-    registry.register(EDIT_TOOL_NAME, EditTool);
-    registry.register(BASH_TOOL_NAME, bash_tool);
+    register_phase11_tools(&mut registry, wasm_runner, bash_tool);
     registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap)));
 
     RuntimeToolsBootstrap {
@@ -422,6 +866,40 @@ pub async fn bootstrap_runtime_tools(
             shell: shell_status,
             browser: browser_status,
         },
+    }
+}
+
+fn register_phase11_tools(
+    registry: &mut ToolRegistry,
+    wasm_runner: Arc<dyn WasmToolRunner>,
+    shell_tool: BashTool,
+) {
+    registry.register(FILE_READ_TOOL_NAME, ReadTool::new(wasm_runner.clone()));
+    registry.register(FILE_SEARCH_TOOL_NAME, SearchTool::new(wasm_runner.clone()));
+    registry.register(FILE_LIST_TOOL_NAME, ListTool::new(wasm_runner.clone()));
+    registry.register(FILE_WRITE_TOOL_NAME, WriteTool::new(wasm_runner.clone()));
+    registry.register(FILE_EDIT_TOOL_NAME, EditTool::new(wasm_runner.clone()));
+    registry.register(FILE_DELETE_TOOL_NAME, DeleteTool::new(wasm_runner.clone()));
+    registry.register(WEB_FETCH_TOOL_NAME, WebFetchTool::new(wasm_runner.clone()));
+    registry.register(
+        WEB_SEARCH_TOOL_NAME,
+        WebSearchTool::new(wasm_runner.clone()),
+    );
+    registry.register(VAULT_COPYTO_TOOL_NAME, VaultCopyToTool::new(wasm_runner));
+    registry.register(SHELL_EXEC_TOOL_NAME, shell_tool);
+}
+
+fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
+    let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Arc::new(HostWasmToolRunner::for_direct_workspace(workspace_root))
+}
+
+fn runtime_wasm_runner(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Arc<dyn WasmToolRunner> {
+    match bootstrap {
+        Some(bootstrap) => Arc::new(HostWasmToolRunner::for_bootstrap_workspace(
+            &bootstrap.workspace_root,
+        )),
+        None => default_wasm_runner(),
     }
 }
 
@@ -599,6 +1077,20 @@ fn parse_policy_args(tool: &str, args: &str) -> Result<Value, ToolError> {
         .map_err(|error| invalid_args(tool, format!("invalid JSON arguments payload: {error}")))
 }
 
+async fn invoke_wasm_tool(
+    runner: &Arc<dyn WasmToolRunner>,
+    tool_name: &str,
+    profile: WasmCapabilityProfile,
+    arguments: &Value,
+    operation_id: Option<&str>,
+) -> Result<String, ToolError> {
+    runner
+        .invoke(tool_name, profile, arguments, operation_id)
+        .await
+        .map(|result| result.output)
+        .map_err(|error| execution_failed(tool_name, error.to_string()))
+}
+
 async fn execute_with_shell_session(
     session: &Arc<Mutex<Box<dyn ShellSession>>>,
     command: &str,
@@ -611,7 +1103,7 @@ async fn execute_with_shell_session(
         .await
         .map_err(|error| {
             execution_failed(
-                BASH_TOOL_NAME,
+                SHELL_EXEC_TOOL_NAME,
                 format!("failed to execute shell command via sidecar session: {error}"),
             )
         })?;
@@ -621,7 +1113,7 @@ async fn execute_with_shell_session(
     loop {
         let chunk = session.stream_output(None).await.map_err(|error| {
             execution_failed(
-                BASH_TOOL_NAME,
+                SHELL_EXEC_TOOL_NAME,
                 format!("failed to stream shell output from sidecar session: {error}"),
             )
         })?;
@@ -694,6 +1186,7 @@ fn run_shell_command(command: &str) -> std::io::Result<std::process::Output> {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         env, fs,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
@@ -715,7 +1208,7 @@ mod tests {
 
     #[tool]
     /// Read UTF-8 text from a file
-    async fn read_file(path: String) -> String {
+    async fn file_read(path: String) -> String {
         path
     }
 
@@ -723,7 +1216,7 @@ mod tests {
     async fn read_tool_executes_through_tool_contract() {
         let path = temp_path("read");
         fs::write(&path, "hello from read tool").expect("test setup should create file");
-        let tool = ReadTool;
+        let tool = ReadTool::default();
         let contract: &dyn Tool = &tool;
 
         let result = contract
@@ -738,7 +1231,7 @@ mod tests {
     #[tokio::test]
     async fn write_tool_writes_file_content() {
         let path = temp_path("write");
-        let tool = WriteTool;
+        let tool = WriteTool::default();
 
         let result = tool
             .execute(
@@ -761,7 +1254,7 @@ mod tests {
     async fn edit_tool_replaces_exact_single_match() {
         let path = temp_path("edit");
         fs::write(&path, "alpha beta gamma").expect("test setup should create file");
-        let tool = EditTool;
+        let tool = EditTool::default();
 
         tool.execute(
             &json!({
@@ -804,13 +1297,16 @@ mod tests {
         assert!(!availability.shell.is_ready());
         assert!(!availability.browser.is_ready());
         let error = registry
-            .execute(BASH_TOOL_NAME, r#"{"command":"printf should-not-run"}"#)
+            .execute(
+                SHELL_EXEC_TOOL_NAME,
+                r#"{"command":"printf should-not-run"}"#,
+            )
             .await
             .expect_err("bash should be explicitly disabled when runner bootstrap is absent");
         assert!(matches!(
             error,
             ToolError::ExecutionFailed { tool, message }
-                if tool == BASH_TOOL_NAME && message.contains("disabled")
+                if tool == SHELL_EXEC_TOOL_NAME && message.contains("disabled")
         ));
     }
 
@@ -842,7 +1338,7 @@ mod tests {
         } = bootstrap_runtime_tools(Some(&bootstrap)).await;
 
         let output = registry
-            .execute(BASH_TOOL_NAME, r#"{"command":"printf ws5-sidecar"}"#)
+            .execute(SHELL_EXEC_TOOL_NAME, r#"{"command":"printf ws5-sidecar"}"#)
             .await
             .expect("sidecar-backed bash execution should succeed");
         assert_eq!(output, "ws5-sidecar");
@@ -855,9 +1351,9 @@ mod tests {
 
     #[test]
     fn core_tool_schemas_and_metadata_match_phase4_contract() {
-        let read = ReadTool;
-        let write = WriteTool;
-        let edit = EditTool;
+        let read = ReadTool::default();
+        let write = WriteTool::default();
+        let edit = EditTool::default();
         let bash = BashTool::default();
 
         assert_eq!(read.safety_tier(), SafetyTier::ReadOnly);
@@ -881,9 +1377,9 @@ mod tests {
 
     #[test]
     fn macro_generated_schema_matches_read_tool_contract() {
-        std::mem::drop(read_file("placeholder".to_owned()));
-        let generated = __tool_function_decl_read_file();
-        let runtime = ReadTool.schema();
+        std::mem::drop(file_read("placeholder".to_owned()));
+        let generated = __tool_function_decl_file_read();
+        let runtime = ReadTool::default().schema();
 
         assert_eq!(generated.name, runtime.name);
         assert_eq!(generated.description, runtime.description);
@@ -931,34 +1427,42 @@ mod tests {
         ));
 
         let gated = registry
-            .execute_with_policy(BASH_TOOL_NAME, r#"{"command":"echo blocked"}"#, |tier| {
-                if tier == SafetyTier::Privileged {
-                    Err(execution_failed("policy", "blocked by safety gate"))
-                } else {
-                    Ok(())
-                }
-            })
+            .execute_with_policy(
+                SHELL_EXEC_TOOL_NAME,
+                r#"{"command":"echo blocked"}"#,
+                |tier| {
+                    if tier == SafetyTier::Privileged {
+                        Err(execution_failed("policy", "blocked by safety gate"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
             .await;
         assert!(matches!(
             gated,
             Err(ToolError::ExecutionFailed { tool, message })
-                if tool == "bash" && message.contains("unknown tool")
+                if tool == SHELL_EXEC_TOOL_NAME && message.contains("unknown tool")
         ));
     }
 
     #[tokio::test]
     async fn registry_can_gate_registered_privileged_tools() {
         let mut registry = ToolRegistry::default();
-        registry.register(BASH_TOOL_NAME, BashTool::default());
+        registry.register(SHELL_EXEC_TOOL_NAME, BashTool::default());
 
         let gated = registry
-            .execute_with_policy(BASH_TOOL_NAME, r#"{"command":"echo blocked"}"#, |tier| {
-                if tier == SafetyTier::Privileged {
-                    Err(execution_failed("policy", "blocked by safety gate"))
-                } else {
-                    Ok(())
-                }
-            })
+            .execute_with_policy(
+                SHELL_EXEC_TOOL_NAME,
+                r#"{"command":"echo blocked"}"#,
+                |tier| {
+                    if tier == SafetyTier::Privileged {
+                        Err(execution_failed("policy", "blocked by safety gate"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
             .await;
 
         assert!(matches!(
@@ -983,14 +1487,14 @@ mod tests {
             bootstrap_runtime_tools(Some(&bootstrap)).await;
         let args = json!({ "path": outside.to_string_lossy() }).to_string();
         let denied = registry
-            .execute(READ_TOOL_NAME, &args)
+            .execute(FILE_READ_TOOL_NAME, &args)
             .await
             .expect_err("policy should deny file reads outside configured workspace roots");
 
         assert!(matches!(
             denied,
             ToolError::ExecutionFailed { tool, message }
-                if tool == READ_TOOL_NAME
+                if tool == FILE_READ_TOOL_NAME
                     && message.contains("blocked by security policy")
                     && message.contains("PathOutsideAllowedRoots")
         ));
@@ -1003,24 +1507,66 @@ mod tests {
     async fn registry_denies_shell_commands_not_in_allowlist() {
         let workspace_root = temp_workspace_root("policy-shell");
         let mut registry = ToolRegistry::default();
-        registry.register(BASH_TOOL_NAME, BashTool::default());
+        registry.register(SHELL_EXEC_TOOL_NAME, BashTool::default());
         registry.set_security_policy(Arc::new(WorkspaceSecurityPolicy::for_direct_workspace(
             &workspace_root,
         )));
 
         let denied = registry
-            .execute(BASH_TOOL_NAME, r#"{"command":"curl https://example.com"}"#)
+            .execute(
+                SHELL_EXEC_TOOL_NAME,
+                r#"{"command":"curl https://example.com"}"#,
+            )
             .await
             .expect_err("security policy should deny shell commands outside allowlist");
         assert!(matches!(
             denied,
             ToolError::ExecutionFailed { tool, message }
-                if tool == BASH_TOOL_NAME
+                if tool == SHELL_EXEC_TOOL_NAME
                     && message.contains("blocked by security policy")
                     && message.contains("CommandNotAllowed")
         ));
 
         let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_registry_rejects_legacy_tool_name_aliases() {
+        let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None).await;
+        for legacy_name in ["read_file", "write_file", "edit_file", "bash"] {
+            let error = registry
+                .execute(legacy_name, "{}")
+                .await
+                .expect_err("legacy alias should not be registered");
+            assert!(matches!(
+                error,
+                ToolError::ExecutionFailed { tool, message }
+                    if tool == legacy_name && message.contains("unknown tool")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_registry_exposes_phase11_tool_surface_only() {
+        let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None).await;
+        let exposed = registry
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<BTreeSet<_>>();
+        let expected = BTreeSet::from([
+            FILE_READ_TOOL_NAME.to_owned(),
+            FILE_SEARCH_TOOL_NAME.to_owned(),
+            FILE_LIST_TOOL_NAME.to_owned(),
+            FILE_WRITE_TOOL_NAME.to_owned(),
+            FILE_EDIT_TOOL_NAME.to_owned(),
+            FILE_DELETE_TOOL_NAME.to_owned(),
+            WEB_FETCH_TOOL_NAME.to_owned(),
+            WEB_SEARCH_TOOL_NAME.to_owned(),
+            VAULT_COPYTO_TOOL_NAME.to_owned(),
+            SHELL_EXEC_TOOL_NAME.to_owned(),
+        ]);
+        assert_eq!(exposed, expected);
     }
 
     fn temp_path(label: &str) -> PathBuf {

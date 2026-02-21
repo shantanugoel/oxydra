@@ -679,6 +679,8 @@ remote_url = "libsql://example-org.turso.io"
     #[tokio::test]
     async fn bootstrap_vm_runtime_with_process_tier_frame_disables_sidecar_tools() {
         let _lock = async_test_lock().lock().await;
+        let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
+        let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
         let root = temp_dir("bootstrap-process-tier");
         let paths = test_paths(&root);
         write_bootstrap_config(&paths);
@@ -707,13 +709,13 @@ remote_url = "libsql://example-org.turso.io"
         assert!(!bootstrap.tool_availability.browser.is_ready());
         let error = bootstrap
             .tool_registry
-            .execute("bash", r#"{"command":"printf should-not-run"}"#)
+            .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
             .await
             .expect_err("process-tier bootstrap should disable sidecar-dependent shell tool");
         assert!(matches!(
             error,
             types::ToolError::ExecutionFailed { tool, message }
-                if tool == "bash" && message.contains("disabled")
+                if tool == "shell_exec" && message.contains("disabled")
         ));
 
         let _ = fs::remove_dir_all(root);
@@ -722,6 +724,8 @@ remote_url = "libsql://example-org.turso.io"
     #[tokio::test]
     async fn bootstrap_vm_runtime_without_frame_disables_sidecar_tools_for_direct_execution() {
         let _lock = async_test_lock().lock().await;
+        let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
+        let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
         let root = temp_dir("bootstrap-direct");
         let paths = test_paths(&root);
         write_bootstrap_config(&paths);
@@ -736,13 +740,13 @@ remote_url = "libsql://example-org.turso.io"
         assert!(!bootstrap.tool_availability.browser.is_ready());
         let error = bootstrap
             .tool_registry
-            .execute("bash", r#"{"command":"printf should-not-run"}"#)
+            .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
             .await
             .expect_err("direct runtime bootstrap should disable sidecar-dependent shell tool");
         assert!(matches!(
             error,
             types::ToolError::ExecutionFailed { tool, message }
-                if tool == "bash" && message.contains("disabled")
+                if tool == "shell_exec" && message.contains("disabled")
         ));
 
         let _ = fs::remove_dir_all(root);

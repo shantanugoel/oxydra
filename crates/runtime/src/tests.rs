@@ -144,7 +144,7 @@ impl Tool for MockReadTool {
         let mut properties = std::collections::BTreeMap::new();
         properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
         FunctionDecl::new(
-            "read_file",
+            "file_read",
             None,
             JsonSchema::object(properties, vec!["path".to_owned()]),
         )
@@ -154,7 +154,7 @@ impl Tool for MockReadTool {
         let parsed: Value = serde_json::from_str(args)?;
         let path = parsed.get("path").and_then(Value::as_str).ok_or_else(|| {
             ToolError::InvalidArguments {
-                tool: "read_file".to_owned(),
+                tool: "file_read".to_owned(),
                 message: "missing `path`".to_owned(),
             }
         })?;
@@ -449,7 +449,7 @@ async fn run_session_reconstructs_streamed_tool_calls_and_loops_until_done() {
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_1".to_owned()),
-                    name: Some("read_file".to_owned()),
+                    name: Some("file_read".to_owned()),
                     arguments: Some("{\"path\":\"Car".to_owned()),
                 })),
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
@@ -467,7 +467,7 @@ async fn run_session_reconstructs_streamed_tool_calls_and_loops_until_done() {
         ],
     );
     let mut tools = ToolRegistry::default();
-    tools.register("read_file", MockReadTool);
+    tools.register("file_read", MockReadTool);
     let runtime = AgentRuntime::new(Box::new(provider), tools, RuntimeLimits::default());
     let mut context = test_context(provider_id, model_id);
 
@@ -502,7 +502,7 @@ async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_bash".to_owned()),
-                    name: Some("bash".to_owned()),
+                    name: Some("shell_exec".to_owned()),
                     arguments: Some(r#"{"command":"printf ws5-runtime"}"#.to_owned()),
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
@@ -569,7 +569,7 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_bash".to_owned()),
-                    name: Some("bash".to_owned()),
+                    name: Some("shell_exec".to_owned()),
                     arguments: Some(r#"{"command":"printf blocked"}"#.to_owned()),
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
@@ -636,7 +636,7 @@ async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_ac
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_read".to_owned()),
-                    name: Some("read_file".to_owned()),
+                    name: Some("file_read".to_owned()),
                     arguments: Some(json!({ "path": outside_file_path }).to_string()),
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
@@ -681,6 +681,59 @@ async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_ac
 
     let _ = std::fs::remove_dir_all(workspace_root);
     let _ = std::fs::remove_dir_all(outside_root);
+}
+
+#[tokio::test]
+async fn run_session_injects_unknown_tool_error_for_legacy_alias_after_cutover() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("legacy_call".to_owned()),
+                    name: Some("read_file".to_owned()),
+                    arguments: Some(r#"{"path":"Cargo.toml"}"#.to_owned()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("legacy tool rejected".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+    let bootstrap_tools = bootstrap_runtime_tools(None).await;
+    let runtime = AgentRuntime::new(
+        Box::new(provider),
+        bootstrap_tools.registry,
+        RuntimeLimits::default(),
+    );
+    let mut context = test_context(provider_id, model_id);
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should continue after unknown-tool injection");
+
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("legacy tool rejected")
+    );
+    let tool_result = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("unknown tool error should be injected as tool result");
+    assert!(
+        tool_result
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("unknown tool `read_file`"))
+    );
 }
 
 #[tokio::test]
@@ -784,11 +837,11 @@ async fn run_session_exposes_registered_tools_to_provider_context() {
     provider
         .expect_complete()
         .times(1)
-        .withf(|context| context.tools.iter().any(|tool| tool.name == "read_file"))
+        .withf(|context| context.tools.iter().any(|tool| tool.name == "file_read"))
         .returning(|_| Ok(assistant_response("tool schema seen", vec![])));
 
     let mut tools = ToolRegistry::default();
-    tools.register("read_file", MockReadTool);
+    tools.register("file_read", MockReadTool);
     let runtime = AgentRuntime::new(Box::new(provider), tools, RuntimeLimits::default());
     let mut context = test_context(provider_id, model_id);
 
@@ -801,7 +854,7 @@ async fn run_session_exposes_registered_tools_to_provider_context() {
         response.message.content.as_deref(),
         Some("tool schema seen")
     );
-    assert!(context.tools.iter().any(|tool| tool.name == "read_file"));
+    assert!(context.tools.iter().any(|tool| tool.name == "file_read"));
 }
 
 #[tokio::test]
@@ -946,7 +999,7 @@ async fn run_session_recovers_from_validation_error() {
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_1".to_owned()),
-                    name: Some("read_file".to_owned()),
+                    name: Some("file_read".to_owned()),
                     // Missing "path" property, should trigger validation error
                     arguments: Some("{}".to_owned()),
                 })),
@@ -965,7 +1018,7 @@ async fn run_session_recovers_from_validation_error() {
     let mut properties = std::collections::BTreeMap::new();
     properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
     tool.expect_schema().return_const(FunctionDecl::new(
-        "read_file",
+        "file_read",
         None,
         JsonSchema::object(properties, vec!["path".to_owned()]),
     ));
@@ -974,7 +1027,7 @@ async fn run_session_recovers_from_validation_error() {
     tool.expect_execute().times(0);
 
     let mut registry = ToolRegistry::new(1024);
-    registry.register("read_file", tool);
+    registry.register("file_read", tool);
 
     let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
     let mut context = Context {
@@ -1021,7 +1074,7 @@ async fn run_session_recovers_from_malformed_streamed_json_arguments() {
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_1".to_owned()),
-                    name: Some("read_file".to_owned()),
+                    name: Some("file_read".to_owned()),
                     arguments: Some("{\"path\":\"Cargo.toml\"".to_owned()),
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
@@ -1037,7 +1090,7 @@ async fn run_session_recovers_from_malformed_streamed_json_arguments() {
     let mut properties = std::collections::BTreeMap::new();
     properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
     tool.expect_schema().return_const(FunctionDecl::new(
-        "read_file",
+        "file_read",
         None,
         JsonSchema::object(properties, vec!["path".to_owned()]),
     ));
@@ -1045,7 +1098,7 @@ async fn run_session_recovers_from_malformed_streamed_json_arguments() {
     tool.expect_execute().times(0);
 
     let mut registry = ToolRegistry::new(1024);
-    registry.register("read_file", tool);
+    registry.register("file_read", tool);
 
     let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
     let mut context = Context {
@@ -1163,7 +1216,7 @@ async fn run_session_supports_mockall_tool_execution() {
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: Some("call_1".to_owned()),
-                    name: Some("read_file".to_owned()),
+                    name: Some("file_read".to_owned()),
                     arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
@@ -1179,7 +1232,7 @@ async fn run_session_supports_mockall_tool_execution() {
     let mut properties = std::collections::BTreeMap::new();
     properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
     tool.expect_schema().return_const(FunctionDecl::new(
-        "read_file",
+        "file_read",
         None,
         JsonSchema::object(properties, vec!["path".to_owned()]),
     ));
@@ -1191,7 +1244,7 @@ async fn run_session_supports_mockall_tool_execution() {
         .returning(|_| Ok("mockall read: Cargo.toml".to_owned()));
 
     let mut tools = ToolRegistry::default();
-    tools.register("read_file", tool);
+    tools.register("file_read", tool);
     let runtime = AgentRuntime::new(Box::new(provider), tools, RuntimeLimits::default());
     let mut context = test_context(provider_id, model_id);
 
@@ -1350,14 +1403,14 @@ async fn run_session_errors_when_max_turn_budget_is_exceeded() {
             Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                 index: 0,
                 id: Some("call_1".to_owned()),
-                name: Some("read_file".to_owned()),
+                name: Some("file_read".to_owned()),
                 arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
             })),
             Ok(StreamItem::FinishReason("tool_calls".to_owned())),
         ])],
     );
     let mut tools = ToolRegistry::default();
-    tools.register("read_file", MockReadTool);
+    tools.register("file_read", MockReadTool);
     let runtime = AgentRuntime::new(
         Box::new(provider),
         tools,

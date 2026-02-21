@@ -177,16 +177,14 @@ impl SecurityPolicy for WorkspaceSecurityPolicy {
 
 fn file_access_mode(tool_name: &str) -> Option<FileAccessMode> {
     match tool_name {
-        "read_file" | "file_read" | "file_search" | "file_list" => Some(FileAccessMode::ReadOnly),
-        "write_file" | "edit_file" | "file_write" | "file_edit" | "file_delete" => {
-            Some(FileAccessMode::ReadWrite)
-        }
+        "file_read" | "file_search" | "file_list" => Some(FileAccessMode::ReadOnly),
+        "file_write" | "file_edit" | "file_delete" => Some(FileAccessMode::ReadWrite),
         _ => None,
     }
 }
 
 fn is_shell_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "bash" | "shell_exec")
+    matches!(tool_name, "shell_exec")
 }
 
 fn canonicalize_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -349,7 +347,7 @@ mod tests {
 
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
         let result = policy.enforce(
-            "read_file",
+            "file_read",
             SafetyTier::ReadOnly,
             &json!({ "path": shared_file.to_string_lossy() }),
         );
@@ -366,7 +364,7 @@ mod tests {
 
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
         let result = policy.enforce(
-            "read_file",
+            "file_read",
             SafetyTier::ReadOnly,
             &json!({ "path": outside_file.to_string_lossy() }),
         );
@@ -391,7 +389,7 @@ mod tests {
 
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
         let result = policy.enforce(
-            "write_file",
+            "file_write",
             SafetyTier::SideEffecting,
             &json!({ "path": target.to_string_lossy(), "content": "x" }),
         );
@@ -406,14 +404,14 @@ mod tests {
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
 
         let allow = policy.enforce(
-            "bash",
+            "shell_exec",
             SafetyTier::Privileged,
             &json!({ "command": "printf hello" }),
         );
         assert!(allow.is_ok());
 
         let deny = policy.enforce(
-            "bash",
+            "shell_exec",
             SafetyTier::Privileged,
             &json!({ "command": "curl https://example.com" }),
         );
@@ -434,7 +432,7 @@ mod tests {
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
 
         let deny = policy.enforce(
-            "bash",
+            "shell_exec",
             SafetyTier::Privileged,
             &json!({ "command": "printf ok && ls" }),
         );

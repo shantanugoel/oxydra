@@ -30,7 +30,7 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
                     "id": "call_1",
                     "type": "function",
                     "function": {
-                        "name": "read_file",
+                        "name": "file_read",
                         "arguments": format!(r#"{{"path":"{}"}}"#, temp_path_str)
                     }
                 }]
@@ -70,7 +70,7 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
     .expect("provider should initialize");
 
     let mut tools = ToolRegistry::default();
-    tools.register("read_file", ReadTool);
+    tools.register("file_read", ReadTool::default());
     let runtime = AgentRuntime::new(
         Box::new(provider),
         tools,
@@ -127,7 +127,7 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
     assert_eq!(first_request_json["tools"][0]["type"], "function");
     assert_eq!(
         first_request_json["tools"][0]["function"]["name"],
-        "read_file"
+        "file_read"
     );
     assert_eq!(first_request_json["tool_choice"], "auto");
     let second_request_json: Value =
@@ -172,7 +172,7 @@ async fn live_openrouter_tool_call_smoke() {
     .expect("provider should initialize");
 
     let mut tools = ToolRegistry::default();
-    tools.register("read_file", ReadTool);
+    tools.register("file_read", ReadTool::default());
     let runtime = AgentRuntime::new(
         Box::new(provider),
         tools,
@@ -191,7 +191,7 @@ async fn live_openrouter_tool_call_smoke() {
         messages: vec![Message {
             role: MessageRole::User,
             content: Some(format!(
-                "Use read_file for this exact path: {}. Then answer with the word VERIFIED followed by the first line of the file.",
+                "Use file_read for this exact path: {}. Then answer with the word VERIFIED followed by the first line of the file.",
                 temp_path.to_string_lossy()
             )),
             tool_calls: vec![],
@@ -215,7 +215,7 @@ async fn live_openrouter_tool_call_smoke() {
         .tool_calls
         .first()
         .expect("assistant tool-call turn should include at least one tool call");
-    assert_eq!(first_tool_call.name, "read_file");
+    assert_eq!(first_tool_call.name, "file_read");
     assert!(
         context.messages.iter().any(|message| {
             message.role == MessageRole::Tool

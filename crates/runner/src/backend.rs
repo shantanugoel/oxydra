@@ -11,7 +11,7 @@ impl SandboxBackend for CrateSandboxBackend {
                 }),
             },
             SandboxTier::Container => self.launch_container(&request),
-            SandboxTier::Process => self.launch_process(),
+            SandboxTier::Process => self.launch_process(&request),
         }
     }
 }
@@ -220,13 +220,16 @@ impl CrateSandboxBackend {
         })
     }
 
-    fn launch_process(&self) -> Result<SandboxLaunch, RunnerError> {
-        let executable = std::env::var(PROCESS_EXECUTABLE_ENV_KEY)
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_PROCESS_EXECUTABLE.to_owned());
-        let runtime_command = RunnerCommandSpec::new(executable, Vec::new());
+    fn launch_process(&self, request: &SandboxLaunchRequest) -> Result<SandboxLaunch, RunnerError> {
+        let runtime_command = RunnerCommandSpec::new(
+            resolve_process_tier_executable(),
+            vec![
+                "--user-id".to_owned(),
+                request.user_id.clone(),
+                "--workspace-root".to_owned(),
+                request.workspace.root.to_string_lossy().into_owned(),
+            ],
+        );
         let runtime = self.spawn_process_guest(RunnerGuestRole::OxydraVm, runtime_command)?;
         let hardening_attempt = attempt_process_tier_hardening();
 
@@ -300,4 +303,29 @@ impl CrateSandboxBackend {
             })?;
         Ok(RunnerGuestHandle::from_child(role, command, child))
     }
+}
+
+fn resolve_process_tier_executable() -> String {
+    let explicit = std::env::var(PROCESS_EXECUTABLE_ENV_KEY)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(explicit) = explicit {
+        return explicit;
+    }
+
+    if let Some(bundled) = bundled_process_tier_executable() {
+        return bundled;
+    }
+
+    DEFAULT_PROCESS_EXECUTABLE.to_owned()
+}
+
+fn bundled_process_tier_executable() -> Option<String> {
+    let current_executable = std::env::current_exe().ok()?;
+    let parent = current_executable.parent()?;
+    let bundled = parent.join(DEFAULT_PROCESS_EXECUTABLE);
+    bundled
+        .is_file()
+        .then(|| bundled.to_string_lossy().into_owned())
 }

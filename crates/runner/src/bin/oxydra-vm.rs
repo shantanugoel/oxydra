@@ -12,7 +12,9 @@ use gateway::{GatewayServer, RuntimeGatewayTurnRunner};
 use runtime::AgentRuntime;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tracing::{info, warn};
 use tui::{CliError as BootstrapError, CliOverrides, bootstrap_vm_runtime};
+use types::init_tracing;
 
 const DEFAULT_GATEWAY_BIND_ADDRESS: &str = "127.0.0.1:0";
 const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
@@ -70,6 +72,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), VmError> {
+    init_tracing();
     let args = OxydraVmArgs::parse();
     if args.user_id.trim().is_empty() {
         return Err(VmError::InvalidUserId);
@@ -84,6 +87,27 @@ async fn run() -> Result<(), VmError> {
         bootstrap_vm_runtime(bootstrap_frame.as_deref(), None, CliOverrides::default()).await?;
     let provider_id = bootstrap.config.selection.provider.clone();
     let model_id = bootstrap.config.selection.model.clone();
+    let startup_status = bootstrap.startup_status.clone();
+    if startup_status.is_degraded() {
+        warn!(
+            user_id = %args.user_id,
+            sandbox_tier = ?startup_status.sandbox_tier,
+            sidecar_available = startup_status.sidecar_available,
+            shell_available = startup_status.shell_available,
+            browser_available = startup_status.browser_available,
+            degraded_reasons = ?startup_status.degraded_reasons,
+            "oxydra-vm startup status is degraded"
+        );
+    } else {
+        info!(
+            user_id = %args.user_id,
+            sandbox_tier = ?startup_status.sandbox_tier,
+            sidecar_available = startup_status.sidecar_available,
+            shell_available = startup_status.shell_available,
+            browser_available = startup_status.browser_available,
+            "oxydra-vm startup status is ready"
+        );
+    }
 
     let mut runtime = AgentRuntime::new(
         bootstrap.provider,
@@ -99,7 +123,10 @@ async fn run() -> Result<(), VmError> {
         provider_id,
         model_id,
     ));
-    let gateway = Arc::new(GatewayServer::new(turn_runner));
+    let gateway = Arc::new(GatewayServer::with_startup_status(
+        turn_runner,
+        startup_status,
+    ));
     let app = Arc::clone(&gateway).router();
 
     let listener = TcpListener::bind(&args.gateway_bind)
@@ -237,6 +264,7 @@ mod tests {
                 address: "/tmp/shell-daemon.sock".to_owned(),
             }),
             runtime_policy: None,
+            startup_status: None,
         }
         .to_length_prefixed_json()
         .expect("bootstrap envelope should encode");

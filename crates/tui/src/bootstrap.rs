@@ -19,7 +19,7 @@ use thiserror::Error;
 use tools::{RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools};
 use types::{
     ANTHROPIC_PROVIDER_ID, AgentConfig, BootstrapEnvelopeError, ConfigError, Memory, MemoryError,
-    OPENAI_PROVIDER_ID, Provider, ProviderError, RunnerBootstrapEnvelope,
+    OPENAI_PROVIDER_ID, Provider, ProviderError, RunnerBootstrapEnvelope, StartupStatusReport,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -59,6 +59,7 @@ pub struct VmBootstrapRuntime {
     pub runtime_limits: RuntimeLimits,
     pub tool_registry: ToolRegistry,
     pub tool_availability: ToolAvailability,
+    pub startup_status: StartupStatusReport,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -325,6 +326,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
         registry,
         availability,
     } = bootstrap_runtime_tools(bootstrap.as_ref()).await;
+    let startup_status = availability.startup_status(bootstrap.as_ref());
 
     Ok(VmBootstrapRuntime {
         bootstrap,
@@ -334,6 +336,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
         runtime_limits,
         tool_registry: registry,
         tool_availability: availability,
+        startup_status,
     })
 }
 
@@ -378,7 +381,7 @@ mod tests {
     use tokio::sync::Mutex as AsyncMutex;
     use types::{
         ModelId, ProviderId, RunnerBootstrapEnvelope, SandboxTier, SidecarEndpoint,
-        SidecarTransport,
+        SidecarTransport, StartupDegradedReasonCode,
     };
 
     use super::*;
@@ -693,6 +696,7 @@ remote_url = "libsql://example-org.turso.io"
             workspace_root: "/tmp/oxydra-alice".to_owned(),
             sidecar_endpoint: None,
             runtime_policy: None,
+            startup_status: None,
         }
         .to_length_prefixed_json()
         .expect("process-tier bootstrap frame should encode");
@@ -711,6 +715,13 @@ remote_url = "libsql://example-org.turso.io"
         );
         assert!(!bootstrap.tool_availability.shell.is_ready());
         assert!(!bootstrap.tool_availability.browser.is_ready());
+        assert_eq!(bootstrap.startup_status.sandbox_tier, SandboxTier::Process);
+        assert!(!bootstrap.startup_status.sidecar_available);
+        assert!(
+            bootstrap
+                .startup_status
+                .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
+        );
         let error = bootstrap
             .tool_registry
             .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
@@ -742,6 +753,7 @@ remote_url = "libsql://example-org.turso.io"
                 address: "tcp://invalid-sidecar-endpoint".to_owned(),
             }),
             runtime_policy: None,
+            startup_status: None,
         }
         .to_length_prefixed_json()
         .expect("sidecar bootstrap frame should encode");
@@ -759,6 +771,18 @@ remote_url = "libsql://example-org.turso.io"
                 .is_some()
         );
         assert!(!bootstrap.tool_availability.shell.is_ready());
+        #[cfg(unix)]
+        assert!(
+            bootstrap
+                .startup_status
+                .has_reason_code(StartupDegradedReasonCode::SidecarEndpointInvalid)
+        );
+        #[cfg(not(unix))]
+        assert!(
+            bootstrap
+                .startup_status
+                .has_reason_code(StartupDegradedReasonCode::SidecarTransportUnsupported)
+        );
         let error = bootstrap
             .tool_registry
             .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
@@ -797,6 +821,12 @@ remote_url = "libsql://example-org.turso.io"
         assert!(bootstrap.bootstrap.is_none());
         assert!(!bootstrap.tool_availability.shell.is_ready());
         assert!(!bootstrap.tool_availability.browser.is_ready());
+        assert!(bootstrap.startup_status.is_degraded());
+        assert!(
+            bootstrap
+                .startup_status
+                .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
+        );
         let error = bootstrap
             .tool_registry
             .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)

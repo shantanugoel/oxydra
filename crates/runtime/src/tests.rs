@@ -606,6 +606,7 @@ async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
             address: socket_path.to_string_lossy().into_owned(),
         }),
         runtime_policy: None,
+        startup_status: None,
     };
     let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
     assert!(bootstrap_tools.availability.shell.is_ready());
@@ -664,6 +665,7 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
         workspace_root: "/tmp/oxydra-runtime-test".to_owned(),
         sidecar_endpoint: None,
         runtime_policy: None,
+        startup_status: None,
     };
     let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
     assert!(!bootstrap_tools.availability.shell.is_ready());
@@ -729,6 +731,7 @@ async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_ac
         workspace_root: workspace_root.to_string_lossy().into_owned(),
         sidecar_endpoint: None,
         runtime_policy: None,
+        startup_status: None,
     };
     let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
     let runtime = AgentRuntime::new(

@@ -4,7 +4,7 @@ use types::{
     GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
     GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewayTurnCancelled,
     GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus, Message,
-    MessageRole, Response,
+    MessageRole, Response, SandboxTier, StartupStatusReport,
 };
 
 fn sample_session() -> GatewaySession {
@@ -113,6 +113,13 @@ fn gateway_server_frames_round_trip_through_serde() {
             healthy: true,
             session: Some(session),
             active_turn: Some(running_turn),
+            startup_status: Some(StartupStatusReport {
+                sandbox_tier: SandboxTier::Container,
+                sidecar_available: true,
+                shell_available: true,
+                browser_available: true,
+                degraded_reasons: Vec::new(),
+            }),
             message: Some("ok".to_owned()),
         }),
     ];

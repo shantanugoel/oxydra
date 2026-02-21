@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::StartupStatusReport;
 use crate::{ChannelError, Response};
 
 pub const GATEWAY_PROTOCOL_VERSION: u16 = 1;
@@ -125,6 +126,8 @@ pub struct GatewayHealthStatus {
     pub session: Option<GatewaySession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn: Option<GatewayTurnStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_status: Option<StartupStatusReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

@@ -26,7 +26,7 @@ use types::{
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
     GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState,
     GatewayTurnStatus, Message, MessageRole, ModelId, ProviderId, Response, RuntimeError,
-    StreamItem,
+    StartupStatusReport, StreamItem,
 };
 
 mod turn_runner;
@@ -42,14 +42,30 @@ const EVENT_BUFFER_CAPACITY: usize = 256;
 
 pub struct GatewayServer {
     turn_runner: Arc<dyn GatewayTurnRunner>,
+    startup_status: Option<StartupStatusReport>,
     sessions: RwLock<HashMap<String, Arc<UserSessionState>>>,
     next_connection_id: AtomicU64,
 }
 
 impl GatewayServer {
     pub fn new(turn_runner: Arc<dyn GatewayTurnRunner>) -> Self {
+        Self::with_optional_startup_status(turn_runner, None)
+    }
+
+    pub fn with_startup_status(
+        turn_runner: Arc<dyn GatewayTurnRunner>,
+        startup_status: StartupStatusReport,
+    ) -> Self {
+        Self::with_optional_startup_status(turn_runner, Some(startup_status))
+    }
+
+    fn with_optional_startup_status(
+        turn_runner: Arc<dyn GatewayTurnRunner>,
+        startup_status: Option<StartupStatusReport>,
+    ) -> Self {
         Self {
             turn_runner,
+            startup_status,
             sessions: RwLock::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
         }
@@ -446,12 +462,35 @@ impl GatewayServer {
         session: Arc<UserSessionState>,
         health_check: GatewayHealthCheck,
     ) -> GatewayServerFrame {
+        let startup_status = self.startup_status.clone();
+        let message = startup_status
+            .as_ref()
+            .filter(|status| status.is_degraded())
+            .map(|status| {
+                format!(
+                    "{GATEWAY_CHANNEL_ID} gateway ready with degraded startup: {}",
+                    status
+                        .degraded_reasons
+                        .iter()
+                        .map(|reason| reason.detail.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
+            })
+            .unwrap_or_else(|| format!("{GATEWAY_CHANNEL_ID} gateway ready"));
+        tracing::info!(
+            user_id = %session.user_id,
+            runtime_session_id = %session.runtime_session_id,
+            startup_degraded = startup_status.as_ref().is_some_and(StartupStatusReport::is_degraded),
+            "gateway health check handled"
+        );
         GatewayServerFrame::HealthStatus(GatewayHealthStatus {
             request_id: health_check.request_id,
             healthy: true,
             session: Some(session.gateway_session()),
             active_turn: session.active_turn_status().await,
-            message: Some(format!("{GATEWAY_CHANNEL_ID} gateway ready")),
+            startup_status,
+            message: Some(message),
         })
     }
 }

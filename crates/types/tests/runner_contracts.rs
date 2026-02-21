@@ -5,7 +5,8 @@ use types::{
     RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlResponse,
     RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerResolvedMountPaths,
     RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration,
-    SandboxTier, ShellDaemonRequest, SidecarEndpoint, SidecarTransport,
+    SandboxTier, ShellDaemonRequest, SidecarEndpoint, SidecarTransport, StartupDegradedReason,
+    StartupDegradedReasonCode, StartupStatusReport,
 };
 
 #[test]
@@ -113,6 +114,13 @@ fn bootstrap_envelope_supports_length_prefixed_round_trip() {
                 ("slack".to_owned(), "vault://slack/token".to_owned()),
             ]),
         }),
+        startup_status: Some(StartupStatusReport {
+            sandbox_tier: SandboxTier::MicroVm,
+            sidecar_available: true,
+            shell_available: true,
+            browser_available: true,
+            degraded_reasons: Vec::new(),
+        }),
     };
 
     let encoded = envelope
@@ -131,6 +139,7 @@ fn bootstrap_envelope_rejects_invalid_length_prefix() {
         workspace_root: "/workspace/user-1".to_owned(),
         sidecar_endpoint: None,
         runtime_policy: None,
+        startup_status: None,
     };
 
     let mut encoded = envelope
@@ -167,6 +176,7 @@ fn bootstrap_envelope_rejects_invalid_runtime_policy_mounts() {
             resources: RunnerResourceLimits::default(),
             credential_refs: BTreeMap::new(),
         }),
+        startup_status: None,
     };
 
     let error = envelope
@@ -210,6 +220,16 @@ fn runner_control_response_round_trips() {
         user_id: "alice".to_owned(),
         healthy: true,
         sandbox_tier: SandboxTier::Container,
+        startup_status: StartupStatusReport {
+            sandbox_tier: SandboxTier::Container,
+            sidecar_available: true,
+            shell_available: true,
+            browser_available: false,
+            degraded_reasons: vec![StartupDegradedReason::new(
+                StartupDegradedReasonCode::SidecarProtocolError,
+                "sidecar protocol handshake failed",
+            )],
+        },
         shell_available: true,
         browser_available: false,
         shutdown: false,
@@ -219,6 +239,34 @@ fn runner_control_response_round_trips() {
     let decoded: RunnerControlResponse =
         serde_json::from_str(&encoded).expect("runner control response should decode");
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn bootstrap_envelope_rejects_inconsistent_startup_status() {
+    let envelope = RunnerBootstrapEnvelope {
+        user_id: "user-1".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: "/workspace/user-1".to_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: Some(StartupStatusReport {
+            sandbox_tier: SandboxTier::Container,
+            sidecar_available: true,
+            shell_available: true,
+            browser_available: false,
+            degraded_reasons: Vec::new(),
+        }),
+    };
+
+    let error = envelope
+        .to_length_prefixed_json()
+        .expect_err("startup status claiming sidecar availability must fail without endpoint");
+    assert!(matches!(
+        error,
+        BootstrapEnvelopeError::InvalidField {
+            field: "startup_status.sidecar_available"
+        }
+    ));
 }
 
 #[test]

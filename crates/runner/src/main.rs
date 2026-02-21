@@ -3,6 +3,7 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::Parser;
 use runner::{Runner, RunnerError, RunnerStartRequest, RunnerTuiConnectRequest};
 use thiserror::Error;
+use types::init_tracing;
 
 const DEFAULT_RUNNER_CONFIG_PATH: &str = ".oxydra/runner.toml";
 
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), CliError> {
+    init_tracing();
     let args = CliArgs::parse();
 
     let runner = Runner::from_global_config_path(&args.config_path)?;
@@ -61,6 +63,13 @@ fn run() -> Result<(), CliError> {
     println!("workspace_root={}", startup.workspace.root.display());
     println!("shell_available={}", startup.shell_available);
     println!("browser_available={}", startup.browser_available);
+    println!(
+        "sidecar_available={}",
+        startup.startup_status.sidecar_available
+    );
+    for reason in &startup.startup_status.degraded_reasons {
+        println!("degraded_reason={:?}:{}", reason.code, reason.detail);
+    }
     for warning in startup.warnings {
         println!("warning={warning}");
     }

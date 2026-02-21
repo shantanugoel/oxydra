@@ -38,6 +38,7 @@ impl CrateSandboxBackend {
         }
 
         let mut warnings = Vec::new();
+        let mut degraded_reasons = Vec::new();
         let mut sidecar = None;
         if request.sidecar_requested() {
             let sidecar_api_socket = request.workspace.tmp.join("shell-vm-firecracker.sock");
@@ -54,13 +55,23 @@ impl CrateSandboxBackend {
                 Ok(mut handle) => {
                     if let Err(error) = ensure_firecracker_api_ready(sidecar_api_socket) {
                         let _ = handle.shutdown();
-                        warnings.push(format!("linux microvm sidecar launch failed: {error}"));
+                        let detail = format!("linux microvm sidecar launch failed: {error}");
+                        warnings.push(detail.clone());
+                        degraded_reasons.push(StartupDegradedReason::new(
+                            StartupDegradedReasonCode::SidecarUnavailable,
+                            detail,
+                        ));
                     } else {
                         sidecar = Some(handle);
                     }
                 }
                 Err(error) => {
-                    warnings.push(format!("linux microvm sidecar launch failed: {error}"))
+                    let detail = format!("linux microvm sidecar launch failed: {error}");
+                    warnings.push(detail.clone());
+                    degraded_reasons.push(StartupDegradedReason::new(
+                        StartupDegradedReasonCode::SidecarUnavailable,
+                        detail,
+                    ));
                 }
             }
         }
@@ -89,6 +100,7 @@ impl CrateSandboxBackend {
             sidecar_endpoint,
             shell_available,
             browser_available,
+            degraded_reasons,
             warnings,
         })
     }
@@ -121,6 +133,7 @@ impl CrateSandboxBackend {
         };
 
         let mut warnings = Vec::new();
+        let mut degraded_reasons = Vec::new();
         let mut sidecar = None;
         if request.sidecar_requested() {
             match self.launch_docker_guest(
@@ -132,7 +145,12 @@ impl CrateSandboxBackend {
             ) {
                 Ok(handle) => sidecar = Some(handle),
                 Err(error) => {
-                    warnings.push(format!("macOS microvm sidecar launch failed: {error}"))
+                    let detail = format!("macOS microvm sidecar launch failed: {error}");
+                    warnings.push(detail.clone());
+                    degraded_reasons.push(StartupDegradedReason::new(
+                        StartupDegradedReasonCode::SidecarUnavailable,
+                        detail,
+                    ));
                 }
             }
         }
@@ -162,6 +180,7 @@ impl CrateSandboxBackend {
             sidecar_endpoint,
             shell_available,
             browser_available,
+            degraded_reasons,
             warnings,
         })
     }
@@ -180,6 +199,7 @@ impl CrateSandboxBackend {
         )?;
 
         let mut warnings = Vec::new();
+        let mut degraded_reasons = Vec::new();
         let mut sidecar = None;
         if request.sidecar_requested() {
             match self.launch_docker_guest(
@@ -190,7 +210,14 @@ impl CrateSandboxBackend {
                 &request.guest_images.shell_vm,
             ) {
                 Ok(handle) => sidecar = Some(handle),
-                Err(error) => warnings.push(format!("container sidecar launch failed: {error}")),
+                Err(error) => {
+                    let detail = format!("container sidecar launch failed: {error}");
+                    warnings.push(detail.clone());
+                    degraded_reasons.push(StartupDegradedReason::new(
+                        StartupDegradedReasonCode::SidecarUnavailable,
+                        detail,
+                    ));
+                }
             }
         }
 
@@ -216,6 +243,7 @@ impl CrateSandboxBackend {
             sidecar_endpoint,
             shell_available,
             browser_available,
+            degraded_reasons,
             warnings,
         })
     }
@@ -236,10 +264,19 @@ impl CrateSandboxBackend {
         let hardening_attempt = attempt_process_tier_hardening();
 
         let mut warnings = vec![PROCESS_TIER_WARNING.to_owned()];
+        let mut degraded_reasons = vec![StartupDegradedReason::new(
+            StartupDegradedReasonCode::InsecureProcessTier,
+            PROCESS_TIER_WARNING,
+        )];
         if hardening_attempt.outcome != ProcessHardeningOutcome::Success {
-            warnings.push(format!(
+            let detail = format!(
                 "process-tier hardening {:?}: {}",
                 hardening_attempt.outcome, hardening_attempt.detail
+            );
+            warnings.push(detail.clone());
+            degraded_reasons.push(StartupDegradedReason::new(
+                StartupDegradedReasonCode::ProcessHardeningLimited,
+                detail,
             ));
         }
 
@@ -253,6 +290,7 @@ impl CrateSandboxBackend {
             sidecar_endpoint: None,
             shell_available: false,
             browser_available: false,
+            degraded_reasons,
             warnings,
         })
     }

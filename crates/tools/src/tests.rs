@@ -15,7 +15,7 @@ use tokio::time::sleep;
 use tools_macros::tool;
 use types::{
     JsonSchemaType, RunnerBootstrapEnvelope, RunnerResolvedMountPaths, RunnerResourceLimits,
-    RunnerRuntimePolicy, SandboxTier, SidecarEndpoint, SidecarTransport,
+    RunnerRuntimePolicy, SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
 };
 
 use super::*;
@@ -236,6 +236,9 @@ async fn bootstrap_runtime_tools_without_bootstrap_disables_shell() {
         ToolError::ExecutionFailed { tool, message }
             if tool == SHELL_EXEC_TOOL_NAME && message.contains("disabled")
     ));
+    let startup_status = availability.startup_status(None);
+    assert!(startup_status.is_degraded());
+    assert!(startup_status.has_reason_code(StartupDegradedReasonCode::InsecureProcessTier));
 }
 
 #[cfg(unix)]
@@ -260,6 +263,7 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
             address: socket_path.to_string_lossy().into_owned(),
         }),
         runtime_policy: None,
+        startup_status: None,
     };
     let RuntimeToolsBootstrap {
         registry,
@@ -412,6 +416,7 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
         workspace_root: workspace_root.to_string_lossy().into_owned(),
         sidecar_endpoint: None,
         runtime_policy: None,
+        startup_status: None,
     };
     let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap)).await;
     let args = json!({ "path": outside.to_string_lossy() }).to_string();
@@ -455,6 +460,7 @@ async fn bootstrap_registry_honors_runtime_policy_mount_overrides() {
             resources: RunnerResourceLimits::default(),
             credential_refs: BTreeMap::new(),
         }),
+        startup_status: None,
     };
     let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap)).await;
 

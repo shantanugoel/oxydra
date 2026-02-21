@@ -23,7 +23,8 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use types::{
     FunctionDecl, JsonSchema, JsonSchemaType, RunnerBootstrapEnvelope, SafetyTier, SandboxTier,
-    ShellOutputStream, SidecarEndpoint, SidecarTransport, Tool, ToolError,
+    ShellOutputStream, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
+    StartupStatusReport, Tool, ToolError,
 };
 
 mod registry;

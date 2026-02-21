@@ -150,7 +150,19 @@ impl ScriptedTurn {
 async fn spawn_gateway_server(
     runtime: Arc<dyn GatewayTurnRunner>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let gateway = Arc::new(GatewayServer::new(runtime));
+    spawn_gateway_server_with_startup_status(runtime, None).await
+}
+
+async fn spawn_gateway_server_with_startup_status(
+    runtime: Arc<dyn GatewayTurnRunner>,
+    startup_status: Option<StartupStatusReport>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let gateway = match startup_status {
+        Some(startup_status) => {
+            Arc::new(GatewayServer::with_startup_status(runtime, startup_status))
+        }
+        None => Arc::new(GatewayServer::new(runtime)),
+    };
     let app = Arc::clone(&gateway).router();
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -692,6 +704,64 @@ async fn runner_failure_maps_to_gateway_error_frame() {
             assert!(error.message.contains("boom"));
         }
         other => panic!("expected error frame, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn health_check_includes_startup_status_when_gateway_has_bootstrap_state() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let startup_status = types::StartupStatusReport {
+        sandbox_tier: types::SandboxTier::Process,
+        sidecar_available: false,
+        shell_available: false,
+        browser_available: false,
+        degraded_reasons: vec![types::StartupDegradedReason::new(
+            types::StartupDegradedReasonCode::InsecureProcessTier,
+            "process tier is insecure: isolation is degraded and not production-safe; shell/browser tools are disabled.",
+        )],
+    };
+    let (address, server_task) = spawn_gateway_server_with_startup_status(
+        runtime as Arc<dyn GatewayTurnRunner>,
+        Some(startup_status.clone()),
+    )
+    .await;
+    let mut socket = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            runtime_session_id: None,
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::HealthCheck(GatewayHealthCheck {
+            request_id: "req-health".to_owned(),
+        }),
+    )
+    .await;
+
+    match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::HealthStatus(status) => {
+            assert!(status.healthy);
+            assert_eq!(status.request_id, "req-health");
+            assert_eq!(status.startup_status, Some(startup_status));
+            assert!(
+                status
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("degraded startup"))
+            );
+        }
+        other => panic!("expected health_status, got {other:?}"),
     }
 
     server_task.abort();

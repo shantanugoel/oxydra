@@ -4882,6 +4882,7 @@ dependencies = [
  "shell-daemon",
  "tokio",
  "tools-macros",
+ "tracing",
  "types",
 ]
 

@@ -171,6 +171,63 @@ impl RunnerRuntimePolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupDegradedReasonCode {
+    InsecureProcessTier,
+    ProcessHardeningLimited,
+    SidecarUnavailable,
+    SidecarTransportUnsupported,
+    SidecarEndpointInvalid,
+    SidecarConnectionFailed,
+    SidecarProtocolError,
+    RuntimeShutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupDegradedReason {
+    pub code: StartupDegradedReasonCode,
+    pub detail: String,
+}
+
+impl StartupDegradedReason {
+    pub fn new(code: StartupDegradedReasonCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupStatusReport {
+    pub sandbox_tier: SandboxTier,
+    pub sidecar_available: bool,
+    pub shell_available: bool,
+    pub browser_available: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded_reasons: Vec<StartupDegradedReason>,
+}
+
+impl StartupStatusReport {
+    pub fn has_reason_code(&self, code: StartupDegradedReasonCode) -> bool {
+        self.degraded_reasons
+            .iter()
+            .any(|reason| reason.code == code)
+    }
+
+    pub fn push_reason(&mut self, code: StartupDegradedReasonCode, detail: impl Into<String>) {
+        if !self.has_reason_code(code) {
+            self.degraded_reasons
+                .push(StartupDegradedReason::new(code, detail));
+        }
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        !self.degraded_reasons.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RunnerResourceLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,6 +307,8 @@ pub struct RunnerBootstrapEnvelope {
     pub sidecar_endpoint: Option<SidecarEndpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_policy: Option<RunnerRuntimePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_status: Option<StartupStatusReport>,
 }
 
 impl RunnerBootstrapEnvelope {
@@ -275,6 +334,29 @@ impl RunnerBootstrapEnvelope {
                     detail: source.to_string(),
                 }
             })?;
+        }
+        if let Some(startup_status) = &self.startup_status {
+            if startup_status.sandbox_tier != self.sandbox_tier {
+                return Err(BootstrapEnvelopeError::InvalidField {
+                    field: "startup_status.sandbox_tier",
+                });
+            }
+            if self.sidecar_endpoint.is_none()
+                && (startup_status.sidecar_available
+                    || startup_status.shell_available
+                    || startup_status.browser_available)
+            {
+                return Err(BootstrapEnvelopeError::InvalidField {
+                    field: "startup_status.sidecar_available",
+                });
+            }
+            if (startup_status.shell_available || startup_status.browser_available)
+                && !startup_status.sidecar_available
+            {
+                return Err(BootstrapEnvelopeError::InvalidField {
+                    field: "startup_status.shell_available",
+                });
+            }
         }
         Ok(())
     }
@@ -380,6 +462,7 @@ pub struct RunnerControlHealthStatus {
     pub user_id: String,
     pub healthy: bool,
     pub sandbox_tier: SandboxTier,
+    pub startup_status: StartupStatusReport,
     pub shell_available: bool,
     pub browser_available: bool,
     pub shutdown: bool,

@@ -14,6 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use tokio_tungstenite::tungstenite::{Message as WsMessage, accept};
 use types::{
     RunnerBootstrapEnvelope, RunnerControl, RunnerControlErrorCode, RunnerControlResponse,
+    StartupDegradedReason, StartupDegradedReasonCode,
 };
 
 use super::*;
@@ -97,8 +98,13 @@ impl SandboxBackend for MockSandboxBackend {
         });
 
         let mut warnings = Vec::new();
+        let mut degraded_reasons = Vec::new();
         if request.sandbox_tier == SandboxTier::Process {
             warnings.push(PROCESS_TIER_WARNING.to_owned());
+            degraded_reasons.push(StartupDegradedReason::new(
+                StartupDegradedReasonCode::InsecureProcessTier,
+                PROCESS_TIER_WARNING,
+            ));
         }
 
         Ok(SandboxLaunch {
@@ -111,6 +117,7 @@ impl SandboxBackend for MockSandboxBackend {
             sidecar_endpoint,
             shell_available: sidecar_requested && request.requested_shell,
             browser_available: sidecar_requested && request.requested_browser,
+            degraded_reasons,
             warnings,
         })
     }
@@ -282,6 +289,12 @@ fn startup_insecure_process_mode_disables_shell_and_browser() {
     assert!(startup.launch.sidecar.is_none());
     assert!(!startup.shell_available);
     assert!(!startup.browser_available);
+    assert!(!startup.startup_status.sidecar_available);
+    assert!(
+        startup
+            .startup_status
+            .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
+    );
     assert!(startup.bootstrap.sidecar_endpoint.is_none());
     assert_eq!(startup.warnings, vec![PROCESS_TIER_WARNING.to_owned()]);
 
@@ -436,6 +449,7 @@ async fn runner_control_transport_handles_health_shutdown_and_invalid_frames() {
                 && !status.shutdown
                 && status.user_id == "alice"
                 && status.shell_available
+                && status.startup_status.sidecar_available
     ));
 
     send_control_payload(&mut client, br#"{"op":"unknown"}"#).await;
@@ -464,7 +478,12 @@ async fn runner_control_transport_handles_health_shutdown_and_invalid_frames() {
         send_control_request(&mut client, &RunnerControl::HealthCheck).await;
     assert!(matches!(
         health_after_shutdown,
-        RunnerControlResponse::HealthStatus(status) if !status.healthy && status.shutdown
+        RunnerControlResponse::HealthStatus(status)
+            if !status.healthy
+                && status.shutdown
+                && status
+                    .startup_status
+                    .has_reason_code(StartupDegradedReasonCode::RuntimeShutdown)
     ));
 
     drop(client);
@@ -736,6 +755,7 @@ fn spawn_mock_gateway_probe_server(healthy: bool) -> (String, thread::JoinHandle
                     runtime_session_id: format!("runtime-{user_id}"),
                 }),
                 active_turn: None,
+                startup_status: None,
                 message: Some(if healthy {
                     "ready".to_owned()
                 } else {

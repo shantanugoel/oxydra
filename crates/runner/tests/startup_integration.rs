@@ -10,7 +10,10 @@ use runner::{
     RunnerGuestRole, RunnerLaunchHandle, RunnerScopeHandle, RunnerStartRequest, SandboxBackend,
     SandboxLaunch, SandboxLaunchRequest,
 };
-use types::{SandboxTier, SidecarEndpoint, SidecarTransport};
+use types::{
+    SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReason,
+    StartupDegradedReasonCode,
+};
 
 #[derive(Debug)]
 struct IntegrationSandboxBackend;
@@ -40,8 +43,13 @@ impl SandboxBackend for IntegrationSandboxBackend {
         });
 
         let mut warnings = Vec::new();
+        let mut degraded_reasons = Vec::new();
         if request.sandbox_tier == SandboxTier::Process {
             warnings.push(PROCESS_TIER_WARNING.to_owned());
+            degraded_reasons.push(StartupDegradedReason::new(
+                StartupDegradedReasonCode::InsecureProcessTier,
+                PROCESS_TIER_WARNING,
+            ));
         }
 
         Ok(SandboxLaunch {
@@ -54,6 +62,7 @@ impl SandboxBackend for IntegrationSandboxBackend {
             sidecar_endpoint,
             shell_available: sidecar_requested && request.requested_shell,
             browser_available: sidecar_requested && request.requested_browser,
+            degraded_reasons,
             warnings,
         })
     }
@@ -78,6 +87,7 @@ fn runner_provisions_workspace_layout_on_first_start() {
     assert!(startup.workspace.shared.is_dir());
     assert!(startup.workspace.tmp.is_dir());
     assert!(startup.workspace.vault.is_dir());
+    assert!(startup.startup_status.sidecar_available);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -106,6 +116,12 @@ fn runner_process_mode_reports_explicit_degraded_warning() {
     assert_eq!(startup.sandbox_tier, SandboxTier::Process);
     assert!(!startup.shell_available);
     assert!(!startup.browser_available);
+    assert!(!startup.startup_status.sidecar_available);
+    assert!(
+        startup
+            .startup_status
+            .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
+    );
     assert_eq!(startup.warnings, vec![PROCESS_TIER_WARNING.to_owned()]);
 
     let _ = fs::remove_dir_all(root);

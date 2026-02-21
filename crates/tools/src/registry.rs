@@ -99,6 +99,47 @@ pub struct ToolAvailability {
     pub browser: SessionStatus,
 }
 
+impl ToolAvailability {
+    pub fn startup_status(
+        &self,
+        bootstrap: Option<&RunnerBootstrapEnvelope>,
+    ) -> StartupStatusReport {
+        let fallback_tier = bootstrap.map_or(SandboxTier::Process, |value| value.sandbox_tier);
+        let mut startup_status = bootstrap
+            .and_then(|value| value.startup_status.clone())
+            .unwrap_or(StartupStatusReport {
+                sandbox_tier: fallback_tier,
+                sidecar_available: false,
+                shell_available: false,
+                browser_available: false,
+                degraded_reasons: Vec::new(),
+            });
+        startup_status.sandbox_tier = fallback_tier;
+        startup_status.shell_available = self.shell.is_ready();
+        startup_status.browser_available = self.browser.is_ready();
+        startup_status.sidecar_available =
+            startup_status.shell_available || startup_status.browser_available;
+
+        for status in [&self.shell, &self.browser] {
+            if let SessionStatus::Unavailable(unavailable) = status {
+                startup_status.push_reason(
+                    map_session_unavailable_reason(unavailable.reason, fallback_tier),
+                    unavailable.detail.clone(),
+                );
+            }
+        }
+
+        if fallback_tier == SandboxTier::Process {
+            startup_status.push_reason(
+                StartupDegradedReasonCode::InsecureProcessTier,
+                "process tier is insecure; shell/browser tools are disabled",
+            );
+        }
+
+        startup_status
+    }
+}
+
 pub struct RuntimeToolsBootstrap {
     pub registry: ToolRegistry,
     pub availability: ToolAvailability,
@@ -112,13 +153,58 @@ pub async fn bootstrap_runtime_tools(
     let mut registry = ToolRegistry::default();
     register_runtime_tools(&mut registry, wasm_runner, bash_tool);
     registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap)));
+    let availability = ToolAvailability {
+        shell: shell_status,
+        browser: browser_status,
+    };
+    let startup_status = availability.startup_status(bootstrap);
+    if startup_status.is_degraded() {
+        tracing::warn!(
+            sandbox_tier = ?startup_status.sandbox_tier,
+            sidecar_available = startup_status.sidecar_available,
+            shell_available = startup_status.shell_available,
+            browser_available = startup_status.browser_available,
+            degraded_reasons = ?startup_status.degraded_reasons,
+            "runtime tools bootstrapped with degraded startup status"
+        );
+    } else {
+        tracing::info!(
+            sandbox_tier = ?startup_status.sandbox_tier,
+            sidecar_available = startup_status.sidecar_available,
+            shell_available = startup_status.shell_available,
+            browser_available = startup_status.browser_available,
+            "runtime tools bootstrapped with ready startup status"
+        );
+    }
 
     RuntimeToolsBootstrap {
         registry,
-        availability: ToolAvailability {
-            shell: shell_status,
-            browser: browser_status,
-        },
+        availability,
+    }
+}
+
+fn map_session_unavailable_reason(
+    reason: SessionUnavailableReason,
+    sandbox_tier: SandboxTier,
+) -> StartupDegradedReasonCode {
+    match reason {
+        SessionUnavailableReason::MissingSidecarEndpoint | SessionUnavailableReason::Disabled => {
+            if sandbox_tier == SandboxTier::Process {
+                StartupDegradedReasonCode::InsecureProcessTier
+            } else {
+                StartupDegradedReasonCode::SidecarUnavailable
+            }
+        }
+        SessionUnavailableReason::UnsupportedTransport => {
+            StartupDegradedReasonCode::SidecarTransportUnsupported
+        }
+        SessionUnavailableReason::InvalidAddress => {
+            StartupDegradedReasonCode::SidecarEndpointInvalid
+        }
+        SessionUnavailableReason::ConnectionFailed => {
+            StartupDegradedReasonCode::SidecarConnectionFailed
+        }
+        SessionUnavailableReason::ProtocolError => StartupDegradedReasonCode::SidecarProtocolError,
     }
 }
 

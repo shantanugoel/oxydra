@@ -41,7 +41,8 @@ pub use runner::{
     RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig,
     RunnerUserRegistration, SandboxTier, ShellDaemonError, ShellDaemonRequest, ShellDaemonResponse,
     ShellOutputStream, SidecarEndpoint, SidecarTransport, SpawnSession, SpawnSessionAck,
-    StreamOutput, StreamOutputChunk,
+    StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport, StreamOutput,
+    StreamOutputChunk,
 };
 pub use tool::{FunctionDecl, JsonSchema, JsonSchemaType, SafetyTier, Tool};
 pub use tracing::init_tracing;

@@ -38,6 +38,7 @@ use types::{
     RunnerControlResponse, RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages,
     RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
     RunnerUserConfig, RunnerUserRegistration, SandboxTier, SidecarEndpoint, SidecarTransport,
+    StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport,
 };
 
 mod backend;
@@ -140,6 +141,14 @@ impl Runner {
         } else {
             None
         };
+        let startup_status = build_startup_status_report(
+            sandbox_tier,
+            capabilities,
+            launch.shell_available,
+            launch.browser_available,
+            sidecar_endpoint.is_some(),
+            &launch.degraded_reasons,
+        );
 
         let bootstrap = RunnerBootstrapEnvelope {
             user_id: user_id.clone(),
@@ -147,6 +156,7 @@ impl Runner {
             workspace_root: workspace.root.to_string_lossy().into_owned(),
             sidecar_endpoint,
             runtime_policy: Some(effective_launch_settings.runtime_policy()),
+            startup_status: Some(startup_status.clone()),
         };
         bootstrap.validate()?;
         if sandbox_tier == SandboxTier::Process {
@@ -156,8 +166,10 @@ impl Runner {
         info!(
             user_id = %user_id,
             sandbox_tier = ?sandbox_tier,
-            shell_available = launch.shell_available,
-            browser_available = launch.browser_available,
+            sidecar_available = startup_status.sidecar_available,
+            shell_available = startup_status.shell_available,
+            browser_available = startup_status.browser_available,
+            degraded_reasons = ?startup_status.degraded_reasons,
             "runner startup prepared"
         );
         for warning_message in &launch.warnings {
@@ -174,6 +186,7 @@ impl Runner {
             workspace,
             shell_available: launch.shell_available,
             browser_available: launch.browser_available,
+            startup_status,
             launch: launch.launch,
             bootstrap,
             warnings: launch.warnings,
@@ -610,6 +623,7 @@ pub struct RunnerStartup {
     pub workspace: UserWorkspace,
     pub shell_available: bool,
     pub browser_available: bool,
+    pub startup_status: StartupStatusReport,
     pub launch: RunnerLaunchHandle,
     pub bootstrap: RunnerBootstrapEnvelope,
     pub warnings: Vec<String>,
@@ -625,18 +639,27 @@ impl RunnerStartup {
         self.shutdown_complete = true;
         self.shell_available = false;
         self.browser_available = false;
+        self.startup_status.shell_available = false;
+        self.startup_status.browser_available = false;
+        self.startup_status.sidecar_available = false;
+        self.startup_status.push_reason(
+            StartupDegradedReasonCode::RuntimeShutdown,
+            "runtime is shut down",
+        );
         Ok(())
     }
 
     pub fn handle_control(&mut self, request: RunnerControl) -> RunnerControlResponse {
         match request {
             RunnerControl::HealthCheck => {
+                let startup_status = self.control_startup_status();
                 let status = RunnerControlHealthStatus {
                     user_id: self.user_id.clone(),
                     healthy: !self.shutdown_complete,
                     sandbox_tier: self.sandbox_tier,
-                    shell_available: self.shell_available,
-                    browser_available: self.browser_available,
+                    startup_status: startup_status.clone(),
+                    shell_available: startup_status.shell_available,
+                    browser_available: startup_status.browser_available,
                     shutdown: self.shutdown_complete,
                     message: self.control_health_message(),
                 };
@@ -644,8 +667,10 @@ impl RunnerStartup {
                     user_id = %self.user_id,
                     healthy = status.healthy,
                     shutdown = status.shutdown,
+                    sidecar_available = status.startup_status.sidecar_available,
                     shell_available = status.shell_available,
                     browser_available = status.browser_available,
+                    degraded_reasons = ?status.startup_status.degraded_reasons,
                     "runner control health check handled"
                 );
                 RunnerControlResponse::HealthStatus(status)
@@ -747,6 +772,20 @@ impl RunnerStartup {
             Some(self.warnings.join(" | "))
         }
     }
+
+    fn control_startup_status(&self) -> StartupStatusReport {
+        let mut status = self.startup_status.clone();
+        status.shell_available = self.shell_available;
+        status.browser_available = self.browser_available;
+        status.sidecar_available = status.shell_available || status.browser_available;
+        if self.shutdown_complete {
+            status.push_reason(
+                StartupDegradedReasonCode::RuntimeShutdown,
+                "runtime is shut down",
+            );
+        }
+        status
+    }
 }
 
 #[derive(Debug, Error)]
@@ -816,6 +855,7 @@ pub struct SandboxLaunch {
     pub sidecar_endpoint: Option<SidecarEndpoint>,
     pub shell_available: bool,
     pub browser_available: bool,
+    pub degraded_reasons: Vec<StartupDegradedReason>,
     pub warnings: Vec<String>,
 }
 
@@ -945,6 +985,41 @@ pub enum RunnerError {
 struct RequestedCapabilities {
     shell: bool,
     browser: bool,
+}
+
+fn build_startup_status_report(
+    sandbox_tier: SandboxTier,
+    capabilities: RequestedCapabilities,
+    shell_available: bool,
+    browser_available: bool,
+    sidecar_available: bool,
+    degraded_reasons: &[StartupDegradedReason],
+) -> StartupStatusReport {
+    let mut startup_status = StartupStatusReport {
+        sandbox_tier,
+        sidecar_available,
+        shell_available,
+        browser_available,
+        degraded_reasons: degraded_reasons.to_vec(),
+    };
+
+    if sandbox_tier == SandboxTier::Process
+        && !startup_status.has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
+    {
+        startup_status.push_reason(
+            StartupDegradedReasonCode::InsecureProcessTier,
+            PROCESS_TIER_WARNING,
+        );
+    }
+
+    if (capabilities.shell || capabilities.browser) && !sidecar_available {
+        startup_status.push_reason(
+            StartupDegradedReasonCode::SidecarUnavailable,
+            "shell/browser capabilities were requested but no sidecar endpoint is available",
+        );
+    }
+
+    startup_status
 }
 
 fn resolve_requested_capabilities(
@@ -1563,6 +1638,21 @@ fn probe_gateway_health(gateway_endpoint: &str, user_id: &str) -> Result<String,
         loop {
             match receive_gateway_server_frame(&mut socket, &gateway_endpoint).await? {
                 GatewayServerFrame::HealthStatus(status) if status.healthy => {
+                    if let Some(startup_status) = status
+                        .startup_status
+                        .as_ref()
+                        .filter(|value| value.is_degraded())
+                    {
+                        warn!(
+                            endpoint = %gateway_endpoint,
+                            sandbox_tier = ?startup_status.sandbox_tier,
+                            sidecar_available = startup_status.sidecar_available,
+                            shell_available = startup_status.shell_available,
+                            browser_available = startup_status.browser_available,
+                            degraded_reasons = ?startup_status.degraded_reasons,
+                            "gateway reported degraded startup status during probe"
+                        );
+                    }
                     let _ = socket.close(None).await;
                     return Ok(runtime_session_id);
                 }

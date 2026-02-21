@@ -390,8 +390,8 @@ The five identified gaps are incorporated as additional work items:
 | OpenAI ResponsesProvider | Phase 2 | Phase 13 (provider registry + Responses provider implementation) | Medium |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
 | Runner control plane + persistent daemon + VM log capture | Phase 10 | Before Phase 12 (TUI/ops need lifecycle control) | High |
-| Container/microvm bootstrap wiring (args + envelope) | Phase 10 | Before Phase 12 (runtime needs correct startup status) | High |
-| Linux microvm config input mismatch (Firecracker vs OCI tags) | Phase 10 | Before Phase 12 (microvm tier must be launchable) | Medium |
+| Container/microvm bootstrap wiring (args + bootstrap-stdin + envelope) | Phase 10 | Before Phase 12 (runtime needs correct startup status) | Critical |
+| Linux microvm config input mismatch (Firecracker vs OCI tags) | Phase 10 | Before Phase 12 (microvm tier must be launchable) | High |
 
 These gaps do not block any currently completed phase's functionality but should be resolved before the phases that depend on them.
 

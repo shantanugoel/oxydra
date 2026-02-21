@@ -1,8 +1,18 @@
-use std::{collections::BTreeMap, fs, process::Command, time::Duration};
+use std::{collections::BTreeMap, fs, process::Command, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use sandbox::{
+    SessionStatus, SessionUnavailable, SessionUnavailableReason, ShellSession, ShellSessionConfig,
+    VsockShellSession,
+};
 use serde::{Deserialize, de::DeserializeOwned};
-use types::{FunctionDecl, JsonSchema, JsonSchemaType, SafetyTier, Tool, ToolError};
+#[cfg(unix)]
+use tokio::net::UnixStream;
+use tokio::sync::Mutex;
+use types::{
+    FunctionDecl, JsonSchema, JsonSchemaType, RunnerBootstrapEnvelope, SafetyTier, SandboxTier,
+    ShellOutputStream, SidecarEndpoint, SidecarTransport, Tool, ToolError,
+};
 
 pub const READ_TOOL_NAME: &str = "read_file";
 pub const WRITE_TOOL_NAME: &str = "write_file";
@@ -19,8 +29,15 @@ pub struct WriteTool;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EditTool;
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BashTool;
+pub struct BashTool {
+    backend: BashBackend,
+}
+
+enum BashBackend {
+    Host,
+    Session(Arc<Mutex<Box<dyn ShellSession>>>),
+    Disabled(SessionStatus),
+}
 
 #[derive(Debug, Deserialize)]
 struct ReadArgs {
@@ -43,6 +60,32 @@ struct EditArgs {
 #[derive(Debug, Deserialize)]
 struct BashArgs {
     command: String,
+}
+
+impl Default for BashTool {
+    fn default() -> Self {
+        Self::host()
+    }
+}
+
+impl BashTool {
+    pub fn host() -> Self {
+        Self {
+            backend: BashBackend::Host,
+        }
+    }
+
+    pub fn from_shell_session(session: Box<dyn ShellSession>) -> Self {
+        Self {
+            backend: BashBackend::Session(Arc::new(Mutex::new(session))),
+        }
+    }
+
+    fn from_status(status: SessionStatus) -> Self {
+        Self {
+            backend: BashBackend::Disabled(status),
+        }
+    }
 }
 
 #[async_trait]
@@ -197,7 +240,7 @@ impl Tool for BashTool {
         properties.insert(
             "command".to_owned(),
             JsonSchema::new(JsonSchemaType::String)
-                .with_description("Shell command executed with the host shell"),
+                .with_description("Shell command executed through the active shell backend"),
         );
 
         FunctionDecl::new(
@@ -209,27 +252,38 @@ impl Tool for BashTool {
 
     async fn execute(&self, args: &str) -> Result<String, ToolError> {
         let request: BashArgs = parse_args(BASH_TOOL_NAME, args)?;
-        let output = run_shell_command(&request.command)
-            .map_err(|error| execution_failed(BASH_TOOL_NAME, error.to_string()))?;
-        let combined_output = combine_command_output(&output.stdout, &output.stderr);
+        match &self.backend {
+            BashBackend::Host => {
+                let output = run_shell_command(&request.command)
+                    .map_err(|error| execution_failed(BASH_TOOL_NAME, error.to_string()))?;
+                let combined_output = combine_command_output(&output.stdout, &output.stderr);
 
-        if output.status.success() {
-            if combined_output.is_empty() {
-                Ok("command completed with no output".to_owned())
-            } else {
-                Ok(combined_output)
+                if output.status.success() {
+                    if combined_output.is_empty() {
+                        Ok("command completed with no output".to_owned())
+                    } else {
+                        Ok(combined_output)
+                    }
+                } else {
+                    let status = output.status.code().map_or_else(
+                        || "terminated by signal".to_owned(),
+                        |code| code.to_string(),
+                    );
+                    let message = if combined_output.is_empty() {
+                        format!("command exited with status {status}")
+                    } else {
+                        format!("command exited with status {status}: {combined_output}")
+                    };
+                    Err(execution_failed(BASH_TOOL_NAME, message))
+                }
             }
-        } else {
-            let status = output.status.code().map_or_else(
-                || "terminated by signal".to_owned(),
-                |code| code.to_string(),
-            );
-            let message = if combined_output.is_empty() {
-                format!("command exited with status {status}")
-            } else {
-                format!("command exited with status {status}: {combined_output}")
-            };
-            Err(execution_failed(BASH_TOOL_NAME, message))
+            BashBackend::Session(session) => {
+                execute_with_shell_session(session, &request.command, self.timeout()).await
+            }
+            BashBackend::Disabled(status) => Err(execution_failed(
+                BASH_TOOL_NAME,
+                shell_disabled_message(status),
+            )),
         }
     }
 
@@ -272,7 +326,7 @@ impl ToolRegistry {
         self.register(READ_TOOL_NAME, ReadTool);
         self.register(WRITE_TOOL_NAME, WriteTool);
         self.register(EDIT_TOOL_NAME, EditTool);
-        self.register(BASH_TOOL_NAME, BashTool);
+        self.register(BASH_TOOL_NAME, BashTool::default());
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
@@ -317,6 +371,170 @@ pub fn default_registry() -> ToolRegistry {
     registry
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAvailability {
+    pub shell: SessionStatus,
+    pub browser: SessionStatus,
+}
+
+pub struct RuntimeToolsBootstrap {
+    pub registry: ToolRegistry,
+    pub availability: ToolAvailability,
+}
+
+pub async fn bootstrap_runtime_tools(
+    bootstrap: Option<&RunnerBootstrapEnvelope>,
+) -> RuntimeToolsBootstrap {
+    let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
+    let mut registry = ToolRegistry::default();
+    registry.register(READ_TOOL_NAME, ReadTool);
+    registry.register(WRITE_TOOL_NAME, WriteTool);
+    registry.register(EDIT_TOOL_NAME, EditTool);
+    registry.register(BASH_TOOL_NAME, bash_tool);
+
+    RuntimeToolsBootstrap {
+        registry,
+        availability: ToolAvailability {
+            shell: shell_status,
+            browser: browser_status,
+        },
+    }
+}
+
+async fn bootstrap_bash_tool(
+    bootstrap: Option<&RunnerBootstrapEnvelope>,
+) -> (BashTool, SessionStatus, SessionStatus) {
+    let Some(bootstrap) = bootstrap else {
+        let status = unavailable_status(
+            SessionUnavailableReason::Disabled,
+            "runner bootstrap envelope was not provided; shell/browser tools are disabled",
+        );
+        return (
+            BashTool::from_status(status.clone()),
+            status.clone(),
+            status,
+        );
+    };
+
+    let Some(endpoint) = bootstrap.sidecar_endpoint.clone() else {
+        let detail = if bootstrap.sandbox_tier == SandboxTier::Process {
+            "runner bootstrap indicates process tier; shell/browser tools are disabled"
+        } else {
+            "runner bootstrap did not provide a sidecar endpoint; shell/browser tools are disabled"
+        };
+        let status = unavailable_status(SessionUnavailableReason::Disabled, detail);
+        return (
+            BashTool::from_status(status.clone()),
+            status.clone(),
+            status,
+        );
+    };
+
+    let (tool, shell_status) = connect_sidecar_bash_tool(endpoint).await;
+    let browser_status = shell_status.clone();
+    (tool, shell_status, browser_status)
+}
+
+async fn connect_sidecar_bash_tool(endpoint: SidecarEndpoint) -> (BashTool, SessionStatus) {
+    match endpoint.transport {
+        SidecarTransport::Vsock => {
+            let session =
+                VsockShellSession::connect(Some(endpoint), ShellSessionConfig::default()).await;
+            let status = session.status().clone();
+            if status.is_ready() {
+                (BashTool::from_shell_session(Box::new(session)), status)
+            } else {
+                (BashTool::from_status(status.clone()), status)
+            }
+        }
+        SidecarTransport::Unix => connect_unix_sidecar_bash_tool(endpoint).await,
+    }
+}
+
+#[cfg(unix)]
+async fn connect_unix_sidecar_bash_tool(endpoint: SidecarEndpoint) -> (BashTool, SessionStatus) {
+    let socket_path = match sidecar_unix_socket_path(&endpoint.address) {
+        Some(path) => path.to_owned(),
+        None => {
+            let status = unavailable_status(
+                SessionUnavailableReason::InvalidAddress,
+                format!(
+                    "sidecar unix endpoint `{}` is not a valid unix socket path",
+                    endpoint.address
+                ),
+            );
+            return (BashTool::from_status(status.clone()), status);
+        }
+    };
+
+    match UnixStream::connect(&socket_path).await {
+        Ok(stream) => match VsockShellSession::connect_with_stream(
+            stream,
+            SidecarTransport::Unix,
+            endpoint.address.clone(),
+            ShellSessionConfig::default(),
+        )
+        .await
+        {
+            Ok(session) => {
+                let status = session.status().clone();
+                (BashTool::from_shell_session(Box::new(session)), status)
+            }
+            Err(error) => {
+                let status = unavailable_status(
+                    SessionUnavailableReason::ProtocolError,
+                    format!(
+                        "failed to initialize shell session over unix sidecar transport: {error}"
+                    ),
+                );
+                (BashTool::from_status(status.clone()), status)
+            }
+        },
+        Err(error) => {
+            let status = unavailable_status(
+                SessionUnavailableReason::ConnectionFailed,
+                format!("failed to connect to unix sidecar socket `{socket_path}`: {error}"),
+            );
+            (BashTool::from_status(status.clone()), status)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn connect_unix_sidecar_bash_tool(endpoint: SidecarEndpoint) -> (BashTool, SessionStatus) {
+    let status = unavailable_status(
+        SessionUnavailableReason::UnsupportedTransport,
+        format!(
+            "unix sidecar transport for `{}` is unsupported on this platform",
+            endpoint.address
+        ),
+    );
+    (BashTool::from_status(status.clone()), status)
+}
+
+fn sidecar_unix_socket_path(address: &str) -> Option<&str> {
+    let address = address.trim();
+    if address.is_empty() {
+        None
+    } else if let Some(path) = address.strip_prefix("unix://") {
+        if path.is_empty() { None } else { Some(path) }
+    } else if address.starts_with('/') {
+        Some(address)
+    } else {
+        None
+    }
+}
+
+fn unavailable_status(
+    reason: SessionUnavailableReason,
+    detail: impl Into<String>,
+) -> SessionStatus {
+    SessionStatus::Unavailable(SessionUnavailable {
+        reason,
+        detail: detail.into(),
+    })
+}
+
 fn parse_args<T>(tool: &str, args: &str) -> Result<T, ToolError>
 where
     T: DeserializeOwned,
@@ -335,6 +553,58 @@ fn execution_failed(tool: &str, message: impl Into<String>) -> ToolError {
     ToolError::ExecutionFailed {
         tool: tool.to_owned(),
         message: message.into(),
+    }
+}
+
+async fn execute_with_shell_session(
+    session: &Arc<Mutex<Box<dyn ShellSession>>>,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, ToolError> {
+    let timeout_secs = timeout.as_secs();
+    let mut session = session.lock().await;
+    session
+        .exec_command(command, Some(timeout_secs))
+        .await
+        .map_err(|error| {
+            execution_failed(
+                BASH_TOOL_NAME,
+                format!("failed to execute shell command via sidecar session: {error}"),
+            )
+        })?;
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    loop {
+        let chunk = session.stream_output(None).await.map_err(|error| {
+            execution_failed(
+                BASH_TOOL_NAME,
+                format!("failed to stream shell output from sidecar session: {error}"),
+            )
+        })?;
+        match chunk.stream {
+            ShellOutputStream::Stdout => stdout.push_str(&chunk.data),
+            ShellOutputStream::Stderr => stderr.push_str(&chunk.data),
+        }
+        if chunk.eof {
+            break;
+        }
+    }
+
+    let output = combine_command_output(stdout.as_bytes(), stderr.as_bytes());
+    if output.is_empty() {
+        Ok("command completed with no output".to_owned())
+    } else {
+        Ok(output)
+    }
+}
+
+fn shell_disabled_message(status: &SessionStatus) -> String {
+    match status {
+        SessionStatus::Unavailable(unavailable) => {
+            format!("shell tool is disabled: {}", unavailable.detail)
+        }
+        SessionStatus::Ready(_) => "shell tool is disabled".to_owned(),
     }
 }
 
@@ -388,9 +658,15 @@ mod tests {
 
     use async_trait::async_trait;
     use serde_json::json;
+    #[cfg(unix)]
+    use shell_daemon::ShellDaemonServer;
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
     use tokio::time::sleep;
     use tools_macros::tool;
-    use types::JsonSchemaType;
+    use types::{
+        JsonSchemaType, RunnerBootstrapEnvelope, SandboxTier, SidecarEndpoint, SidecarTransport,
+    };
 
     use super::*;
 
@@ -468,11 +744,70 @@ mod tests {
             "printf hello"
         };
 
-        let output = BashTool
+        let output = BashTool::default()
             .execute(&json!({ "command": command }).to_string())
             .await
             .expect("bash command should succeed");
         assert!(output.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_runtime_tools_without_bootstrap_disables_shell() {
+        let RuntimeToolsBootstrap {
+            registry,
+            availability,
+        } = bootstrap_runtime_tools(None).await;
+
+        assert!(!availability.shell.is_ready());
+        assert!(!availability.browser.is_ready());
+        let error = registry
+            .execute(BASH_TOOL_NAME, r#"{"command":"printf should-not-run"}"#)
+            .await
+            .expect_err("bash should be explicitly disabled when runner bootstrap is absent");
+        assert!(matches!(
+            error,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == BASH_TOOL_NAME && message.contains("disabled")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
+        let socket_path = temp_socket_path("ws5-shell-daemon");
+        let _ = fs::remove_file(&socket_path);
+        let listener =
+            UnixListener::bind(&socket_path).expect("test unix listener should bind socket path");
+        let server = ShellDaemonServer::default();
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.serve_unix_listener(listener).await }
+        });
+
+        let bootstrap = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Container,
+            workspace_root: "/tmp/oxydra-test".to_owned(),
+            sidecar_endpoint: Some(SidecarEndpoint {
+                transport: SidecarTransport::Unix,
+                address: socket_path.to_string_lossy().into_owned(),
+            }),
+        };
+        let RuntimeToolsBootstrap {
+            registry,
+            availability,
+        } = bootstrap_runtime_tools(Some(&bootstrap)).await;
+
+        let output = registry
+            .execute(BASH_TOOL_NAME, r#"{"command":"printf ws5-sidecar"}"#)
+            .await
+            .expect("sidecar-backed bash execution should succeed");
+        assert_eq!(output, "ws5-sidecar");
+        assert!(availability.shell.is_ready());
+        assert!(availability.browser.is_ready());
+
+        server_task.abort();
+        let _ = fs::remove_file(socket_path);
     }
 
     #[test]
@@ -480,7 +815,7 @@ mod tests {
         let read = ReadTool;
         let write = WriteTool;
         let edit = EditTool;
-        let bash = BashTool;
+        let bash = BashTool::default();
 
         assert_eq!(read.safety_tier(), SafetyTier::ReadOnly);
         assert_eq!(write.safety_tier(), SafetyTier::SideEffecting);
@@ -571,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn registry_can_gate_registered_privileged_tools() {
         let mut registry = ToolRegistry::default();
-        registry.register(BASH_TOOL_NAME, BashTool);
+        registry.register(BASH_TOOL_NAME, BashTool::default());
 
         let gated = registry
             .execute_with_policy(BASH_TOOL_NAME, r#"{"command":"echo blocked"}"#, |tier| {
@@ -601,6 +936,24 @@ mod tests {
             std::process::id()
         ));
         path
+    }
+
+    #[cfg(unix)]
+    fn temp_socket_path(label: &str) -> PathBuf {
+        let short_label = label
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(6)
+            .collect::<String>();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic for test unique ids")
+            .as_nanos()
+            % 1_000_000;
+        PathBuf::from(format!(
+            "/tmp/oxy-{short_label}-{}-{unique}.sock",
+            std::process::id()
+        ))
     }
 
     fn cleanup_file(path: &PathBuf) {

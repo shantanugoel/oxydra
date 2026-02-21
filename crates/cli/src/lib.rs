@@ -16,9 +16,10 @@ use provider::{
 use runtime::{ContextBudgetLimits, RetrievalLimits, RuntimeLimits, SummarizationLimits};
 use serde::Serialize;
 use thiserror::Error;
+use tools::{RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools};
 use types::{
-    ANTHROPIC_PROVIDER_ID, AgentConfig, ConfigError, Memory, MemoryError, OPENAI_PROVIDER_ID,
-    Provider, ProviderError,
+    ANTHROPIC_PROVIDER_ID, AgentConfig, BootstrapEnvelopeError, ConfigError, Memory, MemoryError,
+    OPENAI_PROVIDER_ID, Provider, ProviderError, RunnerBootstrapEnvelope,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -48,6 +49,16 @@ impl ConfigSearchPaths {
             workspace_dir,
         })
     }
+}
+
+pub struct VmBootstrapRuntime {
+    pub bootstrap: Option<RunnerBootstrapEnvelope>,
+    pub config: AgentConfig,
+    pub provider: Box<dyn Provider>,
+    pub memory: Option<Arc<dyn Memory>>,
+    pub runtime_limits: RuntimeLimits,
+    pub tool_registry: ToolRegistry,
+    pub tool_availability: ToolAvailability,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -178,6 +189,8 @@ pub enum CliError {
     Memory(#[from] MemoryError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    #[error(transparent)]
+    Bootstrap(#[from] BootstrapEnvelopeError),
     #[error("unsupported provider `{provider}` in provider selection")]
     UnsupportedProvider { provider: String },
 }
@@ -286,6 +299,44 @@ pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
     }
 }
 
+pub async fn bootstrap_vm_runtime(
+    bootstrap_frame: Option<&[u8]>,
+    profile: Option<&str>,
+    cli_overrides: CliOverrides,
+) -> Result<VmBootstrapRuntime, CliError> {
+    let paths = ConfigSearchPaths::discover()?;
+    bootstrap_vm_runtime_with_paths(&paths, bootstrap_frame, profile, cli_overrides).await
+}
+
+pub async fn bootstrap_vm_runtime_with_paths(
+    paths: &ConfigSearchPaths,
+    bootstrap_frame: Option<&[u8]>,
+    profile: Option<&str>,
+    cli_overrides: CliOverrides,
+) -> Result<VmBootstrapRuntime, CliError> {
+    let bootstrap = bootstrap_frame
+        .map(RunnerBootstrapEnvelope::from_length_prefixed_json)
+        .transpose()?;
+    let config = load_agent_config_with_paths(paths, profile, cli_overrides)?;
+    let provider = build_provider(&config)?;
+    let memory = build_memory_backend(&config).await?;
+    let runtime_limits = runtime_limits(&config);
+    let RuntimeToolsBootstrap {
+        registry,
+        availability,
+    } = bootstrap_runtime_tools(bootstrap.as_ref()).await;
+
+    Ok(VmBootstrapRuntime {
+        bootstrap,
+        config,
+        provider,
+        memory,
+        runtime_limits,
+        tool_registry: registry,
+        tool_availability: availability,
+    })
+}
+
 fn merge_directory(mut figment: Figment, directory: &Path, selected_profile: &str) -> Figment {
     for file_name in [AGENT_CONFIG_FILE, PROVIDERS_CONFIG_FILE] {
         let path = directory.join(file_name);
@@ -324,13 +375,19 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use types::{ModelId, ProviderId};
+    use tokio::sync::Mutex as AsyncMutex;
+    use types::{ModelId, ProviderId, RunnerBootstrapEnvelope, SandboxTier};
 
     use super::*;
 
     fn test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn async_test_lock() -> &'static AsyncMutex<()> {
+        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| AsyncMutex::new(()))
     }
 
     #[derive(Debug)]
@@ -619,6 +676,78 @@ remote_url = "libsql://example-org.turso.io"
         assert_eq!(limits.summarization.min_turns, 9);
     }
 
+    #[tokio::test]
+    async fn bootstrap_vm_runtime_with_process_tier_frame_disables_sidecar_tools() {
+        let _lock = async_test_lock().lock().await;
+        let root = temp_dir("bootstrap-process-tier");
+        let paths = test_paths(&root);
+        write_bootstrap_config(&paths);
+        let frame = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Process,
+            workspace_root: "/tmp/oxydra-alice".to_owned(),
+            sidecar_endpoint: None,
+        }
+        .to_length_prefixed_json()
+        .expect("process-tier bootstrap frame should encode");
+
+        let bootstrap =
+            bootstrap_vm_runtime_with_paths(&paths, Some(&frame), None, CliOverrides::default())
+                .await
+                .expect("bootstrap runtime should initialize");
+
+        assert_eq!(
+            bootstrap
+                .bootstrap
+                .as_ref()
+                .map(|envelope| envelope.sandbox_tier),
+            Some(SandboxTier::Process)
+        );
+        assert!(!bootstrap.tool_availability.shell.is_ready());
+        assert!(!bootstrap.tool_availability.browser.is_ready());
+        let error = bootstrap
+            .tool_registry
+            .execute("bash", r#"{"command":"printf should-not-run"}"#)
+            .await
+            .expect_err("process-tier bootstrap should disable sidecar-dependent shell tool");
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == "bash" && message.contains("disabled")
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_vm_runtime_without_frame_disables_sidecar_tools_for_direct_execution() {
+        let _lock = async_test_lock().lock().await;
+        let root = temp_dir("bootstrap-direct");
+        let paths = test_paths(&root);
+        write_bootstrap_config(&paths);
+
+        let bootstrap =
+            bootstrap_vm_runtime_with_paths(&paths, None, None, CliOverrides::default())
+                .await
+                .expect("direct bootstrap runtime should initialize");
+
+        assert!(bootstrap.bootstrap.is_none());
+        assert!(!bootstrap.tool_availability.shell.is_ready());
+        assert!(!bootstrap.tool_availability.browser.is_ready());
+        let error = bootstrap
+            .tool_registry
+            .execute("bash", r#"{"command":"printf should-not-run"}"#)
+            .await
+            .expect_err("direct runtime bootstrap should disable sidecar-dependent shell tool");
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == "bash" && message.contains("disabled")
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let mut path = env::temp_dir();
         let unique = SystemTime::now()
@@ -645,5 +774,20 @@ remote_url = "libsql://example-org.turso.io"
         fs::create_dir_all(dir).expect("config dir should be creatable");
         fs::write(dir.join(file_name), content.trim_start())
             .expect("config file should be writable");
+    }
+
+    fn write_bootstrap_config(paths: &ConfigSearchPaths) {
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[providers.openai]
+api_key = "test-openai-key"
+"#,
+        );
     }
 }

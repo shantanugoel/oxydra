@@ -18,4 +18,5 @@ types = { path = "../types" }
 async-trait = "0.1"
 mockall = "0.14"
 provider = { path = "../provider" }
+shell-daemon = { path = "../shell-daemon" }
 tokio = { version = "1", features = ["full"] }

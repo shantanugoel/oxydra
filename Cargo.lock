@@ -640,6 +640,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
+ "tools",
  "types",
 ]
 
@@ -3618,6 +3619,7 @@ dependencies = [
  "mockall",
  "provider",
  "serde_json",
+ "shell-daemon",
  "tiktoken-rs",
  "tokio",
  "tokio-util",
@@ -4649,8 +4651,10 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "sandbox",
  "serde",
  "serde_json",
+ "shell-daemon",
  "tokio",
  "tools-macros",
  "types",

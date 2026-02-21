@@ -7,6 +7,10 @@ use std::{
 use async_trait::async_trait;
 use mockall::mock;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use shell_daemon::ShellDaemonServer;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -16,12 +20,13 @@ use types::{
     MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord, MemoryRetrieval,
     MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
     MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
-    Provider, ProviderCaps, ProviderError, ProviderId, Response, SafetyTier, StreamItem, Tool,
-    ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    Provider, ProviderCaps, ProviderError, ProviderId, Response, RunnerBootstrapEnvelope,
+    SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall,
+    ToolCallDelta, ToolError, UsageUpdate,
 };
 
 use super::{AgentRuntime, RuntimeLimits};
-use tools::ToolRegistry;
+use tools::{ToolRegistry, bootstrap_runtime_tools};
 
 mock! {
     ProviderContract {}
@@ -482,6 +487,136 @@ async fn run_session_reconstructs_streamed_tool_calls_and_loops_until_done() {
         Some("mock read: Cargo.toml")
     );
     assert!(matches!(context.messages[3].role, MessageRole::Assistant));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_bash".to_owned()),
+                    name: Some("bash".to_owned()),
+                    arguments: Some(r#"{"command":"printf ws5-runtime"}"#.to_owned()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("done".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+
+    let socket_path = temp_socket_path("runtime-sidecar");
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).expect("test unix listener should bind");
+    let server = ShellDaemonServer::default();
+    let server_task = tokio::spawn({
+        let server = server.clone();
+        async move { server.serve_unix_listener(listener).await }
+    });
+
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: "/tmp/oxydra-runtime-test".to_owned(),
+        sidecar_endpoint: Some(SidecarEndpoint {
+            transport: SidecarTransport::Unix,
+            address: socket_path.to_string_lossy().into_owned(),
+        }),
+    };
+    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    assert!(bootstrap_tools.availability.shell.is_ready());
+    let runtime = AgentRuntime::new(
+        Box::new(provider),
+        bootstrap_tools.registry,
+        RuntimeLimits::default(),
+    );
+    let mut context = test_context(provider_id, model_id);
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should execute sidecar-backed bash tool call");
+    assert_eq!(response.message.content.as_deref(), Some("done"));
+    let tool_result = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("runtime should append bash tool result message");
+    assert_eq!(tool_result.content.as_deref(), Some("ws5-runtime"));
+
+    server_task.abort();
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[tokio::test]
+async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavailable() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_bash".to_owned()),
+                    name: Some("bash".to_owned()),
+                    arguments: Some(r#"{"command":"printf blocked"}"#.to_owned()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text(
+                    "shell unavailable acknowledged".to_owned(),
+                )),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: "/tmp/oxydra-runtime-test".to_owned(),
+        sidecar_endpoint: None,
+    };
+    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    assert!(!bootstrap_tools.availability.shell.is_ready());
+    let runtime = AgentRuntime::new(
+        Box::new(provider),
+        bootstrap_tools.registry,
+        RuntimeLimits::default(),
+    );
+    let mut context = test_context(provider_id, model_id);
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should continue after explicit disabled shell tool result");
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("shell unavailable acknowledged")
+    );
+    let tool_result = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("tool result should be appended for disabled bash call");
+    assert!(
+        tool_result
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("shell tool is disabled"))
+    );
 }
 
 #[tokio::test]
@@ -1802,6 +1937,24 @@ fn test_context(provider_id: ProviderId, model_id: ModelId) -> Context {
             tool_call_id: None,
         }],
     }
+}
+
+#[cfg(unix)]
+fn temp_socket_path(label: &str) -> std::path::PathBuf {
+    let short_label = label
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(6)
+        .collect::<String>();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be monotonic")
+        .as_nanos()
+        % 1_000_000;
+    std::path::PathBuf::from(format!(
+        "/tmp/oxy-{short_label}-{}-{unique}.sock",
+        std::process::id()
+    ))
 }
 
 fn assistant_response(content: &str, tool_calls: Vec<ToolCall>) -> Response {

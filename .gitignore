@@ -16,6 +16,7 @@
 .env
 .env.*
 !.env.example
+.oxydra/
 
 # Logs and coverage artifacts
 *.log

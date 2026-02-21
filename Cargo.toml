@@ -8,6 +8,7 @@ members = [
   "crates/runtime",
   "crates/memory",
   "crates/sandbox",
+  "crates/runner",
   "crates/channels",
   "crates/gateway",
   "crates/cli",

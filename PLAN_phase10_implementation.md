@@ -94,6 +94,13 @@ Implement Phase 10 from `oxydra-project-brief.md` so Oxydra can be launched thro
    - macOS: best-effort Seatbelt attempt/log hook.
    - Both produce auditable log events (success/failure/unsupported).
 
+### Implmenet actual backend for sandbox
+ 1. Implement Linux `MicroVm` launcher integration (Firecracker lifecycle + vsock channel wiring).
+2. Implement macOS `MicroVm` launcher integration (Docker Sandboxes VM path + supported socket handoff).
+3. Implement `Container` launcher integration (OCI/Docker backend + Unix socket control/bootstrap channels).
+4. Implement `Process` launcher integration for host execution path and explicit no-sidecar mode.
+5. Replace startup "plan metadata" with real process/container/VM handles and lifecycle management.
+
 ### WS5: Runtime + Tools Wiring
 1. Add runner-era bootstrap ingestion in oxydra-vm startup path (length-prefixed JSON envelope).
 2. Wire runtime/tool initialization to sandbox session availability:

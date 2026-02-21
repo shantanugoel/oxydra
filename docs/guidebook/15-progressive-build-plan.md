@@ -215,6 +215,9 @@ Built the foundation layer with zero internal dependencies:
 - ~~**Runner control plane:**~~ `--daemon` flag added; daemon loop binds a Unix control socket, serves health/shutdown RPCs via `serve_control_unix_listener`, captures logs from stdout/stderr via log pump threads, and cleans up the socket on shutdown.
 - ~~**Linux microvm config:**~~ `RunnerGuestImages` now has dedicated `firecracker_oxydra_vm_config` and `firecracker_shell_vm_config` fields (separate from OCI image tags). `launch_microvm_linux` validates their presence and uses `generate_firecracker_config()` to produce runtime-specific configs with bootstrap injection.
 
+**Minor remaining gap:**
+- **Docker container log capture:** Log pumps capture stdout/stderr for process-spawned guests but Docker containers (launched via bollard in detached mode) do not have log streaming wired. Use bollard's `logs()` streaming API to pump container output to log files, matching the existing process-tier log capture pattern.
+
 ### Phase 11: Security Policy + WASM Tool Isolation
 
 **Crates:** `sandbox`, `tools`, `runtime`
@@ -392,6 +395,7 @@ The five identified gaps are incorporated as additional work items:
 | ~~Runner control plane + persistent daemon + VM log capture~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — daemon flag, Unix control socket, log pump threads | ~~High~~ |
 | ~~Container/microvm bootstrap wiring (args + bootstrap-stdin + envelope)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — bootstrap file written pre-launch, bind-mounted into containers, injected into FC boot_args | ~~Critical~~ |
 | ~~Linux microvm config input mismatch (Firecracker vs OCI tags)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — dedicated firecracker config fields in RunnerGuestImages, generate_firecracker_config() | ~~High~~ |
+| Docker container log capture | Phase 10 | Non-blocking; wire bollard `logs()` streaming to log files for container-tier guests | Low |
 
 These gaps do not block any currently completed phase's functionality but should be resolved before the phases that depend on them.
 

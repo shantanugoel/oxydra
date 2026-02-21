@@ -134,11 +134,15 @@ struct DeleteArgs {
 #[derive(Debug, Deserialize)]
 struct WebFetchArgs {
     url: String,
+    output_format: Option<String>,
+    max_body_chars: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WebSearchArgs {
     query: String,
+    count: Option<u64>,
+    freshness: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -558,10 +562,20 @@ impl Tool for WebFetchTool {
             "url".to_owned(),
             JsonSchema::new(JsonSchemaType::String).with_description("URL to fetch"),
         );
+        properties.insert(
+            "output_format".to_owned(),
+            JsonSchema::new(JsonSchemaType::String)
+                .with_description("Optional: auto (default), raw, text, metadata_only"),
+        );
+        properties.insert(
+            "max_body_chars".to_owned(),
+            JsonSchema::new(JsonSchemaType::Integer)
+                .with_description("Optional max number of body characters in output"),
+        );
 
         FunctionDecl::new(
             WEB_FETCH_TOOL_NAME,
-            Some("Fetch a URL and return response text".to_owned()),
+            Some("Fetch a URL and return structured, token-aware response content".to_owned()),
             JsonSchema::object(properties, vec!["url".to_owned()]),
         )
     }
@@ -572,7 +586,11 @@ impl Tool for WebFetchTool {
             &self.runner,
             WEB_FETCH_TOOL_NAME,
             WasmCapabilityProfile::Web,
-            &json!({ "url": request.url }),
+            &json!({
+                "url": request.url,
+                "output_format": request.output_format,
+                "max_body_chars": request.max_body_chars
+            }),
             None,
         )
         .await
@@ -595,10 +613,20 @@ impl Tool for WebSearchTool {
             "query".to_owned(),
             JsonSchema::new(JsonSchemaType::String).with_description("Search query"),
         );
+        properties.insert(
+            "count".to_owned(),
+            JsonSchema::new(JsonSchemaType::Integer)
+                .with_description("Optional result count (1-10, default 5)"),
+        );
+        properties.insert(
+            "freshness".to_owned(),
+            JsonSchema::new(JsonSchemaType::String)
+                .with_description("Optional freshness filter: day, week, month, year"),
+        );
 
         FunctionDecl::new(
             WEB_SEARCH_TOOL_NAME,
-            Some("Run a web search and return response text".to_owned()),
+            Some("Run a web search and return normalized provider results".to_owned()),
             JsonSchema::object(properties, vec!["query".to_owned()]),
         )
     }
@@ -609,7 +637,11 @@ impl Tool for WebSearchTool {
             &self.runner,
             WEB_SEARCH_TOOL_NAME,
             WasmCapabilityProfile::Web,
-            &json!({ "query": request.query }),
+            &json!({
+                "query": request.query,
+                "count": request.count,
+                "freshness": request.freshness
+            }),
             None,
         )
         .await

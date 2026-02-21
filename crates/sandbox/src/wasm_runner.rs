@@ -1,17 +1,21 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    env, fs,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
-use reqwest::Client;
-use serde_json::Value;
+use reqwest::{
+    Client, RequestBuilder,
+    header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT},
+};
+use serde_json::{Value, json};
 
 use crate::SandboxError;
 
@@ -19,6 +23,109 @@ const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
 const MAX_SEARCH_MATCHES: usize = 200;
+const WEB_FETCH_MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const WEB_FETCH_DEFAULT_MAX_BODY_CHARS: usize = 50_000;
+const WEB_FETCH_ERROR_PREVIEW_BYTES: usize = 8 * 1024;
+const WEB_SEARCH_DEFAULT_COUNT: usize = 5;
+const WEB_SEARCH_MAX_COUNT: usize = 10;
+const WEB_SEARCH_DEFAULT_MAX_SNIPPET_CHARS: usize = 2_000;
+const WEB_SEARCH_RESPONSE_BYTES: usize = 1_024 * 1_024;
+const GOOGLE_SEARCH_BASE_URL: &str = "https://www.googleapis.com/customsearch/v1";
+const DUCKDUCKGO_SEARCH_BASE_URL: &str = "https://api.duckduckgo.com/";
+const SEARXNG_SEARCH_PATH: &str = "/search";
+const WEB_TOOL_USER_AGENT: &str = "oxydra/0.1 (+https://github.com/shantanugoel/oxydra)";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchOutputFormat {
+    Auto,
+    Raw,
+    Text,
+    MetadataOnly,
+}
+
+impl FetchOutputFormat {
+    fn parse(raw: Option<&Value>) -> Result<Self, String> {
+        let value = raw.and_then(Value::as_str).unwrap_or("auto");
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "raw" => Ok(Self::Raw),
+            "text" => Ok(Self::Text),
+            "metadata_only" => Ok(Self::MetadataOnly),
+            _ => Err(format!(
+                "invalid output_format `{value}`; expected one of auto, raw, text, metadata_only"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Raw => "raw",
+            Self::Text => "text",
+            Self::MetadataOnly => "metadata_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchBodyMode {
+    Raw,
+    Text,
+    MetadataOnly,
+}
+
+impl FetchBodyMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Text => "text",
+            Self::MetadataOnly => "metadata_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchProviderKind {
+    DuckDuckGo,
+    Google,
+    Searxng,
+}
+
+impl SearchProviderKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "duckduckgo",
+            Self::Google => "google",
+            Self::Searxng => "searxng",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SearchProviderConfig {
+    kind: SearchProviderKind,
+    base_urls: Vec<String>,
+    google_api_key: Option<String>,
+    google_engine_id: Option<String>,
+    searxng_engines: Option<String>,
+    searxng_categories: Option<String>,
+    searxng_safesearch: Option<u8>,
+    allow_private_base_urls: bool,
+}
+
+#[derive(Debug)]
+struct WebFetchResponsePayload {
+    url: String,
+    status: u16,
+    content_type: Option<String>,
+    content_length: Option<u64>,
+    output_format: FetchOutputFormat,
+    mode: FetchBodyMode,
+    body: Option<String>,
+    truncated: bool,
+    title: Option<String>,
+    note: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmCapabilityProfile {
@@ -132,11 +239,16 @@ pub struct HostWasmToolRunner {
 
 impl HostWasmToolRunner {
     pub fn new(mounts: WasmWorkspaceMounts) -> Self {
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
             mounts,
             request_counter: AtomicU64::new(0),
             audit_records: Mutex::new(Vec::new()),
-            http_client: Client::new(),
+            http_client,
         }
     }
 
@@ -270,39 +382,284 @@ impl HostWasmToolRunner {
 
     async fn web_fetch(&self, arguments: &Value) -> Result<String, String> {
         let url = required_string(arguments, "url", "web_fetch")?;
+        let output_format = FetchOutputFormat::parse(arguments.get("output_format"))?;
+        let max_body_chars = parse_optional_usize(
+            arguments.get("max_body_chars"),
+            WEB_FETCH_DEFAULT_MAX_BODY_CHARS,
+            "max_body_chars",
+        )?;
         let parsed_url = parse_and_validate_web_url(&url).await?;
         let target_url = parsed_url.as_str().to_owned();
         let response = self
-            .http_client
-            .get(parsed_url)
+            .request_with_default_headers(self.http_client.get(parsed_url))
             .send()
             .await
             .map_err(|error| format!("web fetch request failed for `{target_url}`: {error}"))?;
         let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            format!("failed to read web fetch response body for `{target_url}`: {error}")
-        })?;
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let normalized_content_type = content_type.as_deref().map(normalize_content_type);
+        let content_length = response.content_length();
+
         if !status.is_success() {
+            let (error_body, _) =
+                read_response_bytes(response, WEB_FETCH_ERROR_PREVIEW_BYTES).await?;
+            let preview = truncate_text(&String::from_utf8_lossy(&error_body), 512).0;
             return Err(format!(
                 "web fetch returned status {status} for `{target_url}`: {}",
-                truncate_web_body(&body)
+                truncate_web_body(&preview)
             ));
         }
-        Ok(body)
+
+        let (mode, extract_html) =
+            plan_fetch_body_mode(output_format, normalized_content_type.as_deref())?;
+        if mode == FetchBodyMode::MetadataOnly {
+            let note = if output_format == FetchOutputFormat::MetadataOnly {
+                Some("metadata_only requested; body omitted".to_owned())
+            } else {
+                Some("binary content omitted to reduce token usage".to_owned())
+            };
+            return Ok(build_web_fetch_response(WebFetchResponsePayload {
+                url: target_url.clone(),
+                status: status.as_u16(),
+                content_type,
+                content_length,
+                output_format,
+                mode,
+                body: None,
+                truncated: false,
+                title: None,
+                note,
+            }));
+        }
+
+        let (body_bytes, truncated_by_bytes) =
+            read_response_bytes(response, WEB_FETCH_MAX_RESPONSE_BYTES).await?;
+        let (text, title) = if mode == FetchBodyMode::Text && extract_html {
+            extract_html_text(&String::from_utf8_lossy(&body_bytes))
+        } else {
+            (String::from_utf8_lossy(&body_bytes).to_string(), None)
+        };
+        let (body, truncated_by_chars) = truncate_text(&text, max_body_chars);
+
+        Ok(build_web_fetch_response(WebFetchResponsePayload {
+            url: target_url,
+            status: status.as_u16(),
+            content_type,
+            content_length,
+            output_format,
+            mode,
+            body: Some(body),
+            truncated: truncated_by_bytes || truncated_by_chars,
+            title,
+            note: None,
+        }))
     }
 
     async fn web_search(&self, arguments: &Value) -> Result<String, String> {
         let query = required_string(arguments, "query", "web_search")?;
+        let query = query.trim().to_owned();
         if query.is_empty() {
             return Err("query must not be empty".to_owned());
         }
-        let encoded_query = query
-            .split_whitespace()
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>()
-            .join("+");
-        let url = format!("https://duckduckgo.com/?q={encoded_query}");
-        self.web_fetch(&serde_json::json!({ "url": url })).await
+        let count =
+            parse_optional_usize(arguments.get("count"), WEB_SEARCH_DEFAULT_COUNT, "count")?
+                .clamp(1, WEB_SEARCH_MAX_COUNT);
+        let freshness = optional_string(arguments, "freshness");
+        if let Some(value) = freshness.as_deref()
+            && !matches!(value, "day" | "week" | "month" | "year")
+        {
+            return Err(format!(
+                "invalid freshness `{value}`; expected one of day, week, month, year"
+            ));
+        }
+
+        let provider = search_provider_from_env()?;
+        let (base_url, payload) = self
+            .fetch_search_payload_with_fallbacks(&provider, &query, count, freshness.as_deref())
+            .await?;
+        let results = parse_search_results(provider.kind, &query, &payload, count);
+        Ok(json!({
+            "query": query,
+            "provider": provider.kind.as_str(),
+            "base_url": base_url,
+            "result_count": results.len(),
+            "results": results
+        })
+        .to_string())
+    }
+
+    async fn fetch_search_payload_with_fallbacks(
+        &self,
+        provider: &SearchProviderConfig,
+        query: &str,
+        count: usize,
+        freshness: Option<&str>,
+    ) -> Result<(String, Value), String> {
+        let mut last_error = None;
+        for base_url in &provider.base_urls {
+            match self
+                .fetch_search_payload_from_base_url(provider, base_url, query, count, freshness)
+                .await
+            {
+                Ok(payload) => return Ok((base_url.clone(), payload)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "web search failed".to_owned()))
+    }
+
+    async fn fetch_search_payload_from_base_url(
+        &self,
+        provider: &SearchProviderConfig,
+        base_url: &str,
+        query: &str,
+        count: usize,
+        freshness: Option<&str>,
+    ) -> Result<Value, String> {
+        let request = match provider.kind {
+            SearchProviderKind::DuckDuckGo => self.build_duckduckgo_search_request(base_url, query),
+            SearchProviderKind::Google => {
+                self.build_google_search_request(provider, base_url, query, count, freshness)?
+            }
+            SearchProviderKind::Searxng => {
+                self.build_searxng_search_request(provider, base_url, query, count, freshness)
+            }
+        };
+        let request_url = request
+            .try_clone()
+            .and_then(|candidate| candidate.build().ok())
+            .map(|request| request.url().to_string())
+            .unwrap_or_else(|| base_url.to_owned());
+
+        if !provider.allow_private_base_urls {
+            parse_and_validate_web_url(&request_url).await?;
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("web search request failed against `{base_url}`: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let (error_bytes, _) =
+                read_response_bytes(response, WEB_FETCH_ERROR_PREVIEW_BYTES).await?;
+            let preview = truncate_text(&String::from_utf8_lossy(&error_bytes), 512).0;
+            return Err(format!(
+                "web search request to `{base_url}` failed with status {status}: {}",
+                truncate_web_body(&preview)
+            ));
+        }
+
+        let (body_bytes, _) = read_response_bytes(response, WEB_SEARCH_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&body_bytes).map_err(|error| {
+            format!("web search response from `{base_url}` is not valid JSON: {error}")
+        })
+    }
+
+    fn build_duckduckgo_search_request(&self, base_url: &str, query: &str) -> RequestBuilder {
+        let params = vec![
+            ("q".to_owned(), query.to_owned()),
+            ("format".to_owned(), "json".to_owned()),
+            ("no_html".to_owned(), "1".to_owned()),
+            ("no_redirect".to_owned(), "1".to_owned()),
+            ("skip_disambig".to_owned(), "1".to_owned()),
+            ("t".to_owned(), "oxydra".to_owned()),
+        ];
+        self.request_with_default_headers(self.http_client.get(base_url))
+            .query(&params)
+    }
+
+    fn build_google_search_request(
+        &self,
+        provider: &SearchProviderConfig,
+        base_url: &str,
+        query: &str,
+        count: usize,
+        freshness: Option<&str>,
+    ) -> Result<RequestBuilder, String> {
+        let api_key = provider.google_api_key.as_ref().ok_or_else(|| {
+            "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_API_KEY".to_owned()
+        })?;
+        let engine_id = provider.google_engine_id.as_ref().ok_or_else(|| {
+            "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_CX".to_owned()
+        })?;
+        let mut params = vec![
+            ("key".to_owned(), api_key.clone()),
+            ("cx".to_owned(), engine_id.clone()),
+            ("q".to_owned(), query.to_owned()),
+            ("num".to_owned(), count.to_string()),
+        ];
+        if let Some(freshness) = freshness {
+            let sort_value = match freshness {
+                "day" => Some("date:r:1d"),
+                "week" => Some("date:r:7d"),
+                "month" => Some("date:r:30d"),
+                "year" => Some("date:r:365d"),
+                _ => None,
+            };
+            if let Some(sort_value) = sort_value {
+                params.push(("sort".to_owned(), sort_value.to_owned()));
+            }
+        }
+        Ok(self
+            .request_with_default_headers(self.http_client.get(base_url))
+            .query(&params))
+    }
+
+    fn build_searxng_search_request(
+        &self,
+        provider: &SearchProviderConfig,
+        base_url: &str,
+        query: &str,
+        count: usize,
+        freshness: Option<&str>,
+    ) -> RequestBuilder {
+        let mut url = base_url.trim_end_matches('/').to_owned();
+        url.push_str(SEARXNG_SEARCH_PATH);
+
+        let mut params = vec![
+            ("q".to_owned(), query.to_owned()),
+            ("format".to_owned(), "json".to_owned()),
+            ("pageno".to_owned(), "1".to_owned()),
+            ("count".to_owned(), count.to_string()),
+        ];
+        if let Some(engines) = provider.searxng_engines.as_deref() {
+            params.push(("engines".to_owned(), engines.to_owned()));
+        }
+        if let Some(categories) = provider.searxng_categories.as_deref() {
+            params.push(("categories".to_owned(), categories.to_owned()));
+        }
+        if let Some(safesearch) = provider.searxng_safesearch {
+            params.push(("safesearch".to_owned(), safesearch.to_string()));
+        }
+        if let Some(freshness) = freshness {
+            let time_range = match freshness {
+                "day" => Some("day"),
+                "week" => Some("week"),
+                "month" => Some("month"),
+                "year" => Some("year"),
+                _ => None,
+            };
+            if let Some(time_range) = time_range {
+                params.push(("time_range".to_owned(), time_range.to_owned()));
+            }
+        }
+        self.request_with_default_headers(self.http_client.get(url))
+            .query(&params)
+    }
+
+    fn request_with_default_headers(&self, request: RequestBuilder) -> RequestBuilder {
+        request
+            .header(USER_AGENT, WEB_TOOL_USER_AGENT)
+            .header(
+                ACCEPT,
+                "application/json,text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+            )
+            .header(ACCEPT_LANGUAGE, "en-US,en;q=0.9")
     }
 
     fn vault_copyto_read(&self, arguments: &Value) -> Result<String, String> {
@@ -377,6 +734,589 @@ fn required_string(arguments: &Value, field: &str, tool_name: &str) -> Result<St
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("tool `{tool_name}` requires string argument `{field}`"))
+}
+
+fn parse_optional_usize(
+    value: Option<&Value>,
+    default: usize,
+    field_name: &str,
+) -> Result<usize, String> {
+    if let Some(value) = value {
+        let raw = value
+            .as_u64()
+            .ok_or_else(|| format!("`{field_name}` must be a non-negative integer"))?;
+        return usize::try_from(raw)
+            .map_err(|_| format!("`{field_name}` is too large for this platform"));
+    }
+    Ok(default)
+}
+
+fn normalize_content_type(value: &str) -> String {
+    value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_html_content_type(content_type: &str) -> bool {
+    matches!(content_type, "text/html" | "application/xhtml+xml")
+}
+
+fn is_text_content_type(content_type: &str) -> bool {
+    if content_type.starts_with("text/") {
+        return true;
+    }
+    if matches!(
+        content_type,
+        "application/json"
+            | "application/xml"
+            | "application/xhtml+xml"
+            | "application/javascript"
+            | "application/x-www-form-urlencoded"
+            | "text/xml"
+            | "text/javascript"
+    ) {
+        return true;
+    }
+    content_type.ends_with("+json") || content_type.ends_with("+xml")
+}
+
+fn is_binary_content_type(content_type: &str) -> bool {
+    if is_text_content_type(content_type) {
+        return false;
+    }
+    content_type.starts_with("image/")
+        || content_type.starts_with("audio/")
+        || content_type.starts_with("video/")
+        || content_type.starts_with("application/")
+}
+
+fn plan_fetch_body_mode(
+    requested: FetchOutputFormat,
+    content_type: Option<&str>,
+) -> Result<(FetchBodyMode, bool), String> {
+    if requested == FetchOutputFormat::MetadataOnly {
+        return Ok((FetchBodyMode::MetadataOnly, false));
+    }
+
+    if let Some(content_type) = content_type
+        && is_binary_content_type(content_type)
+    {
+        if requested == FetchOutputFormat::Text {
+            return Err("binary content is not supported for text output".to_owned());
+        }
+        if requested == FetchOutputFormat::Auto {
+            return Ok((FetchBodyMode::MetadataOnly, false));
+        }
+    }
+
+    if requested == FetchOutputFormat::Raw {
+        return Ok((FetchBodyMode::Raw, false));
+    }
+
+    if let Some(content_type) = content_type
+        && is_html_content_type(content_type)
+    {
+        return Ok((FetchBodyMode::Text, true));
+    }
+
+    if let Some(content_type) = content_type
+        && is_text_content_type(content_type)
+    {
+        return Ok((FetchBodyMode::Text, false));
+    }
+
+    match requested {
+        FetchOutputFormat::Text => Ok((FetchBodyMode::Text, false)),
+        _ => Ok((FetchBodyMode::Raw, false)),
+    }
+}
+
+async fn read_response_bytes(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut output = Vec::new();
+    let mut truncated = false;
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|error| format!("failed to read response chunk: {error}"))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if output.len() >= max_bytes {
+            truncated = true;
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(output.len());
+        if chunk.len() > remaining {
+            output.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        output.extend_from_slice(&chunk);
+    }
+    Ok((output, truncated))
+}
+
+fn build_web_fetch_response(payload: WebFetchResponsePayload) -> String {
+    let mut payload = json!({
+        "url": payload.url,
+        "status": payload.status,
+        "output_format": payload.output_format.as_str(),
+        "mode": payload.mode.as_str(),
+        "content_type": payload.content_type,
+        "content_length": payload.content_length,
+        "body": payload.body,
+        "truncated": payload.truncated,
+        "title": payload.title,
+        "note": payload.note
+    });
+    if let Some(object) = payload.as_object_mut() {
+        object.retain(|_, value| !value.is_null());
+        if !object
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            object.remove("truncated");
+        }
+    }
+    payload.to_string()
+}
+
+fn extract_html_text(html: &str) -> (String, Option<String>) {
+    let title = extract_html_title(html);
+    let without_script = strip_enclosed_html_tag(html, "script");
+    let without_style = strip_enclosed_html_tag(&without_script, "style");
+    let without_noscript = strip_enclosed_html_tag(&without_style, "noscript");
+    let stripped = strip_html_tags_with_breaks(&without_noscript);
+    let decoded = decode_html_entities(&stripped);
+    (normalize_text(&decoded), title)
+}
+
+fn extract_html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let start_tag_end = lower[start..].find('>')? + start + 1;
+    let end = lower[start_tag_end..].find("</title>")? + start_tag_end;
+    let title = html[start_tag_end..end].trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_owned())
+    }
+}
+
+fn strip_enclosed_html_tag(input: &str, tag_name: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let open = format!("<{tag_name}");
+    let close = format!("</{tag_name}>");
+    let mut cursor = 0usize;
+    let mut output = String::with_capacity(input.len());
+    while let Some(start_rel) = lower[cursor..].find(&open) {
+        let start = cursor + start_rel;
+        output.push_str(&input[cursor..start]);
+        let Some(end_rel) = lower[start..].find(&close) else {
+            cursor = input.len();
+            break;
+        };
+        cursor = start + end_rel + close.len();
+    }
+    output.push_str(&input[cursor..]);
+    output
+}
+
+fn strip_html_tags_with_breaks(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_tag = false;
+    let mut current_tag = String::new();
+    for character in input.chars() {
+        if in_tag {
+            if character == '>' {
+                let tag_name = current_tag
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(
+                    tag_name.as_str(),
+                    "br" | "p"
+                        | "div"
+                        | "li"
+                        | "ul"
+                        | "ol"
+                        | "section"
+                        | "article"
+                        | "header"
+                        | "footer"
+                        | "h1"
+                        | "h2"
+                        | "h3"
+                        | "h4"
+                        | "h5"
+                        | "h6"
+                        | "tr"
+                ) {
+                    output.push('\n');
+                }
+                in_tag = false;
+                current_tag.clear();
+            } else {
+                current_tag.push(character);
+            }
+            continue;
+        }
+
+        if character == '<' {
+            in_tag = true;
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn decode_html_entities(value: &str) -> String {
+    value
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn normalize_text(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_blank = false;
+    for line in value.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !last_blank && !output.is_empty() {
+                output.push('\n');
+                output.push('\n');
+                last_blank = true;
+            }
+            continue;
+        }
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(trimmed);
+        output.push('\n');
+        last_blank = false;
+    }
+    output.trim().to_owned()
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> (String, bool) {
+    if max_chars == 0 {
+        return (String::new(), true);
+    }
+
+    let mut count = 0usize;
+    let mut end = value.len();
+    for (index, _) in value.char_indices() {
+        if count == max_chars {
+            end = index;
+            break;
+        }
+        count += 1;
+    }
+
+    if count < max_chars || end == value.len() {
+        return (value.to_owned(), false);
+    }
+
+    let mut output = value[..end].to_owned();
+    output.push_str("\n\n[truncated]");
+    (output, true)
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clean_search_snippet(value: &str) -> String {
+    let without_tags = strip_html_tags_with_breaks(value);
+    let decoded = decode_html_entities(&without_tags);
+    let collapsed = collapse_whitespace(&decoded);
+    truncate_text(&collapsed, WEB_SEARCH_DEFAULT_MAX_SNIPPET_CHARS).0
+}
+
+fn search_provider_from_env() -> Result<SearchProviderConfig, String> {
+    let provider_name = env_non_empty("OXYDRA_WEB_SEARCH_PROVIDER")
+        .unwrap_or_else(|| "duckduckgo".to_owned())
+        .to_ascii_lowercase();
+    let allow_private_base_urls = env_flag("OXYDRA_WEB_SEARCH_ALLOW_PRIVATE_BASE_URLS");
+    match provider_name.as_str() {
+        "duckduckgo" => Ok(SearchProviderConfig {
+            kind: SearchProviderKind::DuckDuckGo,
+            base_urls: collect_base_urls(
+                "OXYDRA_WEB_SEARCH_DUCKDUCKGO_BASE_URL",
+                "OXYDRA_WEB_SEARCH_DUCKDUCKGO_BASE_URLS",
+                Some(DUCKDUCKGO_SEARCH_BASE_URL),
+            ),
+            google_api_key: None,
+            google_engine_id: None,
+            searxng_engines: None,
+            searxng_categories: None,
+            searxng_safesearch: None,
+            allow_private_base_urls,
+        }),
+        "google" => Ok(SearchProviderConfig {
+            kind: SearchProviderKind::Google,
+            base_urls: collect_base_urls(
+                "OXYDRA_WEB_SEARCH_GOOGLE_BASE_URL",
+                "OXYDRA_WEB_SEARCH_GOOGLE_BASE_URLS",
+                Some(GOOGLE_SEARCH_BASE_URL),
+            ),
+            google_api_key: env_non_empty("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY"),
+            google_engine_id: env_non_empty("OXYDRA_WEB_SEARCH_GOOGLE_CX"),
+            searxng_engines: None,
+            searxng_categories: None,
+            searxng_safesearch: None,
+            allow_private_base_urls,
+        }),
+        "searxng" => {
+            let base_urls = collect_base_urls(
+                "OXYDRA_WEB_SEARCH_SEARXNG_BASE_URL",
+                "OXYDRA_WEB_SEARCH_SEARXNG_BASE_URLS",
+                None,
+            );
+            if base_urls.is_empty() {
+                return Err(
+                    "searxng search provider requires OXYDRA_WEB_SEARCH_SEARXNG_BASE_URL or OXYDRA_WEB_SEARCH_SEARXNG_BASE_URLS"
+                        .to_owned(),
+                );
+            }
+            let searxng_safesearch = env_non_empty("OXYDRA_WEB_SEARCH_SEARXNG_SAFESEARCH")
+                .and_then(|value| value.parse::<u8>().ok());
+            Ok(SearchProviderConfig {
+                kind: SearchProviderKind::Searxng,
+                base_urls,
+                google_api_key: None,
+                google_engine_id: None,
+                searxng_engines: env_non_empty("OXYDRA_WEB_SEARCH_SEARXNG_ENGINES"),
+                searxng_categories: env_non_empty("OXYDRA_WEB_SEARCH_SEARXNG_CATEGORIES"),
+                searxng_safesearch,
+                allow_private_base_urls,
+            })
+        }
+        _ => Err(format!(
+            "unsupported web search provider `{provider_name}`; expected duckduckgo, google, or searxng"
+        )),
+    }
+}
+
+fn collect_base_urls(single_env: &str, list_env: &str, default: Option<&str>) -> Vec<String> {
+    let mut entries = Vec::new();
+    if let Some(single) = env_non_empty(single_env) {
+        entries.push(single);
+    }
+    if let Some(multiple) = env_non_empty(list_env) {
+        for entry in multiple.split(',') {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() {
+                entries.push(trimmed.to_owned());
+            }
+        }
+    }
+    if entries.is_empty()
+        && let Some(default) = default
+    {
+        entries.push(default.to_owned());
+    }
+
+    let mut deduped = Vec::new();
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let normalized = entry.trim().trim_end_matches('/').to_owned();
+        if normalized.is_empty() {
+            continue;
+        }
+        if seen.insert(normalized.clone()) {
+            deduped.push(normalized);
+        }
+    }
+    deduped
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_flag(name: &str) -> bool {
+    env_non_empty(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn parse_search_results(
+    provider: SearchProviderKind,
+    query: &str,
+    payload: &Value,
+    count: usize,
+) -> Vec<Value> {
+    match provider {
+        SearchProviderKind::Google => parse_google_search_results(payload, count),
+        SearchProviderKind::Searxng => parse_searxng_search_results(payload, count),
+        SearchProviderKind::DuckDuckGo => parse_duckduckgo_search_results(query, payload, count),
+    }
+}
+
+fn parse_google_search_results(payload: &Value, count: usize) -> Vec<Value> {
+    let Some(items) = payload.get("items").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, item)| {
+            let snippet = item
+                .get("snippet")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("htmlSnippet").and_then(Value::as_str))
+                .map(clean_search_snippet)
+                .unwrap_or_default();
+            json!({
+                "index": index + 1,
+                "title": item.get("title").and_then(Value::as_str).unwrap_or(""),
+                "url": item.get("link").and_then(Value::as_str).unwrap_or(""),
+                "display_url": item.get("displayLink").and_then(Value::as_str),
+                "snippet": snippet
+            })
+        })
+        .collect()
+}
+
+fn parse_searxng_search_results(payload: &Value, count: usize) -> Vec<Value> {
+    let Some(items) = payload.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, item)| {
+            let snippet = item
+                .get("content")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("snippet").and_then(Value::as_str))
+                .map(clean_search_snippet)
+                .unwrap_or_default();
+            json!({
+                "index": index + 1,
+                "title": item.get("title").and_then(Value::as_str).unwrap_or(""),
+                "url": item.get("url").and_then(Value::as_str).unwrap_or(""),
+                "display_url": item.get("pretty_url").and_then(Value::as_str),
+                "snippet": snippet
+            })
+        })
+        .collect()
+}
+
+fn parse_duckduckgo_search_results(query: &str, payload: &Value, count: usize) -> Vec<Value> {
+    let mut rows = Vec::new();
+    let mut seen_urls = BTreeSet::new();
+
+    if let Some(url) = payload.get("AbstractURL").and_then(Value::as_str)
+        && !url.trim().is_empty()
+    {
+        seen_urls.insert(url.to_owned());
+        let heading = payload
+            .get("Heading")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(query);
+        let snippet = payload
+            .get("AbstractText")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("Abstract").and_then(Value::as_str))
+            .map(clean_search_snippet)
+            .unwrap_or_default();
+        rows.push(json!({
+            "index": 0,
+            "title": heading,
+            "url": url,
+            "display_url": payload.get("AbstractSource").and_then(Value::as_str),
+            "snippet": snippet
+        }));
+    }
+
+    if let Some(related_topics) = payload.get("RelatedTopics").and_then(Value::as_array) {
+        collect_duckduckgo_related_topics(related_topics, &mut rows, &mut seen_urls, count);
+    }
+
+    rows.into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, mut row)| {
+            if let Some(object) = row.as_object_mut() {
+                object.insert("index".to_owned(), json!(index + 1));
+            }
+            row
+        })
+        .collect()
+}
+
+fn collect_duckduckgo_related_topics(
+    topics: &[Value],
+    rows: &mut Vec<Value>,
+    seen_urls: &mut BTreeSet<String>,
+    count: usize,
+) {
+    if rows.len() >= count {
+        return;
+    }
+
+    for topic in topics {
+        if rows.len() >= count {
+            break;
+        }
+
+        if let Some(nested) = topic.get("Topics").and_then(Value::as_array) {
+            collect_duckduckgo_related_topics(nested, rows, seen_urls, count);
+            continue;
+        }
+
+        let Some(url) = topic.get("FirstURL").and_then(Value::as_str) else {
+            continue;
+        };
+        if url.trim().is_empty() || !seen_urls.insert(url.to_owned()) {
+            continue;
+        }
+
+        let text = topic
+            .get("Text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let title = text.split(" - ").next().unwrap_or(&text).trim().to_owned();
+        rows.push(json!({
+            "index": 0,
+            "title": if title.is_empty() { "DuckDuckGo result" } else { title.as_str() },
+            "url": url,
+            "display_url": Value::Null,
+            "snippet": clean_search_snippet(&text)
+        }));
+    }
 }
 
 async fn parse_and_validate_web_url(raw_url: &str) -> Result<reqwest::Url, String> {
@@ -638,6 +1578,63 @@ mod tests {
                     && message.contains("192.168.1.8")
                     && message.contains("192.168.0.0/16")
         ));
+    }
+
+    #[test]
+    fn fetch_body_mode_auto_binary_returns_metadata_only() {
+        let (mode, extract_html) = plan_fetch_body_mode(FetchOutputFormat::Auto, Some("image/png"))
+            .expect("binary auto mode should be supported");
+        assert_eq!(mode, FetchBodyMode::MetadataOnly);
+        assert!(!extract_html);
+    }
+
+    #[test]
+    fn extract_html_text_removes_markup() {
+        let html = "<html><head><title>Example</title><style>.x{}</style></head><body><h1>Hello</h1><script>secret()</script><p>World</p></body></html>";
+        let (text, title) = extract_html_text(html);
+        assert_eq!(title.as_deref(), Some("Example"));
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World"));
+        assert!(!text.contains("<h1>"));
+        assert!(!text.contains("secret()"));
+    }
+
+    #[test]
+    fn duckduckgo_parser_collects_abstract_and_related_topics() {
+        let payload = json!({
+            "Heading": "Oxydra",
+            "AbstractURL": "https://example.com/oxydra",
+            "AbstractText": "Main summary",
+            "RelatedTopics": [
+                {
+                    "FirstURL": "https://example.com/topic-1",
+                    "Text": "Topic One - Details"
+                },
+                {
+                    "Name": "Group",
+                    "Topics": [
+                        {
+                            "FirstURL": "https://example.com/topic-2",
+                            "Text": "Topic Two - More"
+                        }
+                    ]
+                }
+            ]
+        });
+        let results = parse_duckduckgo_search_results("oxydra", &payload, 5);
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0].get("title").and_then(Value::as_str),
+            Some("Oxydra")
+        );
+        assert_eq!(
+            results[1].get("url").and_then(Value::as_str),
+            Some("https://example.com/topic-1")
+        );
+        assert_eq!(
+            results[2].get("url").and_then(Value::as_str),
+            Some("https://example.com/topic-2")
+        );
     }
 
     fn unique_workspace(prefix: &str) -> PathBuf {

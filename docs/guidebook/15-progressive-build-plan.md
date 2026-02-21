@@ -19,7 +19,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
-| 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server. **Gaps:** TUI rendering + interactive client missing; `runner --tui` is probe-only |
+| 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring |
 | 13 | Model catalog + provider registry | Planned | |
 | 14 | External channels + identity mapping | Planned | |
 | 15 | Multi-agent orchestration | Planned | |
@@ -44,15 +44,13 @@ Three gaps were identified during the initial code review of phases 1-12, and tw
 
 **Fix scope:** Implement a real SSE parser for Anthropic's `/v1/messages` streaming endpoint, handling `message_start`, `content_block_start`, `content_block_delta`, `message_delta`, and `message_stop` event types. The existing `StreamItem` enum already supports all needed variants.
 
-### Gap 2: TUI Visual Rendering (Phase 12)
+### ~~Gap 2: TUI Visual Rendering (Phase 12)~~ — Resolved
 
 **What was planned:** A `ratatui` + `crossterm` terminal rendering loop providing a full visual terminal interface.
 
-**What was built:** The TUI crate contains the `TuiChannelAdapter` (WebSocket client to gateway), `TuiUiState` (state tracking), and all gateway connection logic. The gateway WebSocket communication works end-to-end. However, the actual terminal rendering loop — drawing widgets, handling keyboard input visually, scrolling — is missing.
+**What was built:** The TUI crate now contains the complete interactive client: `TuiViewModel` (rendering state with message history, scroll, input buffer, connection state), `MessagePane`/`InputBar`/`StatusBar` widgets, `EventReader` (blocking crossterm input thread), and `TuiApp` (main `tokio::select!` loop with WebSocket split transport, Hello handshake, reconnection with exponential backoff, and single-point-of-draw rendering). A standalone `oxydra-tui` binary provides a CLI entry point, and `runner --tui` execs it.
 
-**Impact:** The TUI can communicate with the gateway programmatically but cannot present a visual interface to the user. The channel adapter and state management are complete; only the rendering layer is absent.
-
-**Fix scope:** Implement the `ratatui` rendering loop with `crossterm` event handling. The state management (`TuiUiState`) and gateway communication are already in place and can drive the rendering directly.
+**Resolution:** Gap fully closed. The rendering loop, input handling, reconnection strategy, and binary entry point are all implemented and tested.
 
 ### Gap 3: MemoryRetrieval::upsert_chunks (Phase 9)
 
@@ -255,10 +253,15 @@ Built the foundation layer with zero internal dependencies:
 - `TuiUiState` for UI state tracking
 - Gateway endpoint discovery via `tmp/gateway-endpoint` marker file
 - `--tui` mode: connect-only to existing `oxydra-vm`, exit with error if no guest running
-- **Gap:** `ratatui` + `crossterm` rendering loop not implemented
+- `TuiViewModel`: rendering-only view model with message history (capped at 1000), scroll management, input buffer, `ConnectionState` enum
+- `MessagePane`, `InputBar`, `StatusBar`: ratatui widgets with per-role styling, streaming cursor, disabled-state visuals
+- `EventReader`: dedicated blocking thread for crossterm input → `AppAction` mapping via `mpsc` channel
+- `TuiApp`: main `tokio::select!` loop with WebSocket split transport (reader/writer tasks), Hello handshake, reconnection with exponential backoff + jitter, `TerminalGuard` RAII for terminal safety, single-point-of-draw rendering
+- `oxydra-tui`: standalone binary entry point (clap CLI, UUID connection ID, multi-threaded tokio runtime)
+- `runner --tui` execs `oxydra-tui` binary; `--probe` flag preserves the old print-and-exit behavior
 
 **Gaps / follow-ups to complete Phase 12:**
-- **Interactive TUI client:** add a real TUI binary (ratatui + crossterm) so users can send/receive messages; clarify `runner --tui` as a probe or wire it to launch the interactive client.
+- ~~**Interactive TUI client:**~~ **Resolved** — ratatui rendering loop, widgets, event handling, app loop, standalone binary, and runner exec wiring all implemented and tested.
 
 ## Forward Plan: Phases 13-21
 
@@ -392,7 +395,7 @@ The five identified gaps are incorporated as additional work items:
 | Gap | Affected Phase | Resolution Target | Priority |
 |-----|---------------|-------------------|----------|
 | Anthropic SSE streaming | Phase 7 | Before Phase 14 (external channels need reliable streaming) | High |
-| TUI ratatui rendering + interactive client | Phase 12 | Before Phase 14 (TUI must be usable before adding more channels) | High |
+| ~~TUI ratatui rendering + interactive client~~ | Phase 12 | ~~Before Phase 14~~ **Resolved** — ratatui rendering loop, crossterm input, `TuiViewModel`, widgets, `TuiApp` select loop, standalone `oxydra-tui` binary, runner exec wiring | ~~High~~ |
 | ~~WASM tool isolation (simulated → real)~~ | Phase 11 | ~~Before Phase 15~~ **Resolved** — `WasmWasiToolRunner` with wasmtime + WASI preopened directories; `wasm32-wasip1` guest binary embedded via `build.rs`; TOCTOU eliminated | ~~High~~ |
 | OpenAI ResponsesProvider | Phase 2 | Phase 13 (provider registry + Responses provider implementation) | Medium |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |

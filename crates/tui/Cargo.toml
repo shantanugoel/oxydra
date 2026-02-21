@@ -5,19 +5,32 @@ edition = "2024"
 
 [dependencies]
 async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
 figment = { version = "0.10", features = ["env", "toml"] }
 futures-util = "0.3"
 memory = { path = "../memory" }
 provider = { path = "../provider" }
+ratatui = "0.30"
 runtime = { path = "../runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["net", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }
 toml = "1.0"
 tools = { path = "../tools" }
 types = { path = "../types" }
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "oxydra-tui"
+path = "src/bin/oxydra-tui.rs"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-tungstenite = { version = "0.28", default-features = false }
+types = { path = "../types" }

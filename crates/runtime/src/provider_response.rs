@@ -5,10 +5,14 @@ impl AgentRuntime {
         &self,
         context: &Context,
         cancellation: &CancellationToken,
+        stream_events: Option<RuntimeStreamEventSender>,
     ) -> Result<Response, RuntimeError> {
         let caps = self.provider.capabilities(&context.model)?;
         if caps.supports_streaming {
-            match self.stream_response(context, cancellation).await {
+            match self
+                .stream_response(context, cancellation, stream_events.clone())
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(StreamCollectError::Cancelled) => return Err(RuntimeError::Cancelled),
                 Err(StreamCollectError::TurnTimedOut) => return Err(RuntimeError::BudgetExceeded),
@@ -24,6 +28,7 @@ impl AgentRuntime {
         &self,
         context: &Context,
         cancellation: &CancellationToken,
+        stream_events: Option<RuntimeStreamEventSender>,
     ) -> Result<Response, StreamCollectError> {
         if cancellation.is_cancelled() {
             return Err(StreamCollectError::Cancelled);
@@ -57,16 +62,41 @@ impl AgentRuntime {
             };
 
             match item {
-                Ok(StreamItem::Text(text)) => text_buffer.push_str(&text),
-                Ok(StreamItem::ToolCallDelta(delta)) => tool_calls.merge(delta),
-                Ok(StreamItem::FinishReason(reason)) => finish_reason = Some(reason),
+                Ok(StreamItem::Text(text)) => {
+                    if let Some(stream_events) = &stream_events {
+                        let _ = stream_events.send(StreamItem::Text(text.clone()));
+                    }
+                    text_buffer.push_str(&text);
+                }
+                Ok(StreamItem::ToolCallDelta(delta)) => {
+                    if let Some(stream_events) = &stream_events {
+                        let _ = stream_events.send(StreamItem::ToolCallDelta(delta.clone()));
+                    }
+                    tool_calls.merge(delta);
+                }
+                Ok(StreamItem::FinishReason(reason)) => {
+                    if let Some(stream_events) = &stream_events {
+                        let _ = stream_events.send(StreamItem::FinishReason(reason.clone()));
+                    }
+                    finish_reason = Some(reason);
+                }
                 Ok(StreamItem::UsageUpdate(update)) => {
+                    if let Some(stream_events) = &stream_events {
+                        let _ = stream_events.send(StreamItem::UsageUpdate(update.clone()));
+                    }
                     usage = Some(Self::merge_usage(usage.take(), update));
                 }
                 Ok(StreamItem::ConnectionLost(message)) => {
+                    if let Some(stream_events) = &stream_events {
+                        let _ = stream_events.send(StreamItem::ConnectionLost(message.clone()));
+                    }
                     return Err(StreamCollectError::ConnectionLost(message));
                 }
-                Ok(StreamItem::ReasoningDelta(_)) => {}
+                Ok(StreamItem::ReasoningDelta(delta)) => {
+                    if let Some(stream_events) = &stream_events {
+                        let _ = stream_events.send(StreamItem::ReasoningDelta(delta));
+                    }
+                }
                 Err(error) => return Err(StreamCollectError::Provider(error)),
             }
         }

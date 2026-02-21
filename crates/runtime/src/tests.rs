@@ -518,6 +518,51 @@ async fn run_session_reconstructs_streamed_tool_calls_and_loops_until_done() {
     assert!(matches!(context.messages[3].role, MessageRole::Assistant));
 }
 
+#[tokio::test]
+async fn run_session_for_session_with_stream_events_forwards_provider_deltas() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![ProviderStep::Stream(vec![
+            Ok(StreamItem::Text("hello".to_owned())),
+            Ok(StreamItem::FinishReason("stop".to_owned())),
+        ])],
+    );
+    let runtime = AgentRuntime::new(
+        Box::new(provider),
+        ToolRegistry::default(),
+        RuntimeLimits::default(),
+    );
+    let mut context = test_context(provider_id, model_id);
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+
+    let response = runtime
+        .run_session_for_session_with_stream_events(
+            "stream-session",
+            &mut context,
+            &CancellationToken::new(),
+            events_tx,
+        )
+        .await
+        .expect("runtime turn should complete with stream observer");
+
+    let mut observed = Vec::new();
+    while let Some(item) = events_rx.recv().await {
+        observed.push(item);
+    }
+
+    assert_eq!(response.message.content.as_deref(), Some("hello"));
+    assert_eq!(
+        observed,
+        vec![
+            StreamItem::Text("hello".to_owned()),
+            StreamItem::FinishReason("stop".to_owned())
+        ]
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {

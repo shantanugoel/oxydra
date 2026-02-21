@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
 use types::{
@@ -12,6 +13,8 @@ use types::{
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
 const INVALID_TOOL_ARGS_RAW_KEY: &str = "__oxydra_invalid_tool_args_raw";
 const INVALID_TOOL_ARGS_ERROR_KEY: &str = "__oxydra_invalid_tool_args_error";
+
+pub type RuntimeStreamEventSender = mpsc::UnboundedSender<StreamItem>;
 
 mod budget;
 mod memory;
@@ -135,7 +138,8 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
-        self.run_session_internal(None, context, cancellation).await
+        self.run_session_internal(None, context, cancellation, None)
+            .await
     }
 
     pub async fn run_session_for_session(
@@ -144,7 +148,18 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
-        self.run_session_internal(Some(session_id), context, cancellation)
+        self.run_session_internal(Some(session_id), context, cancellation, None)
+            .await
+    }
+
+    pub async fn run_session_for_session_with_stream_events(
+        &self,
+        session_id: &str,
+        context: &mut Context,
+        cancellation: &CancellationToken,
+        stream_events: RuntimeStreamEventSender,
+    ) -> Result<Response, RuntimeError> {
+        self.run_session_internal(Some(session_id), context, cancellation, Some(stream_events))
             .await
     }
 
@@ -185,6 +200,7 @@ impl AgentRuntime {
         session_id: Option<&str>,
         context: &mut Context,
         cancellation: &CancellationToken,
+        stream_events: Option<RuntimeStreamEventSender>,
     ) -> Result<Response, RuntimeError> {
         if context.tools.is_empty() {
             context.tools = self.tool_registry.schemas();
@@ -214,7 +230,7 @@ impl AgentRuntime {
                 .await?;
             let provider_context = self.prepare_provider_context(session_id, context).await?;
             let provider_response = self
-                .request_provider_response(&provider_context, cancellation)
+                .request_provider_response(&provider_context, cancellation, stream_events.clone())
                 .await?;
             let Response {
                 message,

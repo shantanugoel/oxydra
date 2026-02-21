@@ -34,6 +34,39 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 |---|---------|-------------|
 | 15 | [Progressive Build Plan](15-progressive-build-plan.md) | All 21 phases with status, identified gaps, forward plan, test strategy |
 
+## Build Instructions
+
+### Prerequisites
+
+```sh
+# Install the Rust toolchain (stable)
+rustup toolchain install stable
+
+# Required for the WASM guest module (crates/wasm-guest → crates/sandbox)
+rustup target add wasm32-wasip1
+```
+
+The `wasm32-wasip1` target is needed because `crates/sandbox/build.rs` cross-compiles the WASM guest binary at build time. Without it, any crate that transitively depends on `sandbox` with the default `wasm-isolation` feature will fail to build.
+
+### Building
+
+```sh
+cargo build                          # all crates, default features
+cargo build -p sandbox               # sandbox only (wasm-isolation on by default)
+cargo test                           # full test suite
+cargo test -p sandbox --features wasm-isolation   # sandbox isolation tests only
+cargo test -p sandbox --no-default-features       # host-only fallback path
+```
+
+### CI requirements
+
+Add the following step before any `cargo build` or `cargo test` step:
+
+```yaml
+- name: Install wasm32-wasip1 target
+  run: rustup target add wasm32-wasip1
+```
+
 ## How to Use This Guidebook
 
 - **New to the codebase?** Start with Chapter 1 (Architecture Overview) for the big picture, then read chapters relevant to your work area.

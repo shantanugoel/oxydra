@@ -23,3 +23,6 @@
 coverage/
 *.profraw
 *.profdata
+
+# Generated WASM guest artifact (rebuilt by crates/sandbox/build.rs)
+crates/sandbox/guest/*.wasm

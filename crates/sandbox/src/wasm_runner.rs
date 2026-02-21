@@ -19,9 +19,9 @@ use serde_json::Value;
 
 use crate::SandboxError;
 
-const SHARED_DIR_NAME: &str = "shared";
-const TMP_DIR_NAME: &str = "tmp";
-const VAULT_DIR_NAME: &str = "vault";
+pub(crate) const SHARED_DIR_NAME: &str = "shared";
+pub(crate) const TMP_DIR_NAME: &str = "tmp";
+pub(crate) const VAULT_DIR_NAME: &str = "vault";
 const MAX_SEARCH_MATCHES: usize = 200;
 pub(crate) const WEB_TOOL_USER_AGENT: &str = "oxydra/0.1 (+https://github.com/shantanugoel/oxydra)";
 const WEB_EGRESS_MODE_ENV_KEY: &str = "OXYDRA_WEB_EGRESS_MODE";

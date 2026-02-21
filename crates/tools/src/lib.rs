@@ -16,6 +16,8 @@ use sandbox::{
     SessionUnavailableReason, ShellSession, ShellSessionConfig, VsockShellSession,
     WasmCapabilityProfile, WasmToolRunner, WasmWorkspaceMounts, WorkspaceSecurityPolicy,
 };
+#[cfg(feature = "wasm-isolation")]
+use sandbox::WasmWasiToolRunner;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -800,25 +802,44 @@ impl Tool for BashTool {
 
 fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
     let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    #[cfg(feature = "wasm-isolation")]
+    {
+        match WasmWasiToolRunner::for_direct_workspace(&workspace_root) {
+            Ok(runner) => return Arc::new(runner),
+            Err(e) => {
+                tracing::warn!(
+                    "failed to initialize WasmWasiToolRunner, falling back to host runner: {e}"
+                );
+            }
+        }
+    }
     Arc::new(HostWasmToolRunner::for_direct_workspace(workspace_root))
 }
 
 fn runtime_wasm_runner(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Arc<dyn WasmToolRunner> {
     match bootstrap {
         Some(bootstrap) => {
-            if let Some(runtime_policy) = bootstrap.runtime_policy.as_ref() {
-                Arc::new(HostWasmToolRunner::new(
-                    WasmWorkspaceMounts::from_mount_roots(
-                        &runtime_policy.mounts.shared,
-                        &runtime_policy.mounts.tmp,
-                        &runtime_policy.mounts.vault,
-                    ),
-                ))
+            let mounts = if let Some(runtime_policy) = bootstrap.runtime_policy.as_ref() {
+                WasmWorkspaceMounts::from_mount_roots(
+                    &runtime_policy.mounts.shared,
+                    &runtime_policy.mounts.tmp,
+                    &runtime_policy.mounts.vault,
+                )
             } else {
-                Arc::new(HostWasmToolRunner::for_bootstrap_workspace(
-                    &bootstrap.workspace_root,
-                ))
+                WasmWorkspaceMounts::for_bootstrap_workspace(&bootstrap.workspace_root)
+            };
+            #[cfg(feature = "wasm-isolation")]
+            {
+                match WasmWasiToolRunner::new(mounts.clone()) {
+                    Ok(runner) => return Arc::new(runner),
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to initialize WasmWasiToolRunner, falling back to host runner: {e}"
+                        );
+                    }
+                }
             }
+            Arc::new(HostWasmToolRunner::new(mounts))
         }
         None => default_wasm_runner(),
     }

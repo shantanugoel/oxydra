@@ -18,7 +18,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 8 | Memory trait + libSQL persistence | **Complete** | Memory trait, libSQL, SQL migrations, session management |
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
-| 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. **Gap: WASM isolation is simulated (host-based)** |
+| 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server. **Gaps:** TUI rendering + interactive client missing; `runner --tui` is probe-only |
 | 13 | Model catalog + provider registry | Planned | |
 | 14 | External channels + identity mapping | Planned | |
@@ -64,15 +64,21 @@ Three gaps were identified during the initial code review of phases 1-12, and tw
 
 **Fix scope:** Implement the method body — embed chunk text via the existing embedding pipeline, insert into `chunks` + `chunks_vec` tables, and update the FTS5 index. All the infrastructure (embedding backends, table schema, SQL migrations) already exists.
 
-### Gap 4: WASM Tool Isolation is Simulated (Phase 11)
+### ~~Gap 4: WASM Tool Isolation is Simulated (Phase 11)~~ — Resolved
 
 **What was planned:** Tools execute inside `wasmtime` WASM sandboxes with strict WASI capability grants. File tools get preopened directory mounts, web tools get no filesystem access, and the guest physically cannot access unmounted paths.
 
-**What was built:** The `HostWasmToolRunner` enforces capability-scoped mount policies (path canonicalization, boundary checks, read-only vs. read-write access) but executes operations directly on the host using `std::fs` (e.g., `fs::read_to_string`, `fs::write`, `fs::remove_file`). The `wasmtime` crate is not a dependency of the `sandbox` crate. The isolation is logical (policy enforcement in Rust code) rather than hardware-enforced (WASM sandbox boundary).
+**What was built (original):** The `HostWasmToolRunner` enforced capability-scoped mount policies via host-side `std::fs` calls — logical isolation rather than hardware-enforced WASM sandboxing.
 
-**Impact:** Security policy enforcement is functional — out-of-bounds paths are rejected, read-only mounts are enforced, vault two-step semantics work. However, the isolation is not as robust as true WASM sandboxing. A sufficiently creative exploit (e.g., TOCTOU race between path canonicalization and file access) could bypass the logical checks. In `MicroVm`/`Container` tiers, the VM/container boundary provides the hard isolation, so this gap primarily affects the overall defense-in-depth posture.
+**Resolution:** `WasmWasiToolRunner` now executes all file tool operations inside a `wasmtime` sandbox with WASI preopened directories as the hard security boundary. Key details:
 
-**Fix scope:** Add `wasmtime` as a dependency, compile tool operations as WASM modules with WASI preopened directories for mount enforcement, and use host-function imports for web HTTP access. The existing `WasmToolRunner` trait, capability profiles, and mount policy definitions remain unchanged — only the execution backend changes from `std::fs` to WASM guest execution.
+- `crates/wasm-guest/` — a new `wasm32-wasip1` binary implementing all eight file operations (`file_read`, `file_write`, `file_edit`, `file_delete`, `file_list`, `file_search`, `vault_copyto_read`, `vault_copyto_write`) using only WASI `std::fs`, compiled and embedded at build time via `crates/sandbox/build.rs` + `include_bytes!`
+- Per-profile WASI preopened directories enforce the mount boundary: the guest physically cannot open paths outside its preopened FDs regardless of path construction
+- Epoch-based interruption (~10 s timeout) and `StoreLimitsBuilder` (64 MB memory cap) bound runaway guests
+- Host-side capability profile checks are retained as defense-in-depth (fast path before WASM instantiation cost)
+- Web tools (`web_fetch`, `web_search`) continue to execute host-side via `reqwest` — they have no filesystem access by design
+- `WasmWasiToolRunner` is feature-gated behind `wasm-isolation` (default on); `HostWasmToolRunner` remains as the fallback when the feature is disabled
+- **TOCTOU eliminated**: the WASI boundary makes symlink-escape and check-to-use races structurally impossible for file tools
 
 ### Gap 5: OpenAI Responses API Provider (Phase 2)
 
@@ -230,10 +236,8 @@ Built the foundation layer with zero internal dependencies:
 - `SecurityPolicy`: command allowlist, path traversal blocking, HITL gates
 - `RegexSet` output scrubbing for credentials (api_key, token, password, bearer patterns)
 - Entropy-based secret detection (Shannon entropy >= 3.8)
-- **Gap:** WASM isolation is simulated — `HostWasmToolRunner` enforces policies via host-side path checks using `std::fs`, not via `wasmtime` WASM sandboxing; `wasmtime` is not a dependency
-
-**Gaps / follow-ups to complete Phase 11:**
-- **Real WASM isolation:** replace host `std::fs` execution with `wasmtime` + WASI sandboxes and preopened mounts.
+**Phase 11 gaps — resolved:**
+- ~~**WASM isolation simulated:**~~ `WasmWasiToolRunner` now executes file operations inside a `wasmtime` WASM sandbox with WASI preopened directories as the hard boundary. A `wasm32-wasip1` guest binary (`crates/wasm-guest/`) is compiled and embedded via `crates/sandbox/build.rs`. The `WasmToolRunner` trait, capability profiles, and mount policy definitions are unchanged — only the execution backend changed. `HostWasmToolRunner` is retained as a fallback when the `wasm-isolation` feature is disabled.
 
 ### Phase 12: Channel Trait + TUI + Gateway Daemon
 
@@ -389,7 +393,7 @@ The five identified gaps are incorporated as additional work items:
 |-----|---------------|-------------------|----------|
 | Anthropic SSE streaming | Phase 7 | Before Phase 14 (external channels need reliable streaming) | High |
 | TUI ratatui rendering + interactive client | Phase 12 | Before Phase 14 (TUI must be usable before adding more channels) | High |
-| WASM tool isolation (simulated → real) | Phase 11 | Before Phase 15 (multi-agent needs hard isolation boundaries) | High |
+| ~~WASM tool isolation (simulated → real)~~ | Phase 11 | ~~Before Phase 15~~ **Resolved** — `WasmWasiToolRunner` with wasmtime + WASI preopened directories; `wasm32-wasip1` guest binary embedded via `build.rs`; TOCTOU eliminated | ~~High~~ |
 | OpenAI ResponsesProvider | Phase 2 | Phase 13 (provider registry + Responses provider implementation) | Medium |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
 | ~~Runner control plane + persistent daemon + VM log capture~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — daemon flag, Unix control socket, log pump threads | ~~High~~ |

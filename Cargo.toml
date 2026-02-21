@@ -13,4 +13,5 @@ members = [
   "crates/channels",
   "crates/gateway",
   "crates/tui",
+  "crates/wasm-guest",
 ]

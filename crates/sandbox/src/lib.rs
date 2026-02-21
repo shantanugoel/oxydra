@@ -31,6 +31,8 @@ mod policy;
 mod wasm_runner;
 mod web_fetch;
 mod web_search;
+#[cfg(feature = "wasm-isolation")]
+mod wasm_wasi_runner;
 
 pub use policy::{
     SecurityPolicy, SecurityPolicyViolation, SecurityPolicyViolationReason, WorkspaceSecurityPolicy,
@@ -39,6 +41,8 @@ pub use wasm_runner::{
     HostWasmToolRunner, WasmCapabilityProfile, WasmInvocationMetadata, WasmInvocationResult,
     WasmMount, WasmToolRunner, WasmWorkspaceMounts,
 };
+#[cfg(feature = "wasm-isolation")]
+pub use wasm_wasi_runner::WasmWasiToolRunner;
 
 pub const DEFAULT_MAX_SESSION_OUTPUT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_STREAM_CHUNK_BYTES: usize = 8 * 1024;

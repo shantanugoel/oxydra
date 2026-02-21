@@ -15,7 +15,8 @@
 7. Chapter 6: Conversational Memory and Vector State Persistence
 8. Chapter 7: Capability-Based Security and OS-Level Sandboxing
 9. Chapter 8: Multi-Agent Orchestration, Routing, and The Gateway Pattern
-10. Conclusion
+10. Chapter 9: Productization Backlog Integration After Core Runtime
+11. Conclusion
 
 ---
 
@@ -619,6 +620,59 @@ style Router fill:#d4edda,stroke:#28a745,stroke-width:2px
 
 ---
 
+## Chapter 9: Productization Backlog Integration After Core Runtime
+
+Once the core runtime, isolation model, and channel ingress model are in place, the remaining product backlog should be treated as first-class architecture work rather than ad-hoc TODO notes. These surfaces—model-catalog governance, explicit session lifecycle controls, scheduling, skill loading, and persona file governance—touch correctness, operator trust, and long-term maintainability, so they require explicit phase gates and typed contracts.
+
+### Model Catalog Governance and Snapshot Generation
+
+Model metadata should evolve from a lightweight pinned list into a fully typed schema synchronized from the upstream catalog source (for example models.dev snapshots). Introduce a deterministic snapshot generation command (invokable by operator through `tui`/runner control paths) that produces reviewed, versioned catalog artifacts committed into the repository. This flow must remain operator-driven; the runtime/LLM process should not self-mutate model policy files in-place.
+
+### Explicit Session Lifecycle Controls
+
+Session boundaries must be intentional. Add a first-class "new session" control so users can request a clean conversational slate without changing identity, workspace, or channel bindings. This should generate a new canonical `session_id` while preserving prior sessions for recall/audit, and should avoid implicit rollover rules that create ambiguous memory behavior.
+
+### Scheduler as a Governed Execution Surface
+
+Scheduled execution should be implemented as a bounded control-plane capability, not an unconstrained background thread. Support one-off and periodic entries with explicit ownership by `user_id`, and execute each due run through the same runtime policy envelope (timeouts, budgets, tool policy, audit trails) used for interactive turns. Scheduler management should be exposed through typed operations (`list`, `create`, `delete`) and validated at creation time. A key item to note is that scheduler should be able to support silent execution. E.g. An issue faced often is that any interaction done by scheduled task with an LLM also sends LLM output to the user always. We should be able to support conditional and unconditional silent tasks where user may not get notified. (E.g. "check weather every day at 9 am and notify user only if it is going to rain" should send an output to user only if rain was forecasted)
+
+### Skill Loading from Managed Workspace Folder
+
+Skills should load from a deterministic per-user workspace location (for example `<workspace_root>/<user_id>/skills/`) using markdown manifests. The folder is managed as a governed capability boundary: users may add/remove skill files out-of-band, while runtime exposure to the LLM is mediated by a dedicated skill API, not raw unconstrained filesystem traversal. In this roadmap variant, the LLM may create/load/use skills but cannot delete them.
+
+### Persona Governance via `SOUL.md` and `SYSTEM.md`
+
+Persona and policy framing should be externalized into two operator-visible files: `SOUL.md` (identity/persona envelope) and `SYSTEM.md` (system-behavior directives). These files are loaded at session start and treated as non-editable by the LLM. Any modifications happen through human/operator workflows, and policy loaders must surface provenance and effective precedence in diagnostics.
+
+### Entities to Implement
+
+- **`ModelCatalogSnapshotGenerator`:** Typed schema validator + snapshot writer with reproducible output ordering.
+- **`SessionLifecycleManager`:** Canonical session creation/rotation APIs and explicit "new session" command handling.
+- **`SchedulerStore` + `SchedulerExecutor`:** Durable schedule definitions with bounded turn execution and policy integration.
+- **`SkillRegistry` + `SkillLoader`:** Deterministic skill discovery/loading from managed per-user folder.
+- **`PersonaFilesLoader`:** `SOUL.md`/`SYSTEM.md` parsing, validation, and immutable runtime projection.
+
+### Implementation Hints
+
+- Keep all five surfaces typed and auditable from day one; avoid stringly-typed config blobs for lifecycle-critical controls.
+- Reuse existing `user_id` + canonical `session_id` mapping in channel flow to avoid split-brain memory behavior.
+- Execute scheduled runs as normal runtime turns so cancellation, budgeting, and tracing remain uniform.
+- Enforce non-editable persona files with policy checks in both tool execution and any direct file-manipulation surfaces.
+
+### Finalized Design Decisions
+
+- Backlog capabilities are promoted into explicit post-core phases, not left as unscheduled TODO notes.
+- Session lifecycle becomes an explicit user-facing control surface with deterministic identity semantics.
+- Skills and persona governance are capability-managed assets, not free-form writable runtime internals.
+- Model-catalog evolution is operator-driven and snapshot-based to preserve auditability.
+
+### Considerations
+
+- Choose the exact scheduler cadence grammar (`cron`, interval DSL, or both) before Phase 19 implementation to avoid parser rewrites.
+- Decide whether skill validation supports a strict schema mode only, or schema + permissive compatibility mode.
+
+---
+
 ## Conclusion
 
 Architecting a comprehensive, production-grade AI agent orchestrator requires significantly more than wrapping external API calls in high-level scripting languages. It demands a rigorous, progressive systems engineering approach rooted in efficiency and security. By adopting the "small core" philosophy, developers deliberately restrict the fundamental built-in capabilities of the agent runtime, forcing the underlying language model to dynamically generate, execute, and persist its own extensions rather than relying on bloated, hardcoded frameworks.
@@ -762,21 +816,21 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 | **Phase 14** | Multi-agent: subagent spawning + delegation + gateway daemon | `runtime`, `gateway` | Phases 5, 13 | One agent delegates a task to a subagent; gateway serves multiple clients over WebSocket; lane-based per-user queueing works | `SubagentBrief` struct for context handoffs. Per-subagent `CancellationToken` + timeout + cost budget. Gateway multiplexes TUI + external channels. `axum` WebSocket server. |
 | **Phase 15** | Observability: OpenTelemetry traces + metrics + cost reporting | `runtime`, `gateway` | Phases 5, 14 | Full trace of agent turns visible in Jaeger; per-session cost report; tool success/failure rates | Upgrade from `tracing` subscriber to `tracing-opentelemetry` exporter. Add token cost metrics. Trace spans: turn → provider_call → tool_execution. Conversation replay from stored traces. |
 | **Phase 16** | MCP (Model Context Protocol) support | `tools`, `runtime` | Phases 4, 5 | External MCP tool servers discoverable and callable alongside native tools | `McpToolAdapter` implements `Tool` trait, bridging MCP protocol (stdio or HTTP+SSE transport). MCP tools registered in the same tool registry as native tools. Discovery via config or runtime negotiation. |
+| **Phase 17** | Full model-catalog schema + snapshot generation workflow | `types`, `provider`, `runner`, `tui` | Phases 1, 2, 12 | Catalog snapshot command produces deterministic typed artifact; config validation rejects unknown/invalid model metadata; snapshot regeneration is reproducible in CI. | Promote pinned model metadata to a complete typed schema and operator-driven snapshot generation command. Runtime/LLM does not self-mutate catalog files. |
+| **Phase 18** | Explicit session lifecycle controls (`new session`) | `runtime`, `memory`, `types`, `tui`, `channels` | Phases 8, 13, 17 | User can start a clean new session explicitly; previous sessions remain recallable; `session_id` rollover is deterministic and auditable. | No implicit session rollover heuristics; new-session control is explicit and preserves user/workspace continuity with fresh conversation state. |
+| **Phase 19** | Scheduler system + schedule management tooling | `runtime`, `memory`, `types`, `tools`, `gateway` | Phases 10, 14, 18 | One-off and periodic schedule entries can be listed/created/deleted; due jobs execute bounded turns with normal policy/audit controls. | Scheduler runs must execute through the same policy envelope as interactive turns (timeouts, budgets, tool gates, tracing). |
+| **Phase 20** | Skill system from managed workspace folder | `runtime`, `tools`, `types`, `memory` | Phases 11, 18, 19 | Skills are discovered/loaded from managed per-user folder; LLM can create/load/use skills; skill deletion by LLM is denied by policy. | Skill access is API-mediated and policy-scoped; avoid exposing raw unmanaged skill-folder traversal as a generic file operation. |
+| **Phase 21** | Persona governance via `SOUL.md` + `SYSTEM.md` | `runtime`, `types`, `runner`, `gateway` | Phases 12, 18, 20 | Persona files load at session start with visible effective precedence; LLM write/delete attempts on these files are rejected; operator edits apply on next session start. | `SOUL.md` and `SYSTEM.md` are non-editable runtime policy artifacts and must remain outside direct LLM mutation paths. |
 
 #### TODOs not covered in above phases yet
-- Background summarisation for better latency with epoch retries
-- Full schema for models.dev catalog with code for snapshot generation
-- Option or command to start a new session? when do sessions change now?
-- Scheduler system where a schedule can execute tasks on a given schedule. Also exposes a tool to llm to list/create/delete one off or periodic entries.
-- Skill system where we could load these skills on demand from md files in a pre-determined folder within user's workspace. The folder is not directly exposed to llm, but users can out-of-band add/remove md files there for new skills, or llm can also create/load/use skills (but cannot delete)
-- Configuring agent persona with a SOUL.md
+- No unscheduled backlog items remain from the previous list; these concerns are now explicitly planned in Phases 17-21.
 
 ### Test Strategy Across All Phases
 
 - Every phase verification gate must be represented by automated tests before phase closure.
 - Early phases (1-4) prioritize type/serialization tests, schema tests, and provider contract tests.
 - Middle phases (5-11) add runtime integration tests for cancellation, retries, tool safety tiers, memory migration, runner isolation, and WASM policy behavior.
-- Later phases (12-16) add end-to-end and distributed tests for TUI/channel adapters, gateway routing, observability, and MCP adapters.
+- Later phases (12-21) add end-to-end and distributed tests for TUI/channel adapters, gateway routing, observability, MCP adapters, model-catalog governance, session controls, scheduler flows, skills, and persona policy enforcement.
 - Regression policy is cumulative: later phases add tests but do not remove earlier phase checks.
 
 #### Why This Order Avoids Rewrites
@@ -790,6 +844,9 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 - **Phase 10 performs the bootstrap cutover** from legacy standalone `cli` startup ownership to runner-era `oxydra-vm` startup wiring before isolation controls are enforced.
 - **Phase 12 defines the `Channel` trait** and TUI adapter contract before external adapters land — Phase 13 extends adapters without changing the trait and Phase 14 composes them in the gateway.
 - **Phase 13 introduces deterministic user/channel -> session identity mapping and sender-ID allowlists** before gateway fan-out in Phase 14, preventing multi-channel history fragmentation and unauthorized ingress.
+- **Phases 17-18 formalize catalog/session governance** on top of earlier typed IDs and memory/session primitives, preventing implicit state drift.
+- **Phase 19 scheduler execution reuses runtime policy rails** (budget, cancellation, tool gating) instead of inventing a separate unsafe execution path.
+- **Phases 20-21 separate skills from persona policy assets,** avoiding policy-file mutation through general skill flows.
 
 ### Phase-to-Chapter Alignment Check
 
@@ -798,6 +855,7 @@ This plan is designed so **no phase requires rewriting work from a previous phas
 - **Chapter 6** maps to **Phases 8-9** (durable memory, retrieval, token budgeting, summarization).
 - **Chapter 7** maps to **Phases 10-11** (runner isolation infrastructure and application-layer security policy).
 - **Chapter 8** maps to **Phases 12-16** (channel trait, TUI/external channel adapters, gateway orchestration, observability, MCP compatibility).
+- **Chapter 9** maps to **Phases 17-21** (model-catalog governance, explicit session lifecycle, scheduler, skills, and persona file policy).
 
 This crosswalk confirms the progressive plan is aligned with the narrative architecture and covers the required execution surfaces without forcing rework between phases.
 

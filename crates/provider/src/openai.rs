@@ -755,7 +755,7 @@ impl SseDataParser {
         Ok(payloads)
     }
 
-    fn finish(mut self) -> Result<Vec<String>, String> {
+    pub(crate) fn finish(mut self) -> Result<Vec<String>, String> {
         let mut payloads = Vec::new();
         if !self.line_buffer.is_empty() {
             let line = std::mem::take(&mut self.line_buffer);

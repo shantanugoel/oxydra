@@ -10,8 +10,9 @@ pub use retry::{ReliableProvider, RetryPolicy};
 
 #[cfg(test)]
 use anthropic::{
-    AnthropicMessagesRequest, AnthropicMessagesResponse, AnthropicResponseContentBlock,
-    AnthropicUsage, normalize_anthropic_response,
+    AnthropicEventAction, AnthropicMessagesRequest, AnthropicMessagesResponse,
+    AnthropicResponseContentBlock, AnthropicToolCallAccumulator, AnthropicUsage,
+    normalize_anthropic_response, parse_anthropic_stream_payload,
 };
 #[cfg(test)]
 use openai::{

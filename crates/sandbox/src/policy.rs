@@ -1,0 +1,466 @@
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use serde_json::Value;
+use types::SafetyTier;
+
+const SHARED_DIR_NAME: &str = "shared";
+const TMP_DIR_NAME: &str = "tmp";
+const VAULT_DIR_NAME: &str = "vault";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityPolicyViolationReason {
+    InvalidArguments,
+    PathResolutionFailed,
+    PathOutsideAllowedRoots,
+    CommandNotAllowed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityPolicyViolation {
+    pub reason: SecurityPolicyViolationReason,
+    pub detail: String,
+}
+
+impl SecurityPolicyViolation {
+    fn new(reason: SecurityPolicyViolationReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+pub trait SecurityPolicy: Send + Sync {
+    fn enforce(
+        &self,
+        tool_name: &str,
+        safety_tier: SafetyTier,
+        arguments: &Value,
+    ) -> Result<(), SecurityPolicyViolation>;
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceSecurityPolicy {
+    read_only_roots: Vec<PathBuf>,
+    read_write_roots: Vec<PathBuf>,
+    shell_command_allowlist: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileAccessMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl WorkspaceSecurityPolicy {
+    pub fn for_bootstrap_workspace(workspace_root: impl AsRef<Path>) -> Self {
+        let workspace_root = workspace_root.as_ref();
+        Self::new(
+            vec![
+                workspace_root.join(SHARED_DIR_NAME),
+                workspace_root.join(TMP_DIR_NAME),
+                workspace_root.join(VAULT_DIR_NAME),
+            ],
+            vec![
+                workspace_root.join(SHARED_DIR_NAME),
+                workspace_root.join(TMP_DIR_NAME),
+            ],
+        )
+    }
+
+    pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Self {
+        let workspace_root = workspace_root.as_ref().to_path_buf();
+        Self::new(vec![workspace_root.clone()], vec![workspace_root])
+    }
+
+    fn new(read_only_roots: Vec<PathBuf>, read_write_roots: Vec<PathBuf>) -> Self {
+        Self {
+            read_only_roots: canonicalize_roots(read_only_roots),
+            read_write_roots: canonicalize_roots(read_write_roots),
+            shell_command_allowlist: default_shell_command_allowlist(),
+        }
+    }
+
+    fn enforce_file_path(
+        &self,
+        path: &str,
+        access_mode: FileAccessMode,
+    ) -> Result<(), SecurityPolicyViolation> {
+        let canonical_target =
+            canonicalize_target_path(path, access_mode == FileAccessMode::ReadWrite)?;
+        let allowed_roots = match access_mode {
+            FileAccessMode::ReadOnly => &self.read_only_roots,
+            FileAccessMode::ReadWrite => &self.read_write_roots,
+        };
+
+        if allowed_roots
+            .iter()
+            .any(|root| canonical_target == *root || canonical_target.starts_with(root))
+        {
+            Ok(())
+        } else {
+            let roots = allowed_roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(SecurityPolicyViolation::new(
+                SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                format!(
+                    "path `{}` resolved to `{}` outside allowed roots [{roots}]",
+                    path,
+                    canonical_target.display()
+                ),
+            ))
+        }
+    }
+
+    fn enforce_shell_command(&self, command: &str) -> Result<(), SecurityPolicyViolation> {
+        let command_name = parse_command_name(command)?;
+        if self.shell_command_allowlist.contains(&command_name) {
+            Ok(())
+        } else {
+            let allowed = self
+                .shell_command_allowlist
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(SecurityPolicyViolation::new(
+                SecurityPolicyViolationReason::CommandNotAllowed,
+                format!("command `{command_name}` is not in shell allowlist [{allowed}]"),
+            ))
+        }
+    }
+}
+
+impl SecurityPolicy for WorkspaceSecurityPolicy {
+    fn enforce(
+        &self,
+        tool_name: &str,
+        _safety_tier: SafetyTier,
+        arguments: &Value,
+    ) -> Result<(), SecurityPolicyViolation> {
+        if let Some(access_mode) = file_access_mode(tool_name) {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SecurityPolicyViolation::new(
+                        SecurityPolicyViolationReason::InvalidArguments,
+                        format!("tool `{tool_name}` requires string argument `path`"),
+                    )
+                })?;
+            self.enforce_file_path(path, access_mode)?;
+        }
+
+        if is_shell_tool(tool_name) {
+            let command = arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SecurityPolicyViolation::new(
+                        SecurityPolicyViolationReason::InvalidArguments,
+                        format!("tool `{tool_name}` requires string argument `command`"),
+                    )
+                })?;
+            self.enforce_shell_command(command)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn file_access_mode(tool_name: &str) -> Option<FileAccessMode> {
+    match tool_name {
+        "read_file" | "file_read" | "file_search" | "file_list" => Some(FileAccessMode::ReadOnly),
+        "write_file" | "edit_file" | "file_write" | "file_edit" | "file_delete" => {
+            Some(FileAccessMode::ReadWrite)
+        }
+        _ => None,
+    }
+}
+
+fn is_shell_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "bash" | "shell_exec")
+}
+
+fn canonicalize_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut canonical_roots = Vec::new();
+    for root in roots {
+        let normalized = normalize_absolute(root);
+        let canonical = fs::canonicalize(&normalized).unwrap_or(normalized);
+        if !canonical_roots
+            .iter()
+            .any(|existing| existing == &canonical)
+        {
+            canonical_roots.push(canonical);
+        }
+    }
+    canonical_roots
+}
+
+fn canonicalize_target_path(
+    raw_path: &str,
+    allow_missing_leaf: bool,
+) -> Result<PathBuf, SecurityPolicyViolation> {
+    let path = raw_path.trim();
+    if path.is_empty() {
+        return Err(SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::InvalidArguments,
+            "path argument must not be empty",
+        ));
+    }
+
+    let target_path = normalize_absolute(PathBuf::from(path));
+    if !allow_missing_leaf || target_path.exists() {
+        return fs::canonicalize(&target_path).map_err(|error| {
+            SecurityPolicyViolation::new(
+                SecurityPolicyViolationReason::PathResolutionFailed,
+                format!(
+                    "failed to canonicalize `{}`: {error}",
+                    target_path.display()
+                ),
+            )
+        });
+    }
+
+    let parent = target_path.parent().ok_or_else(|| {
+        SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::PathResolutionFailed,
+            format!(
+                "path `{}` does not include a canonicalizable parent directory",
+                target_path.display()
+            ),
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::PathResolutionFailed,
+            format!(
+                "failed to canonicalize parent `{}` for `{}`: {error}",
+                parent.display(),
+                target_path.display()
+            ),
+        )
+    })?;
+    let leaf = target_path.file_name().ok_or_else(|| {
+        SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::PathResolutionFailed,
+            format!(
+                "path `{}` must include a terminal file name for write/edit operations",
+                target_path.display()
+            ),
+        )
+    })?;
+    Ok(canonical_parent.join(leaf))
+}
+
+fn normalize_absolute(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
+fn parse_command_name(command: &str) -> Result<String, SecurityPolicyViolation> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::InvalidArguments,
+            "command argument must not be empty",
+        ));
+    }
+    if contains_disallowed_shell_syntax(trimmed) {
+        return Err(SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::CommandNotAllowed,
+            "command contains shell control operators; only a single allowlisted command is permitted",
+        ));
+    }
+
+    let first_token = trimmed.split_whitespace().next().ok_or_else(|| {
+        SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::InvalidArguments,
+            "command argument must include an executable name",
+        )
+    })?;
+    let command_name = Path::new(first_token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(first_token)
+        .to_ascii_lowercase();
+    if command_name.is_empty() {
+        return Err(SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::InvalidArguments,
+            "command executable name must not be empty",
+        ));
+    }
+    Ok(command_name)
+}
+
+fn contains_disallowed_shell_syntax(command: &str) -> bool {
+    command.contains("&&")
+        || command.contains("||")
+        || command.contains(';')
+        || command.contains('|')
+        || command.contains('>')
+        || command.contains('<')
+        || command.contains('`')
+        || command.contains("$(")
+        || command.contains('\n')
+        || command.contains('\r')
+}
+
+fn default_shell_command_allowlist() -> BTreeSet<String> {
+    [
+        "awk", "cat", "cargo", "cp", "cut", "echo", "env", "find", "git", "go", "grep", "head",
+        "ls", "mkdir", "mv", "node", "printf", "pwd", "python", "python3", "rustc", "sed", "sort",
+        "stat", "tail", "touch", "tr", "uniq", "wc", "which",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use serde_json::json;
+    use types::SafetyTier;
+
+    use super::*;
+
+    #[test]
+    fn bootstrap_policy_allows_reads_within_workspace_mounts() {
+        let workspace = unique_temp_workspace("policy-allow-read");
+        let shared_file = workspace.join(SHARED_DIR_NAME).join("allowed.txt");
+        fs::write(&shared_file, "ok").expect("shared file should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+        let result = policy.enforce(
+            "read_file",
+            SafetyTier::ReadOnly,
+            &json!({ "path": shared_file.to_string_lossy() }),
+        );
+        assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn bootstrap_policy_denies_paths_outside_workspace_mounts() {
+        let workspace = unique_temp_workspace("policy-deny-outside");
+        let outside_file = unique_temp_workspace("policy-outside-file").join("outside.txt");
+        fs::write(&outside_file, "deny").expect("outside file should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+        let result = policy.enforce(
+            "read_file",
+            SafetyTier::ReadOnly,
+            &json!({ "path": outside_file.to_string_lossy() }),
+        );
+        assert!(matches!(
+            result,
+            Err(SecurityPolicyViolation {
+                reason: SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                ..
+            })
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+        if let Some(parent) = outside_file.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn bootstrap_policy_allows_write_path_with_missing_leaf_inside_tmp() {
+        let workspace = unique_temp_workspace("policy-write-missing");
+        let target = workspace.join(TMP_DIR_NAME).join("new-file.txt");
+
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+        let result = policy.enforce(
+            "write_file",
+            SafetyTier::SideEffecting,
+            &json!({ "path": target.to_string_lossy(), "content": "x" }),
+        );
+        assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_policy_allows_printf_and_denies_disallowed_commands() {
+        let workspace = unique_temp_workspace("policy-shell");
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+
+        let allow = policy.enforce(
+            "bash",
+            SafetyTier::Privileged,
+            &json!({ "command": "printf hello" }),
+        );
+        assert!(allow.is_ok());
+
+        let deny = policy.enforce(
+            "bash",
+            SafetyTier::Privileged,
+            &json!({ "command": "curl https://example.com" }),
+        );
+        assert!(matches!(
+            deny,
+            Err(SecurityPolicyViolation {
+                reason: SecurityPolicyViolationReason::CommandNotAllowed,
+                ..
+            })
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_policy_rejects_control_operators() {
+        let workspace = unique_temp_workspace("policy-shell-ops");
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+
+        let deny = policy.enforce(
+            "bash",
+            SafetyTier::Privileged,
+            &json!({ "command": "printf ok && ls" }),
+        );
+        assert!(matches!(
+            deny,
+            Err(SecurityPolicyViolation {
+                reason: SecurityPolicyViolationReason::CommandNotAllowed,
+                ..
+            })
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    fn unique_temp_workspace(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        let shared = root.join(SHARED_DIR_NAME);
+        let tmp = root.join(TMP_DIR_NAME);
+        let vault = root.join(VAULT_DIR_NAME);
+        fs::create_dir_all(&shared).expect("shared dir should be created");
+        fs::create_dir_all(&tmp).expect("tmp dir should be created");
+        fs::create_dir_all(&vault).expect("vault dir should be created");
+        root
+    }
+}

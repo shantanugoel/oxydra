@@ -1,11 +1,14 @@
-use std::{collections::BTreeMap, fs, process::Command, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap, env, fs, path::PathBuf, process::Command, sync::Arc, time::Duration,
+};
 
 use async_trait::async_trait;
 use sandbox::{
-    SessionStatus, SessionUnavailable, SessionUnavailableReason, ShellSession, ShellSessionConfig,
-    VsockShellSession,
+    SecurityPolicy, SessionStatus, SessionUnavailable, SessionUnavailableReason, ShellSession,
+    ShellSessionConfig, VsockShellSession, WorkspaceSecurityPolicy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::Value;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -299,6 +302,7 @@ impl Tool for BashTool {
 pub struct ToolRegistry {
     tools: BTreeMap<String, Box<dyn Tool>>,
     max_output_bytes: usize,
+    security_policy: Option<Arc<dyn SecurityPolicy>>,
 }
 
 impl Default for ToolRegistry {
@@ -312,6 +316,7 @@ impl ToolRegistry {
         Self {
             tools: BTreeMap::new(),
             max_output_bytes,
+            security_policy: None,
         }
     }
 
@@ -337,6 +342,10 @@ impl ToolRegistry {
         self.tools.values().map(|tool| tool.schema()).collect()
     }
 
+    pub fn set_security_policy(&mut self, policy: Arc<dyn SecurityPolicy>) {
+        self.security_policy = Some(policy);
+    }
+
     pub async fn execute(&self, name: &str, args: &str) -> Result<String, ToolError> {
         self.execute_with_policy(name, args, |_| Ok(())).await
     }
@@ -355,6 +364,20 @@ impl ToolRegistry {
             .ok_or_else(|| execution_failed(name, format!("unknown tool `{name}`")))?;
 
         safety_gate(tool.safety_tier())?;
+        if let Some(policy) = &self.security_policy {
+            let arguments = parse_policy_args(name, args)?;
+            policy
+                .enforce(name, tool.safety_tier(), &arguments)
+                .map_err(|violation| {
+                    execution_failed(
+                        name,
+                        format!(
+                            "blocked by security policy ({:?}): {}",
+                            violation.reason, violation.detail
+                        ),
+                    )
+                })?;
+        }
 
         let timeout = tool.timeout();
         let output = tokio::time::timeout(timeout, tool.execute(args))
@@ -391,6 +414,7 @@ pub async fn bootstrap_runtime_tools(
     registry.register(WRITE_TOOL_NAME, WriteTool);
     registry.register(EDIT_TOOL_NAME, EditTool);
     registry.register(BASH_TOOL_NAME, bash_tool);
+    registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap)));
 
     RuntimeToolsBootstrap {
         registry,
@@ -398,6 +422,20 @@ pub async fn bootstrap_runtime_tools(
             shell: shell_status,
             browser: browser_status,
         },
+    }
+}
+
+fn workspace_security_policy(
+    bootstrap: Option<&RunnerBootstrapEnvelope>,
+) -> WorkspaceSecurityPolicy {
+    match bootstrap {
+        Some(bootstrap) => {
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&bootstrap.workspace_root)
+        }
+        None => {
+            let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            WorkspaceSecurityPolicy::for_direct_workspace(workspace_root)
+        }
     }
 }
 
@@ -554,6 +592,11 @@ fn execution_failed(tool: &str, message: impl Into<String>) -> ToolError {
         tool: tool.to_owned(),
         message: message.into(),
     }
+}
+
+fn parse_policy_args(tool: &str, args: &str) -> Result<Value, ToolError> {
+    serde_json::from_str(args)
+        .map_err(|error| invalid_args(tool, format!("invalid JSON arguments payload: {error}")))
 }
 
 async fn execute_with_shell_session(
@@ -925,6 +968,61 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
+        let workspace_root = temp_workspace_root("policy-bootstrap");
+        let outside = temp_path("policy-outside");
+        fs::write(&outside, "outside policy root").expect("outside file should be writable");
+        let bootstrap = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Container,
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+            sidecar_endpoint: None,
+        };
+        let RuntimeToolsBootstrap { registry, .. } =
+            bootstrap_runtime_tools(Some(&bootstrap)).await;
+        let args = json!({ "path": outside.to_string_lossy() }).to_string();
+        let denied = registry
+            .execute(READ_TOOL_NAME, &args)
+            .await
+            .expect_err("policy should deny file reads outside configured workspace roots");
+
+        assert!(matches!(
+            denied,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == READ_TOOL_NAME
+                    && message.contains("blocked by security policy")
+                    && message.contains("PathOutsideAllowedRoots")
+        ));
+
+        cleanup_file(&outside);
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn registry_denies_shell_commands_not_in_allowlist() {
+        let workspace_root = temp_workspace_root("policy-shell");
+        let mut registry = ToolRegistry::default();
+        registry.register(BASH_TOOL_NAME, BashTool::default());
+        registry.set_security_policy(Arc::new(WorkspaceSecurityPolicy::for_direct_workspace(
+            &workspace_root,
+        )));
+
+        let denied = registry
+            .execute(BASH_TOOL_NAME, r#"{"command":"curl https://example.com"}"#)
+            .await
+            .expect_err("security policy should deny shell commands outside allowlist");
+        assert!(matches!(
+            denied,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == BASH_TOOL_NAME
+                    && message.contains("blocked by security policy")
+                    && message.contains("CommandNotAllowed")
+        ));
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
     fn temp_path(label: &str) -> PathBuf {
         let mut path = env::temp_dir();
         let unique = SystemTime::now()
@@ -936,6 +1034,14 @@ mod tests {
             std::process::id()
         ));
         path
+    }
+
+    fn temp_workspace_root(label: &str) -> PathBuf {
+        let root = temp_path(label).with_extension("workspace");
+        fs::create_dir_all(root.join("shared")).expect("shared directory should be created");
+        fs::create_dir_all(root.join("tmp")).expect("tmp directory should be created");
+        fs::create_dir_all(root.join("vault")).expect("vault directory should be created");
+        root
     }
 
     #[cfg(unix)]

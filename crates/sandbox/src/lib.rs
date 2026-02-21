@@ -27,6 +27,12 @@ use types::{
     StreamOutput, StreamOutputChunk,
 };
 
+mod policy;
+
+pub use policy::{
+    SecurityPolicy, SecurityPolicyViolation, SecurityPolicyViolationReason, WorkspaceSecurityPolicy,
+};
+
 pub const DEFAULT_MAX_SESSION_OUTPUT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_STREAM_CHUNK_BYTES: usize = 8 * 1024;
 

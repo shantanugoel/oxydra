@@ -620,6 +620,70 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
 }
 
 #[tokio::test]
+async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_access() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let workspace_root = temp_workspace_root("runtime-policy-workspace");
+    let outside_root = temp_workspace_root("runtime-policy-outside");
+    let outside_file = outside_root.join("outside.txt");
+    std::fs::write(&outside_file, "outside").expect("outside file should be writable");
+    let outside_file_path = outside_file.to_string_lossy().into_owned();
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_read".to_owned()),
+                    name: Some("read_file".to_owned()),
+                    arguments: Some(json!({ "path": outside_file_path }).to_string()),
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("policy denial handled".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
+        sidecar_endpoint: None,
+    };
+    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    let runtime = AgentRuntime::new(
+        Box::new(provider),
+        bootstrap_tools.registry,
+        RuntimeLimits::default(),
+    );
+    let mut context = test_context(provider_id, model_id);
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should continue after security-policy denial");
+    assert_eq!(
+        response.message.content.as_deref(),
+        Some("policy denial handled")
+    );
+    let tool_result = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("tool result should be appended for denied path");
+    assert!(tool_result.content.as_deref().is_some_and(|content| {
+        content.contains("blocked by security policy")
+            && content.contains("PathOutsideAllowedRoots")
+    }));
+
+    let _ = std::fs::remove_dir_all(workspace_root);
+    let _ = std::fs::remove_dir_all(outside_root);
+}
+
+#[tokio::test]
 async fn run_session_falls_back_to_complete_after_stream_failure() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
@@ -1955,6 +2019,21 @@ fn temp_socket_path(label: &str) -> std::path::PathBuf {
         "/tmp/oxy-{short_label}-{}-{unique}.sock",
         std::process::id()
     ))
+}
+
+fn temp_workspace_root(label: &str) -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be monotonic")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "oxydra-{label}-workspace-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(root.join("shared")).expect("shared directory should be created");
+    std::fs::create_dir_all(root.join("tmp")).expect("tmp directory should be created");
+    std::fs::create_dir_all(root.join("vault")).expect("vault directory should be created");
+    root
 }
 
 fn assistant_response(content: &str, tool_calls: Vec<ToolCall>) -> Response {

@@ -23,8 +23,8 @@ use serde_json::Value;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{
     DirPerms, FilePerms, WasiCtxBuilder,
-    pipe::{MemoryInputPipe, MemoryOutputPipe},
-    preview1::{WasiP1Ctx, add_to_linker_sync},
+    p1::{WasiP1Ctx, add_to_linker_sync},
+    p2::pipe::{MemoryInputPipe, MemoryOutputPipe},
 };
 
 use crate::{

@@ -17,8 +17,10 @@ use bollard::{
         CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
-use hyper::{Body, Client, Method, Request, StatusCode, body::to_bytes};
-use hyperlocal::{UnixClientExt, Uri as HyperlocalUri};
+use http_body_util::{BodyExt, Full};
+use hyper::{Method, Request, StatusCode, Uri, body::Bytes};
+use hyper_util::client::legacy::Client;
+use hyperlocal::{UnixClientExt, UnixConnector, Uri as HyperlocalUri};
 use sandbox::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -1219,16 +1221,16 @@ async fn send_unix_json_request(
     body: Option<Value>,
     operation: &'static str,
 ) -> Result<UnixJsonResponse, RunnerError> {
-    let client: Client<_, Body> = Client::unix();
-    let uri: hyper::Uri = HyperlocalUri::new(socket_path, path).into();
+    let client: Client<UnixConnector, Full<Bytes>> = Client::unix();
+    let uri: Uri = HyperlocalUri::new(socket_path, path).into();
 
     let mut request_builder = Request::builder().method(method).uri(uri);
     let request_body = match body {
         Some(payload) => {
             request_builder = request_builder.header("content-type", "application/json");
-            Body::from(payload.to_string())
+            Full::new(Bytes::from(payload.to_string()))
         }
-        None => Body::empty(),
+        None => Full::new(Bytes::new()),
     };
 
     let request = request_builder.body(request_body).map_err(|error| {
@@ -1248,14 +1250,16 @@ async fn send_unix_json_request(
                 message: error.to_string(),
             })?;
     let status = response.status();
-    let body_bytes =
-        to_bytes(response.into_body())
-            .await
-            .map_err(|error| RunnerError::SandboxApiTransport {
-                operation,
-                socket_path: socket_path.to_path_buf(),
-                message: error.to_string(),
-            })?;
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|error| RunnerError::SandboxApiTransport {
+            operation,
+            socket_path: socket_path.to_path_buf(),
+            message: error.to_string(),
+        })?
+        .to_bytes();
     let raw_body = String::from_utf8_lossy(&body_bytes).into_owned();
     let body = if body_bytes.is_empty() {
         Value::Null

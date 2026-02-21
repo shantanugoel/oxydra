@@ -1,4 +1,4 @@
-error: #[tool] only supports String, &str, bool, integer, and float arguments in this phase
+error: #[tool] currently supports String, &str, bool, integer, and float arguments
  --> tests/fixtures/fail_unsupported_argument_type.rs:4:26
   |
 4 | async fn read_file(path: std::path::PathBuf) -> String {

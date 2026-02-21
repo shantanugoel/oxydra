@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -14,7 +14,8 @@ use tokio::net::UnixListener;
 use tokio::time::sleep;
 use tools_macros::tool;
 use types::{
-    JsonSchemaType, RunnerBootstrapEnvelope, SandboxTier, SidecarEndpoint, SidecarTransport,
+    JsonSchemaType, RunnerBootstrapEnvelope, RunnerResolvedMountPaths, RunnerResourceLimits,
+    RunnerRuntimePolicy, SandboxTier, SidecarEndpoint, SidecarTransport,
 };
 
 use super::*;
@@ -258,6 +259,7 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
             transport: SidecarTransport::Unix,
             address: socket_path.to_string_lossy().into_owned(),
         }),
+        runtime_policy: None,
     };
     let RuntimeToolsBootstrap {
         registry,
@@ -409,6 +411,7 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
         sandbox_tier: SandboxTier::Container,
         workspace_root: workspace_root.to_string_lossy().into_owned(),
         sidecar_endpoint: None,
+        runtime_policy: None,
     };
     let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap)).await;
     let args = json!({ "path": outside.to_string_lossy() }).to_string();
@@ -427,6 +430,60 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
 
     cleanup_file(&outside);
     let _ = fs::remove_dir_all(workspace_root);
+}
+
+#[tokio::test]
+async fn bootstrap_registry_honors_runtime_policy_mount_overrides() {
+    let workspace_root = temp_workspace_root("policy-workspace-default");
+    let override_root = temp_workspace_root("policy-workspace-override");
+    let allowed = override_root.join("shared").join("allowed.txt");
+    let denied = workspace_root.join("shared").join("denied.txt");
+    fs::write(&allowed, "allowed").expect("allowed file should be writable");
+    fs::write(&denied, "denied").expect("denied file should be writable");
+
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: Some(RunnerRuntimePolicy {
+            mounts: RunnerResolvedMountPaths {
+                shared: override_root.join("shared").to_string_lossy().into_owned(),
+                tmp: override_root.join("tmp").to_string_lossy().into_owned(),
+                vault: override_root.join("vault").to_string_lossy().into_owned(),
+            },
+            resources: RunnerResourceLimits::default(),
+            credential_refs: BTreeMap::new(),
+        }),
+    };
+    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap)).await;
+
+    let allowed_result = registry
+        .execute(
+            FILE_READ_TOOL_NAME,
+            &json!({ "path": allowed.to_string_lossy() }).to_string(),
+        )
+        .await
+        .expect("override mount path should be readable");
+    assert_eq!(allowed_result, "allowed");
+
+    let denied_result = registry
+        .execute(
+            FILE_READ_TOOL_NAME,
+            &json!({ "path": denied.to_string_lossy() }).to_string(),
+        )
+        .await
+        .expect_err("default workspace roots should be ignored when runtime policy mounts are set");
+    assert!(matches!(
+        denied_result,
+        ToolError::ExecutionFailed { tool, message }
+            if tool == FILE_READ_TOOL_NAME
+                && message.contains("blocked by security policy")
+                && message.contains("PathOutsideAllowedRoots")
+    ));
+
+    let _ = fs::remove_dir_all(workspace_root);
+    let _ = fs::remove_dir_all(override_root);
 }
 
 #[tokio::test]
@@ -496,7 +553,7 @@ async fn bootstrap_registry_exposes_runtime_tool_surface_only() {
 }
 
 fn temp_path(label: &str) -> PathBuf {
-    let mut path = env::temp_dir();
+    let mut path = env::current_dir().unwrap_or_else(|_| env::temp_dir());
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be monotonic for test unique ids")

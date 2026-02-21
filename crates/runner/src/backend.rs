@@ -274,6 +274,8 @@ impl CrateSandboxBackend {
             container_name.clone(),
             image.to_owned(),
             request.workspace.clone(),
+            request.mounts.clone(),
+            request.resource_limits.clone(),
             labels,
         ))?;
 

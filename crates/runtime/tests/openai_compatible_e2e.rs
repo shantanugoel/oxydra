@@ -270,7 +270,7 @@ fn test_catalog(model: ModelId, supports_streaming: bool) -> ModelCatalog {
 }
 
 fn temp_file_path(label: &str) -> std::path::PathBuf {
-    let mut path = env::temp_dir();
+    let mut path = env::current_dir().unwrap_or_else(|_| env::temp_dir());
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be monotonic")

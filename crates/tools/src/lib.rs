@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use sandbox::{
     HostWasmToolRunner, SecurityPolicy, SessionStatus, SessionUnavailable,
     SessionUnavailableReason, ShellSession, ShellSessionConfig, VsockShellSession,
-    WasmCapabilityProfile, WasmToolRunner, WorkspaceSecurityPolicy,
+    WasmCapabilityProfile, WasmToolRunner, WasmWorkspaceMounts, WorkspaceSecurityPolicy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -804,9 +804,21 @@ fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
 
 fn runtime_wasm_runner(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Arc<dyn WasmToolRunner> {
     match bootstrap {
-        Some(bootstrap) => Arc::new(HostWasmToolRunner::for_bootstrap_workspace(
-            &bootstrap.workspace_root,
-        )),
+        Some(bootstrap) => {
+            if let Some(runtime_policy) = bootstrap.runtime_policy.as_ref() {
+                Arc::new(HostWasmToolRunner::new(
+                    WasmWorkspaceMounts::from_mount_roots(
+                        &runtime_policy.mounts.shared,
+                        &runtime_policy.mounts.tmp,
+                        &runtime_policy.mounts.vault,
+                    ),
+                ))
+            } else {
+                Arc::new(HostWasmToolRunner::for_bootstrap_workspace(
+                    &bootstrap.workspace_root,
+                ))
+            }
+        }
         None => default_wasm_runner(),
     }
 }
@@ -816,7 +828,15 @@ fn workspace_security_policy(
 ) -> WorkspaceSecurityPolicy {
     match bootstrap {
         Some(bootstrap) => {
-            WorkspaceSecurityPolicy::for_bootstrap_workspace(&bootstrap.workspace_root)
+            if let Some(runtime_policy) = bootstrap.runtime_policy.as_ref() {
+                WorkspaceSecurityPolicy::for_mount_roots(
+                    &runtime_policy.mounts.shared,
+                    &runtime_policy.mounts.tmp,
+                    &runtime_policy.mounts.vault,
+                )
+            } else {
+                WorkspaceSecurityPolicy::for_bootstrap_workspace(&bootstrap.workspace_root)
+            }
         }
         None => {
             let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

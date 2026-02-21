@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use types::{
     BootstrapEnvelopeError, ExecCommand, RunnerBootstrapEnvelope, RunnerConfigError,
-    RunnerGlobalConfig, RunnerResourceLimits, RunnerUserConfig, RunnerUserRegistration,
-    SandboxTier, ShellDaemonRequest, SidecarEndpoint, SidecarTransport,
+    RunnerGlobalConfig, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
+    RunnerUserConfig, RunnerUserRegistration, SandboxTier, ShellDaemonRequest, SidecarEndpoint,
+    SidecarTransport,
 };
 
 #[test]
@@ -95,6 +96,22 @@ fn bootstrap_envelope_supports_length_prefixed_round_trip() {
             transport: SidecarTransport::Unix,
             address: "/tmp/shell-daemon.sock".to_owned(),
         }),
+        runtime_policy: Some(RunnerRuntimePolicy {
+            mounts: RunnerResolvedMountPaths {
+                shared: "/workspace/user-1/shared".to_owned(),
+                tmp: "/workspace/user-1/tmp".to_owned(),
+                vault: "/workspace/user-1/vault".to_owned(),
+            },
+            resources: RunnerResourceLimits {
+                max_vcpus: Some(2),
+                max_memory_mib: Some(1024),
+                max_processes: Some(32),
+            },
+            credential_refs: BTreeMap::from([
+                ("github".to_owned(), "vault://github/token".to_owned()),
+                ("slack".to_owned(), "vault://slack/token".to_owned()),
+            ]),
+        }),
     };
 
     let encoded = envelope
@@ -112,6 +129,7 @@ fn bootstrap_envelope_rejects_invalid_length_prefix() {
         sandbox_tier: SandboxTier::Container,
         workspace_root: "/workspace/user-1".to_owned(),
         sidecar_endpoint: None,
+        runtime_policy: None,
     };
 
     let mut encoded = envelope
@@ -129,6 +147,33 @@ fn bootstrap_envelope_rejects_invalid_length_prefix() {
     assert!(matches!(
         error,
         BootstrapEnvelopeError::LengthPrefixMismatch { .. }
+    ));
+}
+
+#[test]
+fn bootstrap_envelope_rejects_invalid_runtime_policy_mounts() {
+    let envelope = RunnerBootstrapEnvelope {
+        user_id: "user-1".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: "/workspace/user-1".to_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: Some(RunnerRuntimePolicy {
+            mounts: RunnerResolvedMountPaths {
+                shared: String::new(),
+                tmp: "/workspace/user-1/tmp".to_owned(),
+                vault: "/workspace/user-1/vault".to_owned(),
+            },
+            resources: RunnerResourceLimits::default(),
+            credential_refs: BTreeMap::new(),
+        }),
+    };
+
+    let error = envelope
+        .to_length_prefixed_json()
+        .expect_err("invalid runtime policy mounts should fail bootstrap encoding");
+    assert!(matches!(
+        error,
+        BootstrapEnvelopeError::InvalidRuntimePolicy { .. }
     ));
 }
 

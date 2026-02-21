@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     future::Future,
     io::{self, Write},
@@ -33,8 +33,9 @@ use tracing::{info, warn};
 use types::{
     BootstrapEnvelopeError, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame, GatewayClientHello,
     GatewayHealthCheck, GatewayServerFrame, RunnerBootstrapEnvelope, RunnerConfigError,
-    RunnerGlobalConfig, RunnerGuestImages, RunnerUserConfig, RunnerUserRegistration, SandboxTier,
-    SidecarEndpoint, SidecarTransport,
+    RunnerGlobalConfig, RunnerGuestImages, RunnerMountPaths, RunnerResolvedMountPaths,
+    RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration,
+    SandboxTier, SidecarEndpoint, SidecarTransport,
 };
 
 mod backend;
@@ -112,6 +113,8 @@ impl Runner {
         let user_id = validate_user_id(&request.user_id)?.to_owned();
         let user_config = self.load_user_config(&user_id)?;
         let workspace = self.provision_user_workspace(&user_id)?;
+        let effective_launch_settings =
+            resolve_effective_launch_settings(&workspace, &user_config)?;
         let sandbox_tier =
             resolve_sandbox_tier(&self.global_config, &user_config, request.insecure);
         let capabilities = resolve_requested_capabilities(sandbox_tier, &user_config);
@@ -121,6 +124,9 @@ impl Runner {
             host_os: host_os.to_owned(),
             sandbox_tier,
             workspace: workspace.clone(),
+            mounts: effective_launch_settings.mounts.clone(),
+            resource_limits: effective_launch_settings.resources.clone(),
+            credential_refs: effective_launch_settings.credential_refs.clone(),
             guest_images: self.global_config.guest_images.clone(),
             requested_shell: capabilities.shell,
             requested_browser: capabilities.browser,
@@ -137,6 +143,7 @@ impl Runner {
             sandbox_tier,
             workspace_root: workspace.root.to_string_lossy().into_owned(),
             sidecar_endpoint,
+            runtime_policy: Some(effective_launch_settings.runtime_policy()),
         };
         bootstrap.validate()?;
         if sandbox_tier == SandboxTier::Process {
@@ -611,11 +618,42 @@ impl RunnerStartup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveMountPaths {
+    pub shared: PathBuf,
+    pub tmp: PathBuf,
+    pub vault: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveLaunchSettings {
+    pub mounts: EffectiveMountPaths,
+    pub resources: RunnerResourceLimits,
+    pub credential_refs: BTreeMap<String, String>,
+}
+
+impl EffectiveLaunchSettings {
+    fn runtime_policy(&self) -> RunnerRuntimePolicy {
+        RunnerRuntimePolicy {
+            mounts: RunnerResolvedMountPaths {
+                shared: self.mounts.shared.to_string_lossy().into_owned(),
+                tmp: self.mounts.tmp.to_string_lossy().into_owned(),
+                vault: self.mounts.vault.to_string_lossy().into_owned(),
+            },
+            resources: self.resources.clone(),
+            credential_refs: self.credential_refs.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxLaunchRequest {
     pub user_id: String,
     pub host_os: String,
     pub sandbox_tier: SandboxTier,
     pub workspace: UserWorkspace,
+    pub mounts: EffectiveMountPaths,
+    pub resource_limits: RunnerResourceLimits,
+    pub credential_refs: BTreeMap<String, String>,
     pub guest_images: RunnerGuestImages,
     pub requested_shell: bool,
     pub requested_browser: bool,
@@ -781,6 +819,60 @@ fn resolve_requested_capabilities(
     RequestedCapabilities { shell, browser }
 }
 
+fn resolve_effective_launch_settings(
+    workspace: &UserWorkspace,
+    user_config: &RunnerUserConfig,
+) -> Result<EffectiveLaunchSettings, RunnerError> {
+    let mounts = resolve_effective_mount_paths(workspace, &user_config.mounts);
+    for path in [&mounts.shared, &mounts.tmp, &mounts.vault] {
+        fs::create_dir_all(path).map_err(|source| RunnerError::ProvisionWorkspace {
+            path: path.clone(),
+            source,
+        })?;
+    }
+
+    Ok(EffectiveLaunchSettings {
+        mounts,
+        resources: user_config.resources.clone(),
+        credential_refs: user_config.credential_refs.clone(),
+    })
+}
+
+fn resolve_effective_mount_paths(
+    workspace: &UserWorkspace,
+    configured: &RunnerMountPaths,
+) -> EffectiveMountPaths {
+    EffectiveMountPaths {
+        shared: resolve_mount_path_override(
+            workspace,
+            configured.shared.as_deref(),
+            &workspace.shared,
+        ),
+        tmp: resolve_mount_path_override(workspace, configured.tmp.as_deref(), &workspace.tmp),
+        vault: resolve_mount_path_override(
+            workspace,
+            configured.vault.as_deref(),
+            &workspace.vault,
+        ),
+    }
+}
+
+fn resolve_mount_path_override(
+    workspace: &UserWorkspace,
+    configured: Option<&str>,
+    default: &Path,
+) -> PathBuf {
+    let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return default.to_path_buf();
+    };
+    let configured = PathBuf::from(configured);
+    if configured.is_absolute() {
+        configured
+    } else {
+        workspace.root.join(configured)
+    }
+}
+
 fn docker_guest_container_name(tier_label: &str, user_id: &str, role: RunnerGuestRole) -> String {
     let user_component = sanitize_container_component(user_id);
     format!("oxydra-{tier_label}-{user_component}-{}", role.as_label())
@@ -815,21 +907,32 @@ async fn launch_docker_container_async(
     container_name: String,
     image: String,
     workspace: UserWorkspace,
+    mounts: EffectiveMountPaths,
+    resource_limits: RunnerResourceLimits,
     labels: HashMap<String, String>,
 ) -> Result<(), RunnerError> {
     let docker = docker_client(&endpoint)?;
     remove_container_if_exists(&docker, &endpoint, &container_name).await?;
 
-    let binds = vec![format!(
-        "{}:{}",
-        workspace.root.to_string_lossy(),
-        workspace.root.to_string_lossy()
-    )];
+    let binds = [workspace.root, mounts.shared, mounts.tmp, mounts.vault]
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|path| format!("{path}:{path}"))
+        .collect::<Vec<_>>();
     let config = ContainerCreateBody {
         image: Some(image),
         labels: Some(labels),
         host_config: Some(HostConfig {
             binds: Some(binds),
+            nano_cpus: resource_limits
+                .max_vcpus
+                .map(|max_vcpus| i64::from(max_vcpus) * 1_000_000_000),
+            memory: resource_limits
+                .max_memory_mib
+                .map(|max_memory_mib| (max_memory_mib as i64) * 1024 * 1024),
+            pids_limit: resource_limits.max_processes.map(i64::from),
             ..HostConfig::default()
         }),
         ..ContainerCreateBody::default()

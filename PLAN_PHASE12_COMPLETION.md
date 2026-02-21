@@ -119,6 +119,7 @@ Degraded/disabled states are present but not fully unified across startup and he
 - Standardize startup status payloads for shell/browser availability, sidecar validity, and sandbox tier posture.
 - Ensure gateway/runner/VM paths expose consistent degraded reasons.
 - Add targeted tests for degraded startup permutations.
+- Most of the code across the workspace in any crates does not have much or any tracing at all. At decent (but don't go overboard) tracing at appropriate levels
 
 ### Acceptance criteria
 - Startup logs and status surfaces consistently represent effective capability state.

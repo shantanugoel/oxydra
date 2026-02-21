@@ -236,6 +236,7 @@ mod tests {
                 transport: SidecarTransport::Unix,
                 address: "/tmp/shell-daemon.sock".to_owned(),
             }),
+            runtime_policy: None,
         }
         .to_length_prefixed_json()
         .expect("bootstrap envelope should encode");

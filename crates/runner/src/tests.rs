@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     net::TcpListener,
     path::{Path, PathBuf},
@@ -372,6 +373,98 @@ fn startup_container_tier_uses_unix_sidecar_transport() {
     let launches = backend.recorded_launches();
     assert_eq!(launches.len(), 1);
     assert_eq!(launches[0].sandbox_tier, SandboxTier::Container);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn startup_applies_mount_resource_and_credential_overrides_to_launch_and_bootstrap() {
+    let root = temp_dir("effective-launch-settings");
+    let global_path = write_runner_config_fixture(&root, "container");
+    let tmp_override = root.join("custom-runtime-tmp");
+    write_user_config(
+        &root.join("users/alice.toml"),
+        &format!(
+            r#"
+[mounts]
+shared = "custom-shared"
+tmp = "{}"
+vault = "custom-vault"
+
+[resources]
+max_vcpus = 2
+max_memory_mib = 1024
+max_processes = 64
+
+[credential_refs]
+github = "vault://github/token"
+slack = "vault://slack/token"
+"#,
+            tmp_override.display()
+        ),
+    );
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+    let startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+    let launch = backend
+        .recorded_launches()
+        .into_iter()
+        .next()
+        .expect("launch should be recorded");
+
+    assert_eq!(
+        launch.mounts.shared,
+        startup.workspace.root.join("custom-shared")
+    );
+    assert_eq!(launch.mounts.tmp, tmp_override);
+    assert_eq!(
+        launch.mounts.vault,
+        startup.workspace.root.join("custom-vault")
+    );
+    assert_eq!(launch.resource_limits.max_vcpus, Some(2));
+    assert_eq!(launch.resource_limits.max_memory_mib, Some(1024));
+    assert_eq!(launch.resource_limits.max_processes, Some(64));
+    assert_eq!(
+        launch.credential_refs,
+        BTreeMap::from([
+            ("github".to_owned(), "vault://github/token".to_owned()),
+            ("slack".to_owned(), "vault://slack/token".to_owned())
+        ])
+    );
+
+    let runtime_policy = startup
+        .bootstrap
+        .runtime_policy
+        .as_ref()
+        .expect("startup bootstrap should include runtime policy");
+    assert_eq!(
+        runtime_policy.mounts.shared,
+        startup
+            .workspace
+            .root
+            .join("custom-shared")
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(
+        runtime_policy.mounts.tmp,
+        launch.mounts.tmp.to_string_lossy().to_string()
+    );
+    assert_eq!(
+        runtime_policy.mounts.vault,
+        startup
+            .workspace
+            .root
+            .join("custom-vault")
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(runtime_policy.resources, launch.resource_limits);
+    assert_eq!(runtime_policy.credential_refs, launch.credential_refs);
 
     let _ = fs::remove_dir_all(root);
 }

@@ -692,6 +692,7 @@ remote_url = "libsql://example-org.turso.io"
             sandbox_tier: SandboxTier::Process,
             workspace_root: "/tmp/oxydra-alice".to_owned(),
             sidecar_endpoint: None,
+            runtime_policy: None,
         }
         .to_length_prefixed_json()
         .expect("process-tier bootstrap frame should encode");
@@ -740,6 +741,7 @@ remote_url = "libsql://example-org.turso.io"
                 transport: SidecarTransport::Unix,
                 address: "tcp://invalid-sidecar-endpoint".to_owned(),
             }),
+            runtime_policy: None,
         }
         .to_length_prefixed_json()
         .expect("sidecar bootstrap frame should encode");

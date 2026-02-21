@@ -81,6 +81,18 @@ impl WasmWorkspaceMounts {
             vault: workspace_root,
         }
     }
+
+    pub fn from_mount_roots(
+        shared: impl AsRef<Path>,
+        tmp: impl AsRef<Path>,
+        vault: impl AsRef<Path>,
+    ) -> Self {
+        Self {
+            shared: shared.as_ref().to_path_buf(),
+            tmp: tmp.as_ref().to_path_buf(),
+            vault: vault.as_ref().to_path_buf(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +198,74 @@ impl HostWasmToolRunner {
             "vault_copyto_read" => self.vault_copyto_read(arguments),
             "vault_copyto_write" => self.vault_copyto_write(arguments),
             _ => Err(format!("unknown wasm tool operation `{tool_name}`")),
+        }
+    }
+
+    fn enforce_capability_profile(
+        &self,
+        tool_name: &str,
+        profile: WasmCapabilityProfile,
+        arguments: &Value,
+    ) -> Result<(), String> {
+        let expected_profile = expected_capability_profile(tool_name)
+            .ok_or_else(|| format!("unknown wasm tool operation `{tool_name}`"))?;
+        if expected_profile != profile {
+            return Err(format!(
+                "tool `{tool_name}` requires capability profile `{:?}`, got `{:?}`",
+                expected_profile, profile
+            ));
+        }
+
+        match tool_name {
+            "file_read" | "file_search" => {
+                let path = required_string(arguments, "path", tool_name)?;
+                self.enforce_mounted_path(profile, &path, false)
+            }
+            "file_list" => {
+                let path = optional_string(arguments, "path").unwrap_or_else(|| ".".to_owned());
+                self.enforce_mounted_path(profile, &path, false)
+            }
+            "file_write" | "file_edit" | "file_delete" => {
+                let path = required_string(arguments, "path", tool_name)?;
+                self.enforce_mounted_path(profile, &path, true)
+            }
+            "vault_copyto_read" => {
+                let source_path = required_string(arguments, "source_path", tool_name)?;
+                self.enforce_mounted_path(profile, &source_path, false)
+            }
+            "vault_copyto_write" => {
+                let destination_path = required_string(arguments, "destination_path", tool_name)?;
+                self.enforce_mounted_path(profile, &destination_path, true)
+            }
+            "web_fetch" | "web_search" => Ok(()),
+            _ => Err(format!("unknown wasm tool operation `{tool_name}`")),
+        }
+    }
+
+    fn enforce_mounted_path(
+        &self,
+        profile: WasmCapabilityProfile,
+        path: &str,
+        write_access: bool,
+    ) -> Result<(), String> {
+        let canonical_target = canonicalize_invocation_path(path, true)?;
+        let mounts = profile.mount_profile(&self.mounts);
+        let allowed_mount = mounts
+            .iter()
+            .find(|mount| path_within_mount(&canonical_target, &mount.path));
+
+        match allowed_mount {
+            Some(mount) if write_access && mount.read_only => Err(format!(
+                "path `{path}` resolved to `{}` requires write access, but mount `{}` is read-only",
+                canonical_target.display(),
+                mount.label
+            )),
+            Some(_) => Ok(()),
+            None => Err(format!(
+                "path `{path}` resolved to `{}` outside capability mounts [{}]",
+                canonical_target.display(),
+                format_mount_roots(&mounts)
+            )),
         }
     }
 
@@ -316,6 +396,12 @@ impl WasmToolRunner for HostWasmToolRunner {
             mounts: profile.mount_profile(&self.mounts),
         };
         self.record_audit(metadata.clone());
+        self.enforce_capability_profile(tool_name, profile, arguments)
+            .map_err(|message| SandboxError::WasmInvocationFailed {
+                tool: tool_name.to_owned(),
+                request_id: request_id.clone(),
+                message,
+            })?;
 
         let output = self
             .execute_operation(tool_name, arguments)
@@ -350,6 +436,88 @@ fn required_string(arguments: &Value, field: &str, tool_name: &str) -> Result<St
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("tool `{tool_name}` requires string argument `{field}`"))
+}
+
+fn expected_capability_profile(tool_name: &str) -> Option<WasmCapabilityProfile> {
+    match tool_name {
+        "file_read" | "file_search" | "file_list" => Some(WasmCapabilityProfile::FileReadOnly),
+        "file_write" | "file_edit" | "file_delete" => Some(WasmCapabilityProfile::FileReadWrite),
+        "web_fetch" | "web_search" => Some(WasmCapabilityProfile::Web),
+        "vault_copyto_read" => Some(WasmCapabilityProfile::VaultReadStep),
+        "vault_copyto_write" => Some(WasmCapabilityProfile::VaultWriteStep),
+        _ => None,
+    }
+}
+
+fn canonicalize_invocation_path(
+    raw_path: &str,
+    allow_missing_leaf: bool,
+) -> Result<PathBuf, String> {
+    let path = raw_path.trim();
+    if path.is_empty() {
+        return Err("path argument must not be empty".to_owned());
+    }
+
+    let target_path = normalize_absolute_path(PathBuf::from(path));
+    if !allow_missing_leaf || target_path.exists() {
+        return fs::canonicalize(&target_path).map_err(|error| {
+            format!(
+                "failed to canonicalize `{}`: {error}",
+                target_path.display()
+            )
+        });
+    }
+
+    let mut existing_ancestor = target_path.as_path();
+    while !existing_ancestor.exists() {
+        existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
+            format!(
+                "path `{}` does not include a canonicalizable parent directory",
+                target_path.display()
+            )
+        })?;
+    }
+    let canonical_ancestor = fs::canonicalize(existing_ancestor).map_err(|error| {
+        format!(
+            "failed to canonicalize parent `{}` for `{}`: {error}",
+            existing_ancestor.display(),
+            target_path.display()
+        )
+    })?;
+    let suffix = target_path
+        .strip_prefix(existing_ancestor)
+        .map_err(|error| {
+            format!(
+                "failed to normalize `{}` from canonical ancestor `{}`: {error}",
+                target_path.display(),
+                existing_ancestor.display()
+            )
+        })?;
+    Ok(canonical_ancestor.join(suffix))
+}
+
+fn path_within_mount(path: &Path, mount_root: &Path) -> bool {
+    let normalized_mount = normalize_absolute_path(mount_root.to_path_buf());
+    let canonical_mount = fs::canonicalize(&normalized_mount).unwrap_or(normalized_mount);
+    path == canonical_mount || path.starts_with(&canonical_mount)
+}
+
+fn normalize_absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
+fn format_mount_roots(mounts: &[WasmMount]) -> String {
+    mounts
+        .iter()
+        .map(|mount| format!("{}={}", mount.label, mount.path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(crate) fn request_with_default_headers(request: RequestBuilder) -> RequestBuilder {
@@ -581,6 +749,70 @@ mod tests {
         assert!(result.metadata.request_id.starts_with("file_read-"));
         assert_eq!(result.metadata.operation_id.as_deref(), Some("operation-1"));
         assert_eq!(result.metadata.profile, WasmCapabilityProfile::FileReadOnly);
+        assert_eq!(runner.audit_log().len(), 1);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn host_runner_denies_paths_outside_capability_mounts() {
+        let workspace_root = unique_workspace("wasm-capability-deny");
+        let outside = env::temp_dir().join(format!(
+            "oxydra-wasm-outside-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        ));
+        fs::write(&outside, "blocked").expect("outside file should be writable");
+
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace_root);
+        let denied = runner
+            .invoke(
+                "file_read",
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({ "path": outside.to_string_lossy() }),
+                None,
+            )
+            .await
+            .expect_err("outside path should be denied by capability mounts");
+        assert!(matches!(
+            denied,
+            SandboxError::WasmInvocationFailed { tool, message, .. }
+                if tool == "file_read" && message.contains("outside capability mounts")
+        ));
+
+        let _ = fs::remove_file(outside);
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn host_runner_rejects_profile_mismatches_before_execution() {
+        let workspace_root = unique_workspace("wasm-profile-mismatch");
+        let target = workspace_root.join(SHARED_DIR_NAME).join("target.txt");
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace_root);
+
+        let denied = runner
+            .invoke(
+                "file_write",
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content": "should-not-write"
+                }),
+                None,
+            )
+            .await
+            .expect_err("profile mismatch should be rejected");
+        assert!(matches!(
+            denied,
+            SandboxError::WasmInvocationFailed { tool, message, .. }
+                if tool == "file_write"
+                    && message.contains("requires capability profile")
+                    && message.contains("FileReadWrite")
+        ));
+        assert!(!target.exists());
         assert_eq!(runner.audit_log().len(), 1);
 
         let _ = fs::remove_dir_all(workspace_root);

@@ -112,15 +112,7 @@ impl RunnerUserConfig {
     pub fn validate(&self) -> Result<(), RunnerConfigError> {
         self.mounts.validate()?;
         self.resources.validate()?;
-
-        for (key, value) in &self.credential_refs {
-            if key.trim().is_empty() {
-                return Err(RunnerConfigError::InvalidCredentialRefKey);
-            }
-            if value.trim().is_empty() {
-                return Err(RunnerConfigError::InvalidCredentialRefValue { key: key.clone() });
-            }
-        }
+        validate_credential_refs(&self.credential_refs)?;
 
         Ok(())
     }
@@ -141,6 +133,40 @@ impl RunnerMountPaths {
         validate_optional_path("shared", self.shared.as_deref())?;
         validate_optional_path("tmp", self.tmp.as_deref())?;
         validate_optional_path("vault", self.vault.as_deref())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerResolvedMountPaths {
+    pub shared: String,
+    pub tmp: String,
+    pub vault: String,
+}
+
+impl RunnerResolvedMountPaths {
+    pub fn validate(&self) -> Result<(), RunnerConfigError> {
+        validate_required_path("shared", &self.shared)?;
+        validate_required_path("tmp", &self.tmp)?;
+        validate_required_path("vault", &self.vault)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerRuntimePolicy {
+    pub mounts: RunnerResolvedMountPaths,
+    #[serde(default)]
+    pub resources: RunnerResourceLimits,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_refs: BTreeMap<String, String>,
+}
+
+impl RunnerRuntimePolicy {
+    pub fn validate(&self) -> Result<(), RunnerConfigError> {
+        self.mounts.validate()?;
+        self.resources.validate()?;
+        validate_credential_refs(&self.credential_refs)?;
         Ok(())
     }
 }
@@ -222,6 +248,8 @@ pub struct RunnerBootstrapEnvelope {
     pub workspace_root: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar_endpoint: Option<SidecarEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_policy: Option<RunnerRuntimePolicy>,
 }
 
 impl RunnerBootstrapEnvelope {
@@ -240,6 +268,13 @@ impl RunnerBootstrapEnvelope {
             return Err(BootstrapEnvelopeError::InvalidField {
                 field: "sidecar_endpoint.address",
             });
+        }
+        if let Some(runtime_policy) = &self.runtime_policy {
+            runtime_policy.validate().map_err(|source| {
+                BootstrapEnvelopeError::InvalidRuntimePolicy {
+                    detail: source.to_string(),
+                }
+            })?;
         }
         Ok(())
     }
@@ -313,6 +348,8 @@ pub enum BootstrapEnvelopeError {
     EnvelopeTooLarge { payload_bytes: usize },
     #[error("bootstrap envelope field `{field}` is invalid")]
     InvalidField { field: &'static str },
+    #[error("bootstrap runtime policy is invalid: {detail}")]
+    InvalidRuntimePolicy { detail: String },
     #[error("bootstrap envelope serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -424,6 +461,27 @@ fn validate_optional_path(
 ) -> Result<(), RunnerConfigError> {
     if path.is_some_and(|value| value.trim().is_empty()) {
         return Err(RunnerConfigError::InvalidMountPath { mount });
+    }
+    Ok(())
+}
+
+fn validate_required_path(mount: &'static str, path: &str) -> Result<(), RunnerConfigError> {
+    if path.trim().is_empty() {
+        return Err(RunnerConfigError::InvalidMountPath { mount });
+    }
+    Ok(())
+}
+
+fn validate_credential_refs(
+    credential_refs: &BTreeMap<String, String>,
+) -> Result<(), RunnerConfigError> {
+    for (key, value) in credential_refs {
+        if key.trim().is_empty() {
+            return Err(RunnerConfigError::InvalidCredentialRefKey);
+        }
+        if value.trim().is_empty() {
+            return Err(RunnerConfigError::InvalidCredentialRefValue { key: key.clone() });
+        }
     }
     Ok(())
 }

@@ -59,17 +59,22 @@ enum FileAccessMode {
 impl WorkspaceSecurityPolicy {
     pub fn for_bootstrap_workspace(workspace_root: impl AsRef<Path>) -> Self {
         let workspace_root = workspace_root.as_ref();
-        Self::new(
-            vec![
-                workspace_root.join(SHARED_DIR_NAME),
-                workspace_root.join(TMP_DIR_NAME),
-                workspace_root.join(VAULT_DIR_NAME),
-            ],
-            vec![
-                workspace_root.join(SHARED_DIR_NAME),
-                workspace_root.join(TMP_DIR_NAME),
-            ],
+        Self::for_mount_roots(
+            workspace_root.join(SHARED_DIR_NAME),
+            workspace_root.join(TMP_DIR_NAME),
+            workspace_root.join(VAULT_DIR_NAME),
         )
+    }
+
+    pub fn for_mount_roots(
+        shared: impl AsRef<Path>,
+        tmp: impl AsRef<Path>,
+        vault: impl AsRef<Path>,
+    ) -> Self {
+        let shared = shared.as_ref().to_path_buf();
+        let tmp = tmp.as_ref().to_path_buf();
+        let vault = vault.as_ref().to_path_buf();
+        Self::new(vec![shared.clone(), tmp.clone(), vault], vec![shared, tmp])
     }
 
     pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Self {

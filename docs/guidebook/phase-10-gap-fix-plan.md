@@ -11,6 +11,11 @@ This plan addresses three Phase 10 gaps that must be resolved before Phase 12 (T
 
 **Execution order:** A1 → A2 → C → B-docker → B-microvm-linux → B-microvm-macos → Verification
 
+**Assumptions/constraints:**
+- Runner stays in the foreground (no double-fork); lifecycle managed by systemd/launchd/TUI.
+- Single Tokio runtime in `main`; avoid nested runtime helpers (e.g., `run_async`).
+- Config changes are non-backward-compatible
+
 ---
 
 ## Step 1: Runner Persistent Daemon (Gap A — Control Plane Wiring)
@@ -77,6 +82,7 @@ if args.daemon {
 - **Signal handling**: SIGINT/SIGTERM triggers `startup.shutdown()` which calls `launch.shutdown()` → kills child processes.
 - **Stale socket cleanup**: Remove socket file on startup if it exists (avoids "address already in use" after crash).
 - **Socket path convention**: `<workspace>/tmp/runner-control.sock` — discoverable by TUI/ops via the workspace layout.
+- **Single runtime**: Avoid nested Tokio runtimes by keeping all async work on the same runtime in `main`.
 
 ### 1.4 Tests to add
 
@@ -185,7 +191,14 @@ After `spawn_process_guest` / `spawn_process_guest_with_startup_stdin` returns a
 - Store log pump handles in `RunnerGuestHandle` (new field: `log_tasks: Vec<tokio::task::JoinHandle<()>>`).
 - In `RunnerGuestHandle::shutdown()`, after killing the child, await log tasks with a 2-second timeout.
 
-### 2.5 Docker container log capture
+### 2.5 MicroVM log capture (Firecracker process)
+
+Firecracker is spawned as a host process. Pipe its stdout/stderr into log files
+via the same log pump mechanism (e.g., `firecracker.stdout.log` and
+`firecracker.stderr.log`), and store the pump handles on `RunnerGuestHandle`
+for shutdown cleanup.
+
+### 2.6 Docker container log capture
 
 For Docker containers (launched via bollard, detached), use one of:
 - **Option A (simpler):** After `start_container`, spawn a `docker logs -f <container_name>` process and pipe its stdout/stderr to log files.
@@ -193,7 +206,7 @@ For Docker containers (launched via bollard, detached), use one of:
 
 Prefer Option B since bollard is already a dependency.
 
-### 2.6 Surface log paths in control plane responses
+### 2.7 Surface log paths in control plane responses
 
 Add to `RunnerControlHealthStatus` in `types/runner.rs`:
 
@@ -204,7 +217,7 @@ pub log_dir: Option<String>,
 
 Populate from `startup.workspace.logs` in `handle_control` → `HealthCheck` branch.
 
-### 2.7 Tests to add
+### 2.8 Tests to add
 
 - Unit test: verify log files are created and contain expected output after a guest writes to stdout.
 - Integration test: start a process-tier guest that echoes to stdout, verify log file contents.
@@ -625,6 +638,7 @@ All of these must pass before the gaps are considered resolved:
    - Sending `ShutdownUser` causes clean exit.
    - Guest stdout/stderr appears in `<workspace>/logs/`.
 5. **`cargo deny check`**, **`cargo clippy`**, **`cargo fmt --check`** — all pass.
+6. Update the file docs/guidebook/15-progressive-build-plan.md to mark these gaps as completed/remove as needed.
 
 ---
 

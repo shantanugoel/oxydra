@@ -234,6 +234,9 @@ fn runner_control_response_round_trips() {
         browser_available: false,
         shutdown: false,
         message: Some("ready".to_owned()),
+        log_dir: Some("/tmp/workspaces/alice/logs".to_owned()),
+        runtime_pid: Some(12345),
+        runtime_container_name: None,
     });
     let encoded = serde_json::to_string(&response).expect("runner control response should encode");
     let decoded: RunnerControlResponse =

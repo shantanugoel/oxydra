@@ -17,7 +17,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 7 | Anthropic provider + config + switching | **Complete** | Anthropic impl, figment config, ReliableProvider. **Gap: streaming is a shim** |
 | 8 | Memory trait + libSQL persistence | **Complete** | Memory trait, libSQL, SQL migrations, session management |
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
-| 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. **Gaps:** non-process bootstrapping incomplete (container/microvm args + bootstrap), linux microvm config mismatch, runner control plane not wired (logs/shutdown) |
+| 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. **Gap: WASM isolation is simulated (host-based)** |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server. **Gaps:** TUI rendering + interactive client missing; `runner --tui` is probe-only |
 | 13 | Model catalog + provider registry | Planned | |
@@ -210,10 +210,10 @@ Built the foundation layer with zero internal dependencies:
 - `ShellSession` / `BrowserSession` traits with `VsockShellSession` and `LocalProcessShellSession`
 - `--insecure` mode: Process tier, no VM/container, shell/browser tools disabled, warning emitted
 
-**Gaps / follow-ups to complete Phase 10:**
-- **Container/microvm bootstrapping:** pass `--user-id`/`--workspace-root` consistently and deliver bootstrap envelope to non-process guests (eg. via mounted file, env var, or stdin bridge) so sidecar/runtime policy wiring matches Process tier.
-- **Runner control plane:** wire `RunnerStartup::serve_control_unix_listener` (or equivalent) so a persistent runner daemon can expose health, graceful shutdown, and centralized log capture.
-- **Linux microvm config:** clarify whether `guest_images.*` should be Firecracker config files vs OCI tags; update config schema + validation accordingly.
+**Phase 10 gaps — resolved:**
+- ~~**Container/microvm bootstrapping:**~~ Bootstrap envelope is now written to a file (`workspace.tmp/bootstrap/runner_bootstrap.json`) before launch and bind-mounted into containers at `/run/oxydra/bootstrap` with `OXYDRA_BOOTSTRAP_FILE` env var. MicroVM guests receive it via base64-encoded `boot_args` injection into Firecracker config. macOS microvm inherits the container path via Docker.
+- ~~**Runner control plane:**~~ `--daemon` flag added; daemon loop binds a Unix control socket, serves health/shutdown RPCs via `serve_control_unix_listener`, captures logs from stdout/stderr via log pump threads, and cleans up the socket on shutdown.
+- ~~**Linux microvm config:**~~ `RunnerGuestImages` now has dedicated `firecracker_oxydra_vm_config` and `firecracker_shell_vm_config` fields (separate from OCI image tags). `launch_microvm_linux` validates their presence and uses `generate_firecracker_config()` to produce runtime-specific configs with bootstrap injection.
 
 ### Phase 11: Security Policy + WASM Tool Isolation
 
@@ -389,9 +389,9 @@ The five identified gaps are incorporated as additional work items:
 | WASM tool isolation (simulated → real) | Phase 11 | Before Phase 15 (multi-agent needs hard isolation boundaries) | High |
 | OpenAI ResponsesProvider | Phase 2 | Phase 13 (provider registry + Responses provider implementation) | Medium |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
-| Runner control plane + persistent daemon + VM log capture | Phase 10 | Before Phase 12 (TUI/ops need lifecycle control) | High |
-| Container/microvm bootstrap wiring (args + bootstrap-stdin + envelope) | Phase 10 | Before Phase 12 (runtime needs correct startup status) | Critical |
-| Linux microvm config input mismatch (Firecracker vs OCI tags) | Phase 10 | Before Phase 12 (microvm tier must be launchable) | High |
+| ~~Runner control plane + persistent daemon + VM log capture~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — daemon flag, Unix control socket, log pump threads | ~~High~~ |
+| ~~Container/microvm bootstrap wiring (args + bootstrap-stdin + envelope)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — bootstrap file written pre-launch, bind-mounted into containers, injected into FC boot_args | ~~Critical~~ |
+| ~~Linux microvm config input mismatch (Firecracker vs OCI tags)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — dedicated firecracker config fields in RunnerGuestImages, generate_firecracker_config() | ~~High~~ |
 
 These gaps do not block any currently completed phase's functionality but should be resolved before the phases that depend on them.
 

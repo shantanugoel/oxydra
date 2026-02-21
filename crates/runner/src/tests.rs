@@ -866,3 +866,375 @@ async fn read_control_response(stream: &mut tokio::io::DuplexStream) -> RunnerCo
         .expect("runner control response frame should be present");
     serde_json::from_slice(&frame).expect("runner control response should decode")
 }
+
+// ---------------------------------------------------------------------------
+//  Bootstrap file and Firecracker config tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bootstrap_file_written_with_correct_content_for_non_process_tier() {
+    let root = temp_dir("bootstrap-file-write");
+    let workspace = provision_user_workspace(root.join("workspace-root"), "alice")
+        .expect("workspace should provision");
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: workspace.root.to_string_lossy().into_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: None,
+    };
+    let path =
+        write_bootstrap_file(&workspace, &bootstrap).expect("bootstrap file should be written");
+
+    assert!(path.exists(), "bootstrap file should exist on disk");
+    assert!(
+        path.starts_with(&workspace.tmp),
+        "bootstrap file should be under workspace.tmp"
+    );
+    assert_eq!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("runner_bootstrap.json"),
+    );
+
+    let content = fs::read_to_string(&path).expect("bootstrap file should be readable");
+    let decoded: RunnerBootstrapEnvelope =
+        serde_json::from_str(&content).expect("bootstrap file should contain valid JSON");
+    assert_eq!(decoded.user_id, "alice");
+    assert_eq!(decoded.sandbox_tier, SandboxTier::Container);
+
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(&path)
+            .expect("bootstrap file metadata should load")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o400, "bootstrap file should be read-only for owner");
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn container_tier_launch_request_includes_bootstrap_file() {
+    let root = temp_dir("container-bootstrap-req");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+    let _startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+    assert!(
+        launches[0].bootstrap_file.is_some(),
+        "container tier launch request should include bootstrap_file"
+    );
+    let bfile = launches[0].bootstrap_file.as_ref().unwrap();
+    assert!(bfile.exists(), "bootstrap file should exist on disk");
+    let content = fs::read_to_string(bfile).expect("bootstrap file should be readable");
+    let decoded: RunnerBootstrapEnvelope =
+        serde_json::from_str(&content).expect("bootstrap file should contain valid JSON");
+    assert_eq!(decoded.user_id, "alice");
+    assert_eq!(decoded.sandbox_tier, SandboxTier::Container);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn process_tier_launch_request_has_no_bootstrap_file() {
+    let root = temp_dir("process-no-bootstrap-file");
+    let global_path = write_runner_config_fixture(&root, "micro_vm");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+    let _startup = runner
+        .start_user_for_host(
+            RunnerStartRequest {
+                user_id: "alice".to_owned(),
+                insecure: true,
+            },
+            "linux",
+        )
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+    assert!(
+        launches[0].bootstrap_file.is_none(),
+        "process tier launch request should not include bootstrap_file"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn firecracker_config_injects_bootstrap_into_boot_args() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+
+    let root = temp_dir("fc-config-inject");
+    let template_path = root.join("template.json");
+    let output_path = root.join("generated.json");
+    let bootstrap_path = root.join("bootstrap.json");
+
+    let template = serde_json::json!({
+        "boot-source": {
+            "kernel_image_path": "/images/vmlinux",
+            "boot_args": "console=ttyS0 reboot=k"
+        },
+        "drives": [{"drive_id": "rootfs"}],
+        "machine-config": {"vcpu_count": 2}
+    });
+    fs::write(
+        &template_path,
+        serde_json::to_string_pretty(&template).unwrap(),
+    )
+    .expect("template should be writable");
+
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::MicroVm,
+        workspace_root: "/workspace".to_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: None,
+    };
+    let bootstrap_json = serde_json::to_vec_pretty(&bootstrap).unwrap();
+    fs::write(&bootstrap_path, &bootstrap_json).expect("bootstrap file should be writable");
+
+    backend::generate_firecracker_config(
+        template_path.to_str().unwrap(),
+        Some(bootstrap_path.as_path()),
+        &output_path,
+    )
+    .expect("config generation should succeed");
+
+    let generated_content =
+        fs::read_to_string(&output_path).expect("generated config should exist");
+    let generated: serde_json::Value =
+        serde_json::from_str(&generated_content).expect("generated config should be valid JSON");
+
+    // Template fields preserved
+    assert_eq!(
+        generated["drives"][0]["drive_id"].as_str(),
+        Some("rootfs"),
+        "template fields should be preserved"
+    );
+    assert_eq!(
+        generated["machine-config"]["vcpu_count"].as_u64(),
+        Some(2),
+        "machine-config should be preserved"
+    );
+
+    // Boot args should contain existing args plus the bootstrap
+    let boot_args = generated["boot-source"]["boot_args"]
+        .as_str()
+        .expect("boot_args should be a string");
+    assert!(
+        boot_args.starts_with("console=ttyS0 reboot=k"),
+        "existing boot_args should be preserved"
+    );
+    assert!(
+        boot_args.contains("oxydra.bootstrap_b64="),
+        "bootstrap should be injected into boot_args"
+    );
+
+    // Extract and decode the bootstrap payload
+    let b64_payload = boot_args
+        .split("oxydra.bootstrap_b64=")
+        .nth(1)
+        .expect("bootstrap key should be present");
+    let decoded_bytes = BASE64_STANDARD
+        .decode(b64_payload.trim())
+        .expect("base64 payload should decode");
+    let decoded: RunnerBootstrapEnvelope =
+        serde_json::from_slice(&decoded_bytes).expect("decoded payload should be valid bootstrap");
+    assert_eq!(decoded.user_id, "alice");
+    assert_eq!(decoded.sandbox_tier, SandboxTier::MicroVm);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn firecracker_config_without_bootstrap_copies_template() {
+    let root = temp_dir("fc-config-no-bootstrap");
+    let template_path = root.join("template.json");
+    let output_path = root.join("generated.json");
+
+    let template = serde_json::json!({
+        "boot-source": {
+            "kernel_image_path": "/images/vmlinux",
+            "boot_args": "console=ttyS0"
+        },
+        "drives": [{"drive_id": "rootfs"}]
+    });
+    fs::write(
+        &template_path,
+        serde_json::to_string_pretty(&template).unwrap(),
+    )
+    .expect("template should be writable");
+
+    backend::generate_firecracker_config(template_path.to_str().unwrap(), None, &output_path)
+        .expect("config generation without bootstrap should succeed");
+
+    let generated: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&output_path).unwrap())
+            .expect("generated config should be valid JSON");
+    assert_eq!(
+        generated["boot-source"]["boot_args"].as_str(),
+        Some("console=ttyS0"),
+        "boot_args should be unchanged when no bootstrap is injected"
+    );
+    assert_eq!(generated["drives"][0]["drive_id"].as_str(), Some("rootfs"),);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn firecracker_config_rejects_oversized_bootstrap() {
+    let root = temp_dir("fc-config-oversized");
+    let template_path = root.join("template.json");
+    let output_path = root.join("generated.json");
+    let bootstrap_path = root.join("bootstrap.json");
+
+    let template = serde_json::json!({
+        "boot-source": {
+            "kernel_image_path": "/images/vmlinux",
+            "boot_args": "console=ttyS0"
+        }
+    });
+    fs::write(
+        &template_path,
+        serde_json::to_string_pretty(&template).unwrap(),
+    )
+    .expect("template should be writable");
+
+    // Create a bootstrap with a very large workspace_root to exceed the limit
+    let large_path = "x".repeat(4096);
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::MicroVm,
+        workspace_root: large_path,
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: None,
+    };
+    let bootstrap_json = serde_json::to_vec_pretty(&bootstrap).unwrap();
+    fs::write(&bootstrap_path, &bootstrap_json).expect("bootstrap file should be writable");
+
+    let result = backend::generate_firecracker_config(
+        template_path.to_str().unwrap(),
+        Some(bootstrap_path.as_path()),
+        &output_path,
+    );
+    assert!(result.is_err(), "oversized bootstrap should be rejected");
+    let error = result.unwrap_err();
+    let error_msg = error.to_string();
+    assert!(
+        error_msg.contains("too large") || error_msg.contains("cmdline"),
+        "error should mention size limit: {error_msg}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn health_check_includes_log_dir_and_metadata() {
+    let root = temp_dir("health-check-metadata");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend)
+        .expect("runner should initialize");
+    let startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    let (mut client, server) = tokio::io::duplex(8192);
+    let server_task = tokio::spawn(async move {
+        let mut startup = startup;
+        startup
+            .serve_control_stream(server)
+            .await
+            .expect("control stream should serve");
+        startup
+    });
+
+    let health = send_control_request(&mut client, &RunnerControl::HealthCheck).await;
+    match health {
+        RunnerControlResponse::HealthStatus(status) => {
+            assert!(status.healthy);
+            assert!(
+                status.log_dir.is_some(),
+                "health status should include log_dir"
+            );
+            let log_dir = status.log_dir.as_ref().unwrap();
+            assert!(
+                log_dir.contains("logs"),
+                "log_dir should point to logs directory: {log_dir}"
+            );
+            // Simulated handles have pid: None
+            assert_eq!(
+                status.runtime_pid, None,
+                "simulated handle should have no runtime_pid"
+            );
+            // Mock backend creates Simulated lifecycle, not Docker
+            assert_eq!(
+                status.runtime_container_name, None,
+                "simulated handle should have no container name"
+            );
+        }
+        other => panic!("expected HealthStatus, got {other:?}"),
+    }
+
+    // Shut down to let server task complete
+    let _ = send_control_request(
+        &mut client,
+        &RunnerControl::ShutdownUser {
+            user_id: "alice".to_owned(),
+        },
+    )
+    .await;
+    drop(client);
+    let _ = server_task.await;
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn microvm_tier_launch_request_includes_bootstrap_file() {
+    let root = temp_dir("microvm-bootstrap-req");
+    let global_path = write_runner_config_fixture(&root, "micro_vm");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+    let _startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+    assert!(
+        launches[0].bootstrap_file.is_some(),
+        "microvm tier launch request should include bootstrap_file"
+    );
+    let bfile = launches[0].bootstrap_file.as_ref().unwrap();
+    assert!(bfile.exists(), "bootstrap file should exist on disk");
+    let decoded: RunnerBootstrapEnvelope =
+        serde_json::from_str(&fs::read_to_string(bfile).unwrap())
+            .expect("bootstrap file should contain valid bootstrap envelope");
+    assert_eq!(decoded.user_id, "alice");
+    assert_eq!(decoded.sandbox_tier, SandboxTier::MicroVm);
+
+    let _ = fs::remove_dir_all(root);
+}

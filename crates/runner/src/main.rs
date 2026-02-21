@@ -1,7 +1,9 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use runner::{Runner, RunnerError, RunnerStartRequest, RunnerTuiConnectRequest};
+use runner::{
+    Runner, RunnerControlTransportError, RunnerError, RunnerStartRequest, RunnerTuiConnectRequest,
+};
 use thiserror::Error;
 use types::init_tracing;
 
@@ -18,6 +20,8 @@ struct CliArgs {
     insecure: bool,
     #[arg(long = "tui")]
     tui: bool,
+    #[arg(long = "daemon")]
+    daemon: bool,
 }
 
 #[derive(Debug, Error)]
@@ -26,6 +30,8 @@ enum CliError {
     Arguments(String),
     #[error(transparent)]
     Runner(#[from] RunnerError),
+    #[error(transparent)]
+    ControlTransport(#[from] RunnerControlTransportError),
 }
 
 fn main() -> ExitCode {
@@ -53,7 +59,7 @@ fn run() -> Result<(), CliError> {
         return Ok(());
     }
 
-    let startup = runner.start_user(RunnerStartRequest {
+    let mut startup = runner.start_user(RunnerStartRequest {
         user_id: user_id.clone(),
         insecure: args.insecure,
     })?;
@@ -70,8 +76,47 @@ fn run() -> Result<(), CliError> {
     for reason in &startup.startup_status.degraded_reasons {
         println!("degraded_reason={:?}:{}", reason.code, reason.detail);
     }
-    for warning in startup.warnings {
+    for warning in &startup.warnings {
         println!("warning={warning}");
+    }
+
+    if args.daemon {
+        let control_socket_path = startup.workspace.tmp.join("runner-control.sock");
+        let _ = std::fs::remove_file(&control_socket_path);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|source| RunnerError::AsyncRuntimeInit { source })?;
+
+        rt.block_on(async {
+            let listener =
+                tokio::net::UnixListener::bind(&control_socket_path).map_err(|source| {
+                    RunnerError::GuestLifecycle {
+                        action: "bind_control_socket",
+                        role: runner::RunnerGuestRole::OxydraVm,
+                        program: "runner".to_owned(),
+                        source,
+                    }
+                })?;
+
+            println!("control_socket={}", control_socket_path.display());
+
+            let shutdown_signal = tokio::signal::ctrl_c();
+            tokio::pin!(shutdown_signal);
+
+            tokio::select! {
+                result = startup.serve_control_unix_listener(listener) => {
+                    result?;
+                }
+                _ = &mut shutdown_signal => {
+                    startup.shutdown()?;
+                }
+            }
+
+            let _ = std::fs::remove_file(&control_socket_path);
+            Ok::<(), CliError>(())
+        })?;
     }
 
     Ok(())
@@ -110,6 +155,7 @@ mod tests {
         assert_eq!(args.user_id, None);
         assert!(!args.insecure);
         assert!(!args.tui);
+        assert!(!args.daemon);
     }
 
     #[test]
@@ -118,6 +164,14 @@ mod tests {
             .expect("args should parse");
         assert!(args.tui);
         assert_eq!(args.user_id.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_daemon_flag() {
+        let args =
+            CliArgs::try_parse_from(["runner", "--daemon"]).expect("daemon args should parse");
+        assert!(args.daemon);
+        assert!(!args.tui);
     }
 
     #[test]

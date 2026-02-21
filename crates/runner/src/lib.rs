@@ -51,6 +51,7 @@ pub const PROCESS_TIER_WARNING: &str = "Process tier is insecure: isolation is d
 const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
+const LOGS_DIR_NAME: &str = "logs";
 const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
 
 const FIRECRACKER_BINARY: &str = "firecracker";
@@ -123,6 +124,49 @@ impl Runner {
             resolve_sandbox_tier(&self.global_config, &user_config, request.insecure);
         let capabilities = resolve_requested_capabilities(sandbox_tier, &user_config);
 
+        // Pre-compute the sidecar endpoint so we can build the bootstrap envelope
+        // before launching the backend. Container/MicroVM tiers need the bootstrap
+        // file on disk before the guest process starts.
+        let pre_sidecar_endpoint = if capabilities.shell || capabilities.browser {
+            Some(pre_compute_sidecar_endpoint(
+                sandbox_tier,
+                host_os,
+                &workspace,
+            ))
+        } else {
+            None
+        };
+
+        let pre_startup_status = build_startup_status_report(
+            sandbox_tier,
+            capabilities,
+            // Optimistically assume sidecar will launch for the bootstrap envelope.
+            // If it fails, the guest reads a slightly stale `sidecar_available` but
+            // the control plane will report the real value at health-check time.
+            capabilities.shell && pre_sidecar_endpoint.is_some(),
+            capabilities.browser && pre_sidecar_endpoint.is_some(),
+            pre_sidecar_endpoint.is_some(),
+            &[], // degraded reasons are unknown before launch
+        );
+
+        let bootstrap = RunnerBootstrapEnvelope {
+            user_id: user_id.clone(),
+            sandbox_tier,
+            workspace_root: workspace.root.to_string_lossy().into_owned(),
+            sidecar_endpoint: pre_sidecar_endpoint,
+            runtime_policy: Some(effective_launch_settings.runtime_policy()),
+            startup_status: Some(pre_startup_status),
+        };
+        bootstrap.validate()?;
+
+        // For non-Process tiers, write the bootstrap to a file that the guest
+        // can read (mounted into the container or injected into boot_args).
+        let bootstrap_file = if sandbox_tier != SandboxTier::Process {
+            Some(write_bootstrap_file(&workspace, &bootstrap)?)
+        } else {
+            None
+        };
+
         let mut launch = self.backend.launch(SandboxLaunchRequest {
             user_id: user_id.clone(),
             host_os: host_os.to_owned(),
@@ -134,6 +178,7 @@ impl Runner {
             guest_images: self.global_config.guest_images.clone(),
             requested_shell: capabilities.shell,
             requested_browser: capabilities.browser,
+            bootstrap_file,
         })?;
 
         let sidecar_endpoint = if launch.shell_available || launch.browser_available {
@@ -150,15 +195,7 @@ impl Runner {
             &launch.degraded_reasons,
         );
 
-        let bootstrap = RunnerBootstrapEnvelope {
-            user_id: user_id.clone(),
-            sandbox_tier,
-            workspace_root: workspace.root.to_string_lossy().into_owned(),
-            sidecar_endpoint,
-            runtime_policy: Some(effective_launch_settings.runtime_policy()),
-            startup_status: Some(startup_status.clone()),
-        };
-        bootstrap.validate()?;
+        // For Process tier, send bootstrap via stdin (existing behavior).
         if sandbox_tier == SandboxTier::Process {
             launch.launch.runtime.send_startup_bootstrap(&bootstrap)?;
         }
@@ -289,8 +326,9 @@ pub fn provision_user_workspace(
     let shared = root.join(SHARED_DIR_NAME);
     let tmp = root.join(TMP_DIR_NAME);
     let vault = root.join(VAULT_DIR_NAME);
+    let logs = root.join(LOGS_DIR_NAME);
 
-    for path in [&root, &shared, &tmp, &vault] {
+    for path in [&root, &shared, &tmp, &vault, &logs] {
         fs::create_dir_all(path).map_err(|source| RunnerError::ProvisionWorkspace {
             path: path.clone(),
             source,
@@ -302,6 +340,7 @@ pub fn provision_user_workspace(
         shared,
         tmp,
         vault,
+        logs,
     })
 }
 
@@ -362,6 +401,7 @@ pub struct RunnerGuestHandle {
     pub command: RunnerCommandSpec,
     pub pid: Option<u32>,
     lifecycle: RunnerGuestLifecycle,
+    log_tasks: Vec<std::thread::JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -399,6 +439,7 @@ impl RunnerGuestHandle {
             command,
             pid: Some(child.id()),
             lifecycle: RunnerGuestLifecycle::Process { child },
+            log_tasks: Vec::new(),
         }
     }
 
@@ -416,6 +457,7 @@ impl RunnerGuestHandle {
                 endpoint,
                 container_name,
             }),
+            log_tasks: Vec::new(),
         }
     }
 
@@ -425,6 +467,7 @@ impl RunnerGuestHandle {
             command,
             pid: None,
             lifecycle: RunnerGuestLifecycle::Simulated,
+            log_tasks: Vec::new(),
         }
     }
 
@@ -505,6 +548,11 @@ impl RunnerGuestHandle {
                 shutdown_docker_container(handle)?;
             }
             RunnerGuestLifecycle::Simulated => {}
+        }
+
+        // Join log pump threads with a timeout so we don't hang on shutdown.
+        for handle in self.log_tasks.drain(..) {
+            let _ = handle.join();
         }
 
         self.pid = None;
@@ -614,6 +662,7 @@ pub struct UserWorkspace {
     pub shared: PathBuf,
     pub tmp: PathBuf,
     pub vault: PathBuf,
+    pub logs: PathBuf,
 }
 
 #[derive(Debug)]
@@ -653,6 +702,12 @@ impl RunnerStartup {
         match request {
             RunnerControl::HealthCheck => {
                 let startup_status = self.control_startup_status();
+                let runtime_container_name = match &self.launch.runtime.lifecycle {
+                    RunnerGuestLifecycle::DockerContainer(handle) => {
+                        Some(handle.container_name.clone())
+                    }
+                    _ => None,
+                };
                 let status = RunnerControlHealthStatus {
                     user_id: self.user_id.clone(),
                     healthy: !self.shutdown_complete,
@@ -662,6 +717,9 @@ impl RunnerStartup {
                     browser_available: startup_status.browser_available,
                     shutdown: self.shutdown_complete,
                     message: self.control_health_message(),
+                    log_dir: Some(self.workspace.logs.to_string_lossy().into_owned()),
+                    runtime_pid: self.launch.runtime.pid,
+                    runtime_container_name,
                 };
                 info!(
                     user_id = %self.user_id,
@@ -841,6 +899,8 @@ pub struct SandboxLaunchRequest {
     pub guest_images: RunnerGuestImages,
     pub requested_shell: bool,
     pub requested_browser: bool,
+    /// Path to the bootstrap envelope JSON file, pre-written for Container/MicroVM tiers.
+    pub bootstrap_file: Option<PathBuf>,
 }
 
 impl SandboxLaunchRequest {
@@ -898,6 +958,18 @@ pub enum RunnerError {
     InvalidUserId { user_id: String },
     #[error("microvm tier is unsupported on host `{os}`")]
     UnsupportedMicroVmHost { os: String },
+    #[error("linux microvm requires `{field}` in [guest_images] config")]
+    MissingFirecrackerConfig { field: &'static str },
+    #[error("failed to parse firecracker config `{path}`: {source}")]
+    ParseFirecrackerConfig {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(
+        "bootstrap payload too large for kernel cmdline: {bytes} bytes exceeds max {max_bytes} bytes"
+    )]
+    BootstrapTooLargeForCmdline { bytes: usize, max_bytes: usize },
     #[error("failed to launch `{role}` guest with `{program}`: {source}")]
     LaunchGuest {
         role: RunnerGuestRole,
@@ -1039,6 +1111,36 @@ fn resolve_requested_capabilities(
     RequestedCapabilities { shell, browser }
 }
 
+/// Pre-computes the sidecar endpoint address so the bootstrap envelope can be
+/// written to disk before launching the backend. The addresses are deterministic
+/// based on tier, host OS, and workspace layout.
+fn pre_compute_sidecar_endpoint(
+    sandbox_tier: SandboxTier,
+    host_os: &str,
+    workspace: &UserWorkspace,
+) -> SidecarEndpoint {
+    match (sandbox_tier, host_os) {
+        (SandboxTier::MicroVm, "linux") => SidecarEndpoint {
+            transport: SidecarTransport::Vsock,
+            address: format!(
+                "unix://{}",
+                workspace
+                    .tmp
+                    .join("shell-daemon-vsock.sock")
+                    .to_string_lossy()
+            ),
+        },
+        _ => SidecarEndpoint {
+            transport: SidecarTransport::Unix,
+            address: workspace
+                .tmp
+                .join("shell-daemon.sock")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    }
+}
+
 fn resolve_effective_launch_settings(
     workspace: &UserWorkspace,
     user_config: &RunnerUserConfig,
@@ -1122,7 +1224,7 @@ fn docker_guest_labels(
     ])
 }
 
-async fn launch_docker_container_async(
+struct DockerContainerLaunchParams {
     endpoint: DockerEndpoint,
     container_name: String,
     image: String,
@@ -1130,29 +1232,55 @@ async fn launch_docker_container_async(
     mounts: EffectiveMountPaths,
     resource_limits: RunnerResourceLimits,
     labels: HashMap<String, String>,
-) -> Result<(), RunnerError> {
-    let docker = docker_client(&endpoint)?;
-    remove_container_if_exists(&docker, &endpoint, &container_name).await?;
+    bootstrap_file: Option<PathBuf>,
+}
 
-    let binds = [workspace.root, mounts.shared, mounts.tmp, mounts.vault]
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|path| format!("{path}:{path}"))
-        .collect::<Vec<_>>();
+async fn launch_docker_container_async(
+    params: DockerContainerLaunchParams,
+) -> Result<(), RunnerError> {
+    let docker = docker_client(&params.endpoint)?;
+    remove_container_if_exists(&docker, &params.endpoint, &params.container_name).await?;
+
+    let mut binds: Vec<String> = [
+        params.workspace.root,
+        params.mounts.shared,
+        params.mounts.tmp,
+        params.mounts.vault,
+    ]
+    .into_iter()
+    .map(|path| path.to_string_lossy().into_owned())
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .map(|path| format!("{path}:{path}"))
+    .collect();
+
+    let mut env = Vec::new();
+    if let Some(ref bootstrap_path) = params.bootstrap_file {
+        binds.push(format!(
+            "{}:{}:ro",
+            bootstrap_path.to_string_lossy(),
+            CONTAINER_BOOTSTRAP_MOUNT_PATH
+        ));
+        env.push(format!(
+            "{CONTAINER_BOOTSTRAP_ENV_KEY}={CONTAINER_BOOTSTRAP_MOUNT_PATH}"
+        ));
+    }
+
     let config = ContainerCreateBody {
-        image: Some(image),
-        labels: Some(labels),
+        image: Some(params.image),
+        labels: Some(params.labels),
+        env: if env.is_empty() { None } else { Some(env) },
         host_config: Some(HostConfig {
             binds: Some(binds),
-            nano_cpus: resource_limits
+            nano_cpus: params
+                .resource_limits
                 .max_vcpus
                 .map(|max_vcpus| i64::from(max_vcpus) * 1_000_000_000),
-            memory: resource_limits
+            memory: params
+                .resource_limits
                 .max_memory_mib
                 .map(|max_memory_mib| (max_memory_mib as i64) * 1024 * 1024),
-            pids_limit: resource_limits.max_processes.map(i64::from),
+            pids_limit: params.resource_limits.max_processes.map(i64::from),
             ..HostConfig::default()
         }),
         ..ContainerCreateBody::default()
@@ -1162,24 +1290,34 @@ async fn launch_docker_container_async(
         .create_container(
             Some(
                 CreateContainerOptionsBuilder::new()
-                    .name(&container_name)
+                    .name(&params.container_name)
                     .build(),
             ),
             config,
         )
         .await
         .map_err(|source| {
-            docker_operation_error(&endpoint, "create_container", &container_name, source)
+            docker_operation_error(
+                &params.endpoint,
+                "create_container",
+                &params.container_name,
+                source,
+            )
         })?;
 
     docker
         .start_container(
-            &container_name,
+            &params.container_name,
             None::<bollard::query_parameters::StartContainerOptions>,
         )
         .await
         .map_err(|source| {
-            docker_operation_error(&endpoint, "start_container", &container_name, source)
+            docker_operation_error(
+                &params.endpoint,
+                "start_container",
+                &params.container_name,
+                source,
+            )
         })?;
     Ok(())
 }
@@ -1454,6 +1592,69 @@ fn extract_socket_path(payload: &Value) -> Option<PathBuf> {
         Value::Array(items) => items.iter().find_map(extract_socket_path),
         _ => None,
     }
+}
+
+/// Spawns background threads that read from child stdout/stderr pipes and write
+/// to log files. Returns `JoinHandle`s for cleanup on shutdown.
+fn spawn_log_pump_threads(
+    child: &mut Child,
+    log_dir: &Path,
+    role: RunnerGuestRole,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let mut handles = Vec::new();
+
+    if let Some(stdout) = child.stdout.take() {
+        let path = log_dir.join(format!("{}.stdout.log", role.as_label()));
+        handles.push(std::thread::spawn(move || pump_pipe_to_file(stdout, &path)));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let path = log_dir.join(format!("{}.stderr.log", role.as_label()));
+        handles.push(std::thread::spawn(move || pump_pipe_to_file(stderr, &path)));
+    }
+
+    handles
+}
+
+fn pump_pipe_to_file(pipe: impl std::io::Read, path: &Path) {
+    use std::io::BufRead;
+
+    let reader = std::io::BufReader::new(pipe);
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+const CONTAINER_BOOTSTRAP_MOUNT_PATH: &str = "/run/oxydra/bootstrap";
+const CONTAINER_BOOTSTRAP_ENV_KEY: &str = "OXYDRA_BOOTSTRAP_FILE";
+
+fn write_bootstrap_file(
+    workspace: &UserWorkspace,
+    bootstrap: &RunnerBootstrapEnvelope,
+) -> Result<PathBuf, RunnerError> {
+    let bootstrap_dir = workspace.tmp.join("bootstrap");
+    fs::create_dir_all(&bootstrap_dir).map_err(|source| RunnerError::ProvisionWorkspace {
+        path: bootstrap_dir.clone(),
+        source,
+    })?;
+    let bootstrap_path = bootstrap_dir.join("runner_bootstrap.json");
+    let payload = serde_json::to_vec_pretty(bootstrap).map_err(BootstrapEnvelopeError::from)?;
+    fs::write(&bootstrap_path, &payload).map_err(|source| RunnerError::ProvisionWorkspace {
+        path: bootstrap_path.clone(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&bootstrap_path, fs::Permissions::from_mode(0o400));
+    }
+    Ok(bootstrap_path)
 }
 
 fn ensure_firecracker_api_ready(api_socket_path: PathBuf) -> Result<(), RunnerError> {

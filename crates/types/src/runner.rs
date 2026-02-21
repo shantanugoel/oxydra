@@ -73,6 +73,12 @@ pub struct RunnerGuestImages {
     pub oxydra_vm: String,
     #[serde(default = "default_shell_vm_image")]
     pub shell_vm: String,
+    /// Firecracker JSON config file path for oxydra-vm (Linux microvm only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firecracker_oxydra_vm_config: Option<String>,
+    /// Firecracker JSON config file path for shell-vm (Linux microvm only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firecracker_shell_vm_config: Option<String>,
 }
 
 impl Default for RunnerGuestImages {
@@ -80,6 +86,8 @@ impl Default for RunnerGuestImages {
         Self {
             oxydra_vm: default_oxydra_vm_image(),
             shell_vm: default_shell_vm_image(),
+            firecracker_oxydra_vm_config: None,
+            firecracker_shell_vm_config: None,
         }
     }
 }
@@ -468,6 +476,12 @@ pub struct RunnerControlHealthStatus {
     pub shutdown: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_container_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

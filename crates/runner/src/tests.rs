@@ -12,7 +12,9 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use tokio_tungstenite::tungstenite::{Message as WsMessage, accept};
-use types::RunnerBootstrapEnvelope;
+use types::{
+    RunnerBootstrapEnvelope, RunnerControl, RunnerControlErrorCode, RunnerControlResponse,
+};
 
 use super::*;
 
@@ -378,6 +380,106 @@ fn startup_container_tier_uses_unix_sidecar_transport() {
 }
 
 #[test]
+fn runner_control_rejects_shutdown_for_unknown_user() {
+    let root = temp_dir("runner-control-unknown-user");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend)
+        .expect("runner should initialize");
+    let mut startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    let response = startup.handle_control(RunnerControl::ShutdownUser {
+        user_id: "bob".to_owned(),
+    });
+    assert!(matches!(
+        response,
+        RunnerControlResponse::Error(error)
+            if error.code == RunnerControlErrorCode::UnknownUser
+                && error.message.contains("unknown user `bob`")
+    ));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn runner_control_transport_handles_health_shutdown_and_invalid_frames() {
+    let root = temp_dir("runner-control-transport");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend)
+        .expect("runner should initialize");
+    let startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    let (mut client, server) = tokio::io::duplex(8192);
+    let server_task = tokio::spawn(async move {
+        let mut startup = startup;
+        startup
+            .serve_control_stream(server)
+            .await
+            .expect("control stream should serve");
+        startup
+    });
+
+    let health = send_control_request(&mut client, &RunnerControl::HealthCheck).await;
+    assert!(matches!(
+        health,
+        RunnerControlResponse::HealthStatus(status)
+            if status.healthy
+                && !status.shutdown
+                && status.user_id == "alice"
+                && status.shell_available
+    ));
+
+    send_control_payload(&mut client, br#"{"op":"unknown"}"#).await;
+    let invalid = read_control_response(&mut client).await;
+    assert!(matches!(
+        invalid,
+        RunnerControlResponse::Error(error)
+            if error.code == RunnerControlErrorCode::InvalidRequest
+                && error.message.contains("invalid runner control request frame")
+    ));
+
+    let shutdown = send_control_request(
+        &mut client,
+        &RunnerControl::ShutdownUser {
+            user_id: "alice".to_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        shutdown,
+        RunnerControlResponse::ShutdownStatus(status)
+            if status.shutdown && !status.already_stopped && status.user_id == "alice"
+    ));
+
+    let health_after_shutdown =
+        send_control_request(&mut client, &RunnerControl::HealthCheck).await;
+    assert!(matches!(
+        health_after_shutdown,
+        RunnerControlResponse::HealthStatus(status) if !status.healthy && status.shutdown
+    ));
+
+    drop(client);
+    let mut startup = server_task
+        .await
+        .expect("control server task should complete");
+    assert!(matches!(
+        startup.handle_control(RunnerControl::HealthCheck),
+        RunnerControlResponse::HealthStatus(status) if status.shutdown
+    ));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn startup_applies_mount_resource_and_credential_overrides_to_launch_and_bootstrap() {
     let root = temp_dir("effective-launch-settings");
     let global_path = write_runner_config_fixture(&root, "container");
@@ -720,4 +822,27 @@ fn wait_for_file(path: &Path) {
         thread::sleep(std::time::Duration::from_millis(20));
     }
     panic!("timed out waiting for file `{}`", path.display());
+}
+
+async fn send_control_request(
+    stream: &mut tokio::io::DuplexStream,
+    request: &RunnerControl,
+) -> RunnerControlResponse {
+    let payload = serde_json::to_vec(request).expect("runner control request should encode");
+    send_control_payload(stream, &payload).await;
+    read_control_response(stream).await
+}
+
+async fn send_control_payload(stream: &mut tokio::io::DuplexStream, payload: &[u8]) {
+    write_runner_control_frame(stream, payload)
+        .await
+        .expect("runner control frame should send");
+}
+
+async fn read_control_response(stream: &mut tokio::io::DuplexStream) -> RunnerControlResponse {
+    let frame = read_runner_control_frame(stream)
+        .await
+        .expect("runner control response frame should read")
+        .expect("runner control response frame should be present");
+    serde_json::from_slice(&frame).expect("runner control response should decode")
 }

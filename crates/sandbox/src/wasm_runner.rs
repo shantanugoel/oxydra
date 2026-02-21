@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    env, fs,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::{
@@ -24,6 +24,83 @@ const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
 const MAX_SEARCH_MATCHES: usize = 200;
 pub(crate) const WEB_TOOL_USER_AGENT: &str = "oxydra/0.1 (+https://github.com/shantanugoel/oxydra)";
+const WEB_EGRESS_MODE_ENV_KEY: &str = "OXYDRA_WEB_EGRESS_MODE";
+const WEB_EGRESS_ALLOWLIST_ENV_KEY: &str = "OXYDRA_WEB_EGRESS_ALLOWLIST";
+const WEB_EGRESS_PROXY_URL_ENV_KEY: &str = "OXYDRA_WEB_EGRESS_PROXY_URL";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebEgressMode {
+    DefaultSafe,
+    StrictAllowlistProxy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebEgressPolicy {
+    mode: WebEgressMode,
+    allowlist: BTreeSet<String>,
+}
+
+impl Default for WebEgressPolicy {
+    fn default() -> Self {
+        Self {
+            mode: WebEgressMode::DefaultSafe,
+            allowlist: BTreeSet::new(),
+        }
+    }
+}
+
+impl WebEgressPolicy {
+    fn from_environment() -> Result<Self, String> {
+        let mode = match read_non_empty_env(WEB_EGRESS_MODE_ENV_KEY)
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("default") | Some("safe") => WebEgressMode::DefaultSafe,
+            Some("strict") | Some("strict_allowlist_proxy") => WebEgressMode::StrictAllowlistProxy,
+            Some(value) => {
+                return Err(format!(
+                    "unsupported web egress mode `{value}`; expected default or strict"
+                ));
+            }
+        };
+
+        let allowlist = read_non_empty_env(WEB_EGRESS_ALLOWLIST_ENV_KEY)
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(normalize_allowlist_entry)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let proxy_url = read_non_empty_env(WEB_EGRESS_PROXY_URL_ENV_KEY);
+
+        if mode == WebEgressMode::StrictAllowlistProxy {
+            if allowlist.is_empty() {
+                return Err(format!(
+                    "strict web egress mode requires `{WEB_EGRESS_ALLOWLIST_ENV_KEY}` with one or more destinations"
+                ));
+            }
+            let proxy_url = proxy_url.ok_or_else(|| {
+                format!(
+                    "strict web egress mode requires `{WEB_EGRESS_PROXY_URL_ENV_KEY}` to be set"
+                )
+            })?;
+            validate_proxy_url(&proxy_url)?;
+        } else if let Some(proxy_url) = proxy_url {
+            validate_proxy_url(&proxy_url)?;
+        }
+
+        Ok(Self { mode, allowlist })
+    }
+
+    fn destination_allowlisted(&self, host: &str, port: u16) -> bool {
+        if self.allowlist.is_empty() {
+            return false;
+        }
+
+        let host = normalize_host_for_allowlist(host);
+        self.allowlist.contains(&host) || self.allowlist.contains(&format!("{host}:{port}"))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmCapabilityProfile {
@@ -578,8 +655,15 @@ pub(crate) async fn parse_and_validate_web_url(raw_url: &str) -> Result<reqwest:
             parsed_url.scheme()
         )
     })?;
+    let egress_policy = WebEgressPolicy::from_environment()?;
+    let destination_allowlisted = egress_policy.destination_allowlisted(host, port);
+    if egress_policy.mode == WebEgressMode::StrictAllowlistProxy && !destination_allowlisted {
+        return Err(format!(
+            "strict web egress policy blocked destination `{host}:{port}` because it is not allowlisted"
+        ));
+    }
     let resolved_ips = resolve_host_ips(host, port).await?;
-    enforce_web_target_ips(host, &resolved_ips)?;
+    enforce_web_target_ips(host, &resolved_ips, &egress_policy, destination_allowlisted)?;
     Ok(parsed_url)
 }
 
@@ -596,13 +680,68 @@ async fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> 
     Ok(unique_ips.into_iter().collect())
 }
 
-fn enforce_web_target_ips(host: &str, resolved_ips: &[IpAddr]) -> Result<(), String> {
+fn enforce_web_target_ips(
+    host: &str,
+    resolved_ips: &[IpAddr],
+    policy: &WebEgressPolicy,
+    destination_allowlisted: bool,
+) -> Result<(), String> {
     for ip in resolved_ips {
         if let Some(reason) = blocked_ip_reason(*ip) {
+            if policy.mode == WebEgressMode::StrictAllowlistProxy && destination_allowlisted {
+                continue;
+            }
             return Err(format!(
                 "web target `{host}` resolved to blocked address `{ip}` ({reason})"
             ));
         }
+    }
+    Ok(())
+}
+
+fn read_non_empty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_allowlist_entry(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+
+    if let Ok(url) = reqwest::Url::parse(entry) {
+        let host = url
+            .host_str()
+            .map(normalize_host_for_allowlist)
+            .filter(|value| !value.is_empty())?;
+        return Some(match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        });
+    }
+
+    Some(normalize_host_for_allowlist(entry))
+}
+
+fn normalize_host_for_allowlist(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn validate_proxy_url(proxy_url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(proxy_url)
+        .map_err(|error| format!("invalid web egress proxy url `{proxy_url}`: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "web egress proxy url `{proxy_url}` must use http or https scheme"
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err(format!(
+            "web egress proxy url `{proxy_url}` must include a hostname"
+        ));
     }
     Ok(())
 }
@@ -701,12 +840,52 @@ mod tests {
     use std::{
         env, fs,
         net::{IpAddr, Ipv4Addr},
+        sync::OnceLock,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use serde_json::json;
 
     use super::*;
+
+    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    #[derive(Debug)]
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            // SAFETY: tests guard environment writes with a process-wide mutex.
+            unsafe { env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = env::var(key).ok();
+            // SAFETY: tests guard environment writes with a process-wide mutex.
+            unsafe { env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: tests guard environment writes with a process-wide mutex.
+                unsafe { env::set_var(self.key, value) };
+            } else {
+                // SAFETY: tests guard environment writes with a process-wide mutex.
+                unsafe { env::remove_var(self.key) };
+            }
+        }
+    }
 
     #[test]
     fn capability_profiles_map_to_expected_mount_sets() {
@@ -820,6 +999,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_fetch_blocks_metadata_endpoint_targets() {
+        let _env_lock = env_lock().lock().await;
         let workspace = unique_workspace("web-block-meta");
         let runner = HostWasmToolRunner::for_direct_workspace(&workspace);
         let denied = runner
@@ -844,6 +1024,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_fetch_blocks_private_rfc1918_targets() {
+        let _env_lock = env_lock().lock().await;
         let workspace = unique_workspace("web-block-rfc1918");
         let runner = HostWasmToolRunner::for_direct_workspace(&workspace);
         let denied = runner
@@ -868,12 +1049,15 @@ mod tests {
 
     #[test]
     fn web_target_policy_checks_all_resolved_ips() {
+        let policy = WebEgressPolicy::default();
         let result = enforce_web_target_ips(
             "example.org",
             &[
                 IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 8)),
             ],
+            &policy,
+            false,
         );
         assert!(matches!(
             result,
@@ -882,6 +1066,45 @@ mod tests {
                     && message.contains("192.168.1.8")
                     && message.contains("192.168.0.0/16")
         ));
+    }
+
+    #[tokio::test]
+    async fn strict_web_egress_blocks_non_allowlisted_destinations() {
+        let _env_lock = env_lock().lock().await;
+        let _mode = EnvVarGuard::set(WEB_EGRESS_MODE_ENV_KEY, "strict");
+        let _allowlist = EnvVarGuard::set(WEB_EGRESS_ALLOWLIST_ENV_KEY, "example.com");
+        let _proxy = EnvVarGuard::set(WEB_EGRESS_PROXY_URL_ENV_KEY, "http://proxy.internal:8080");
+
+        let error = parse_and_validate_web_url("https://example.org/search")
+            .await
+            .expect_err("strict mode should reject non-allowlisted destinations");
+        assert!(error.contains("not allowlisted"));
+    }
+
+    #[tokio::test]
+    async fn strict_web_egress_requires_proxy_configuration() {
+        let _env_lock = env_lock().lock().await;
+        let _mode = EnvVarGuard::set(WEB_EGRESS_MODE_ENV_KEY, "strict");
+        let _allowlist = EnvVarGuard::set(WEB_EGRESS_ALLOWLIST_ENV_KEY, "127.0.0.1");
+        let _proxy = EnvVarGuard::unset(WEB_EGRESS_PROXY_URL_ENV_KEY);
+
+        let error = parse_and_validate_web_url("http://127.0.0.1/internal")
+            .await
+            .expect_err("strict mode should require proxy configuration");
+        assert!(error.contains(WEB_EGRESS_PROXY_URL_ENV_KEY));
+    }
+
+    #[tokio::test]
+    async fn strict_web_egress_allows_allowlisted_loopback_destinations() {
+        let _env_lock = env_lock().lock().await;
+        let _mode = EnvVarGuard::set(WEB_EGRESS_MODE_ENV_KEY, "strict");
+        let _allowlist = EnvVarGuard::set(WEB_EGRESS_ALLOWLIST_ENV_KEY, "127.0.0.1");
+        let _proxy = EnvVarGuard::set(WEB_EGRESS_PROXY_URL_ENV_KEY, "http://proxy.internal:8080");
+
+        let parsed = parse_and_validate_web_url("http://127.0.0.1/internal")
+            .await
+            .expect("strict mode should allow explicitly allowlisted loopback destinations");
+        assert_eq!(parsed.host_str(), Some("127.0.0.1"));
     }
 
     fn unique_workspace(prefix: &str) -> PathBuf {

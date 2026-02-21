@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use types::{
-    BootstrapEnvelopeError, ExecCommand, RunnerBootstrapEnvelope, RunnerConfigError,
-    RunnerGlobalConfig, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
-    RunnerUserConfig, RunnerUserRegistration, SandboxTier, ShellDaemonRequest, SidecarEndpoint,
-    SidecarTransport,
+    BootstrapEnvelopeError, ExecCommand, RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl,
+    RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlResponse,
+    RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerResolvedMountPaths,
+    RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration,
+    SandboxTier, ShellDaemonRequest, SidecarEndpoint, SidecarTransport,
 };
 
 #[test]
@@ -190,4 +191,58 @@ fn shell_daemon_exec_command_request_round_trips() {
     let decoded: ShellDaemonRequest =
         serde_json::from_str(&encoded).expect("request should deserialize");
     assert_eq!(decoded, request);
+}
+
+#[test]
+fn runner_control_request_round_trips() {
+    let request = RunnerControl::ShutdownUser {
+        user_id: "alice".to_owned(),
+    };
+    let encoded = serde_json::to_string(&request).expect("runner control should serialize");
+    let decoded: RunnerControl =
+        serde_json::from_str(&encoded).expect("runner control should deserialize");
+    assert_eq!(decoded, request);
+}
+
+#[test]
+fn runner_control_response_round_trips() {
+    let response = RunnerControlResponse::HealthStatus(RunnerControlHealthStatus {
+        user_id: "alice".to_owned(),
+        healthy: true,
+        sandbox_tier: SandboxTier::Container,
+        shell_available: true,
+        browser_available: false,
+        shutdown: false,
+        message: Some("ready".to_owned()),
+    });
+    let encoded = serde_json::to_string(&response).expect("runner control response should encode");
+    let decoded: RunnerControlResponse =
+        serde_json::from_str(&encoded).expect("runner control response should decode");
+    assert_eq!(decoded, response);
+}
+
+#[test]
+fn runner_control_error_response_round_trips() {
+    let response = RunnerControlResponse::Error(RunnerControlError {
+        code: RunnerControlErrorCode::UnknownUser,
+        message: "unknown user `bob`".to_owned(),
+    });
+    let encoded = serde_json::to_string(&response).expect("runner control error should encode");
+    let decoded: RunnerControlResponse =
+        serde_json::from_str(&encoded).expect("runner control error should decode");
+    assert_eq!(decoded, response);
+}
+
+#[test]
+fn runner_control_shutdown_response_round_trips() {
+    let response = RunnerControlResponse::ShutdownStatus(RunnerControlShutdownStatus {
+        user_id: "alice".to_owned(),
+        shutdown: true,
+        already_stopped: false,
+        message: Some("shutdown completed".to_owned()),
+    });
+    let encoded = serde_json::to_string(&response).expect("shutdown status should encode");
+    let decoded: RunnerControlResponse =
+        serde_json::from_str(&encoded).expect("shutdown status should decode");
+    assert_eq!(decoded, response);
 }

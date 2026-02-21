@@ -36,11 +36,12 @@ pub use provider::{Provider, ProviderStream};
 pub use runner::{
     BootstrapEnvelopeError, ExecCommand, ExecCommandAck, KillSession, KillSessionAck,
     RunnerBehaviorOverrides, RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl,
-    RunnerGlobalConfig, RunnerGuestImages, RunnerMountPaths, RunnerResolvedMountPaths,
-    RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration,
-    SandboxTier, ShellDaemonError, ShellDaemonRequest, ShellDaemonResponse, ShellOutputStream,
-    SidecarEndpoint, SidecarTransport, SpawnSession, SpawnSessionAck, StreamOutput,
-    StreamOutputChunk,
+    RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlResponse,
+    RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages, RunnerMountPaths,
+    RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig,
+    RunnerUserRegistration, SandboxTier, ShellDaemonError, ShellDaemonRequest, ShellDaemonResponse,
+    ShellOutputStream, SidecarEndpoint, SidecarTransport, SpawnSession, SpawnSessionAck,
+    StreamOutput, StreamOutputChunk,
 };
 pub use tool::{FunctionDecl, JsonSchema, JsonSchemaType, SafetyTier, Tool};
 pub use tracing::init_tracing;

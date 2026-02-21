@@ -637,7 +637,7 @@ impl Tool for WebSearchTool {
         properties.insert(
             "config".to_owned(),
             JsonSchema::new(JsonSchemaType::Object).with_description(
-                "Optional provider config: provider, base_url/base_urls, allow_private_base_urls, query_params, and provider-specific fields",
+                "Optional provider config: provider, base_url/base_urls, query_params, and provider-specific fields",
             ),
         );
 

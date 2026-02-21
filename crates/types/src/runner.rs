@@ -361,6 +361,49 @@ pub enum RunnerControl {
     ShutdownUser { user_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerControlErrorCode {
+    InvalidRequest,
+    UnknownUser,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerControlError {
+    pub code: RunnerControlErrorCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerControlHealthStatus {
+    pub user_id: String,
+    pub healthy: bool,
+    pub sandbox_tier: SandboxTier,
+    pub shell_available: bool,
+    pub browser_available: bool,
+    pub shutdown: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerControlShutdownStatus {
+    pub user_id: String,
+    pub shutdown: bool,
+    pub already_stopped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", content = "payload", rename_all = "snake_case")]
+pub enum RunnerControlResponse {
+    HealthStatus(RunnerControlHealthStatus),
+    ShutdownStatus(RunnerControlShutdownStatus),
+    Error(RunnerControlError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", content = "payload", rename_all = "snake_case")]
 pub enum ShellDaemonRequest {

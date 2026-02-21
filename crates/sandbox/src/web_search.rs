@@ -57,7 +57,6 @@ struct SearchProviderConfig {
     searxng_engines: Option<String>,
     searxng_categories: Option<String>,
     searxng_safesearch: Option<u8>,
-    allow_private_base_urls: bool,
     query_params: BTreeMap<String, String>,
 }
 
@@ -141,6 +140,12 @@ fn search_provider_from_arguments(arguments: &Value) -> Result<SearchProviderCon
     let overrides = overrides
         .as_object()
         .ok_or_else(|| "`config` must be an object when provided".to_owned())?;
+    if overrides.contains_key("allow_private_base_urls") {
+        return Err(
+            "`config.allow_private_base_urls` is not supported; configure operator web egress policy via OXYDRA_WEB_EGRESS_* settings"
+                .to_owned(),
+        );
+    }
 
     if let Some(provider) = overrides.get("provider").and_then(Value::as_str) {
         config.kind = SearchProviderKind::parse(provider)?;
@@ -167,13 +172,6 @@ fn search_provider_from_arguments(arguments: &Value) -> Result<SearchProviderCon
     }
     if !explicit_base_urls.is_empty() {
         config.base_urls = dedupe_base_urls(explicit_base_urls);
-    }
-
-    if let Some(value) = overrides
-        .get("allow_private_base_urls")
-        .and_then(Value::as_bool)
-    {
-        config.allow_private_base_urls = value;
     }
 
     if let Some(value) = overrides.get("api_key").and_then(Value::as_str) {
@@ -227,7 +225,6 @@ fn search_provider_from_env() -> Result<SearchProviderConfig, String> {
     let provider_name =
         env_non_empty("OXYDRA_WEB_SEARCH_PROVIDER").unwrap_or_else(|| "duckduckgo".to_owned());
     let kind = SearchProviderKind::parse(&provider_name)?;
-    let allow_private_base_urls = env_flag("OXYDRA_WEB_SEARCH_ALLOW_PRIVATE_BASE_URLS");
     let base_urls = provider_base_urls_from_env(kind);
     if kind == SearchProviderKind::Searxng && base_urls.is_empty() {
         return Err(
@@ -261,7 +258,6 @@ fn search_provider_from_env() -> Result<SearchProviderConfig, String> {
         searxng_categories: env_non_empty("OXYDRA_WEB_SEARCH_SEARXNG_CATEGORIES"),
         searxng_safesearch: env_non_empty("OXYDRA_WEB_SEARCH_SEARXNG_SAFESEARCH")
             .and_then(|value| value.parse::<u8>().ok()),
-        allow_private_base_urls,
         query_params,
     })
 }
@@ -345,17 +341,6 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn env_flag(name: &str) -> bool {
-    env_non_empty(name)
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
 async fn fetch_search_payload_with_fallbacks(
     http_client: &Client,
     provider: &SearchProviderConfig,
@@ -407,9 +392,7 @@ async fn fetch_search_payload_from_base_url(
         .map(|request| request.url().to_string())
         .unwrap_or_else(|| base_url.to_owned());
 
-    if !provider.allow_private_base_urls {
-        parse_and_validate_web_url(&request_url).await?;
-    }
+    parse_and_validate_web_url(&request_url).await?;
 
     let response = request
         .send()
@@ -908,6 +891,19 @@ mod tests {
             config.query_params.get("language").map(String::as_str),
             Some("en-US")
         );
+    }
+
+    #[test]
+    fn arguments_config_rejects_allow_private_override() {
+        let args = json!({
+            "query": "test",
+            "config": {
+                "allow_private_base_urls": true
+            }
+        });
+        let error = search_provider_from_arguments(&args)
+            .expect_err("allow_private_base_urls override should be rejected");
+        assert!(error.contains("allow_private_base_urls"));
     }
 
     #[test]

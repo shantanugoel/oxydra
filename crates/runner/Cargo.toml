@@ -19,7 +19,7 @@ sandbox = { path = "../sandbox" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }
 toml = "1.0"
 tracing = "0.1"

@@ -25,6 +25,7 @@ use hyperlocal::{UnixClientExt, UnixConnector, Uri as HyperlocalUri};
 use sandbox::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
@@ -33,9 +34,10 @@ use tracing::{info, warn};
 use types::{
     BootstrapEnvelopeError, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame, GatewayClientHello,
     GatewayHealthCheck, GatewayServerFrame, RunnerBootstrapEnvelope, RunnerConfigError,
-    RunnerGlobalConfig, RunnerGuestImages, RunnerMountPaths, RunnerResolvedMountPaths,
-    RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration,
-    SandboxTier, SidecarEndpoint, SidecarTransport,
+    RunnerControl, RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus,
+    RunnerControlResponse, RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages,
+    RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
+    RunnerUserConfig, RunnerUserRegistration, SandboxTier, SidecarEndpoint, SidecarTransport,
 };
 
 mod backend;
@@ -59,6 +61,7 @@ const DOCKER_SANDBOXD_SOCKET_RELATIVE_PATH: &str = ".docker/sandboxes/sandboxd.s
 const DOCKER_SANDBOX_VM_ENDPOINT: &str = "/vm";
 const FIRECRACKER_API_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRECRACKER_API_READY_POLL_INTERVAL: Duration = Duration::from_millis(150);
+const RUNNER_CONTROL_MAX_FRAME_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Runner {
@@ -174,6 +177,7 @@ impl Runner {
             launch: launch.launch,
             bootstrap,
             warnings: launch.warnings,
+            shutdown_complete: false,
         })
     }
 
@@ -609,12 +613,153 @@ pub struct RunnerStartup {
     pub launch: RunnerLaunchHandle,
     pub bootstrap: RunnerBootstrapEnvelope,
     pub warnings: Vec<String>,
+    shutdown_complete: bool,
 }
 
 impl RunnerStartup {
     pub fn shutdown(&mut self) -> Result<(), RunnerError> {
-        self.launch.shutdown()
+        if self.shutdown_complete {
+            return Ok(());
+        }
+        self.launch.shutdown()?;
+        self.shutdown_complete = true;
+        self.shell_available = false;
+        self.browser_available = false;
+        Ok(())
     }
+
+    pub fn handle_control(&mut self, request: RunnerControl) -> RunnerControlResponse {
+        match request {
+            RunnerControl::HealthCheck => {
+                let status = RunnerControlHealthStatus {
+                    user_id: self.user_id.clone(),
+                    healthy: !self.shutdown_complete,
+                    sandbox_tier: self.sandbox_tier,
+                    shell_available: self.shell_available,
+                    browser_available: self.browser_available,
+                    shutdown: self.shutdown_complete,
+                    message: self.control_health_message(),
+                };
+                info!(
+                    user_id = %self.user_id,
+                    healthy = status.healthy,
+                    shutdown = status.shutdown,
+                    shell_available = status.shell_available,
+                    browser_available = status.browser_available,
+                    "runner control health check handled"
+                );
+                RunnerControlResponse::HealthStatus(status)
+            }
+            RunnerControl::ShutdownUser { user_id } => {
+                if user_id != self.user_id {
+                    warn!(
+                        requested_user = %user_id,
+                        active_user = %self.user_id,
+                        "runner control shutdown rejected for unknown user"
+                    );
+                    return RunnerControlResponse::Error(RunnerControlError {
+                        code: RunnerControlErrorCode::UnknownUser,
+                        message: format!(
+                            "shutdown request targeted unknown user `{user_id}`; active user is `{}`",
+                            self.user_id
+                        ),
+                    });
+                }
+
+                if self.shutdown_complete {
+                    info!(user_id = %self.user_id, "runner control shutdown acknowledged as already stopped");
+                    return RunnerControlResponse::ShutdownStatus(RunnerControlShutdownStatus {
+                        user_id,
+                        shutdown: true,
+                        already_stopped: true,
+                        message: Some("user runtime already shut down".to_owned()),
+                    });
+                }
+
+                match self.shutdown() {
+                    Ok(()) => {
+                        info!(user_id = %self.user_id, "runner control shutdown completed");
+                        RunnerControlResponse::ShutdownStatus(RunnerControlShutdownStatus {
+                            user_id,
+                            shutdown: true,
+                            already_stopped: false,
+                            message: Some("shutdown completed".to_owned()),
+                        })
+                    }
+                    Err(error) => {
+                        warn!(
+                            user_id = %self.user_id,
+                            error = %error,
+                            "runner control shutdown failed"
+                        );
+                        RunnerControlResponse::Error(RunnerControlError {
+                            code: RunnerControlErrorCode::Internal,
+                            message: format!(
+                                "failed to shut down user `{}`: {error}",
+                                self.user_id
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn serve_control_stream<Stream>(
+        &mut self,
+        mut stream: Stream,
+    ) -> Result<(), RunnerControlTransportError>
+    where
+        Stream: AsyncRead + AsyncWrite + Unpin,
+    {
+        while let Some(frame) = read_runner_control_frame(&mut stream).await? {
+            let response = match serde_json::from_slice::<RunnerControl>(&frame) {
+                Ok(request) => self.handle_control(request),
+                Err(error) => RunnerControlResponse::Error(RunnerControlError {
+                    code: RunnerControlErrorCode::InvalidRequest,
+                    message: format!("invalid runner control request frame: {error}"),
+                }),
+            };
+            let payload = serde_json::to_vec(&response)?;
+            write_runner_control_frame(&mut stream, &payload).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_control_unix_listener(
+        &mut self,
+        listener: tokio::net::UnixListener,
+    ) -> Result<(), RunnerControlTransportError> {
+        loop {
+            let (stream, _) = listener.accept().await?;
+            self.serve_control_stream(stream).await?;
+        }
+    }
+
+    fn control_health_message(&self) -> Option<String> {
+        if self.shutdown_complete {
+            return Some("runtime is shut down".to_owned());
+        }
+        if self.warnings.is_empty() {
+            None
+        } else {
+            Some(self.warnings.join(" | "))
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RunnerControlTransportError {
+    #[error("runner control transport failure: {0}")]
+    Transport(#[from] io::Error),
+    #[error("runner control serialization failure: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("runner control frame too large: {actual_bytes} bytes exceeds max {max_bytes} bytes")]
+    FrameTooLarge {
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1275,6 +1420,54 @@ where
         .build()
         .map_err(|source| RunnerError::AsyncRuntimeInit { source })?;
     runtime.block_on(future)
+}
+
+async fn read_runner_control_frame<Stream>(
+    stream: &mut Stream,
+) -> Result<Option<Vec<u8>>, RunnerControlTransportError>
+where
+    Stream: AsyncRead + Unpin,
+{
+    let mut len_buffer = [0_u8; 4];
+    match stream.read_exact(&mut len_buffer).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(RunnerControlTransportError::Transport(error)),
+    }
+    let frame_len = u32::from_be_bytes(len_buffer) as usize;
+    if frame_len > RUNNER_CONTROL_MAX_FRAME_BYTES {
+        return Err(RunnerControlTransportError::FrameTooLarge {
+            actual_bytes: frame_len,
+            max_bytes: RUNNER_CONTROL_MAX_FRAME_BYTES,
+        });
+    }
+    let mut payload = vec![0_u8; frame_len];
+    stream.read_exact(&mut payload).await?;
+    Ok(Some(payload))
+}
+
+async fn write_runner_control_frame<Stream>(
+    stream: &mut Stream,
+    payload: &[u8],
+) -> Result<(), RunnerControlTransportError>
+where
+    Stream: AsyncWrite + Unpin,
+{
+    if payload.len() > RUNNER_CONTROL_MAX_FRAME_BYTES {
+        return Err(RunnerControlTransportError::FrameTooLarge {
+            actual_bytes: payload.len(),
+            max_bytes: RUNNER_CONTROL_MAX_FRAME_BYTES,
+        });
+    }
+    let payload_len =
+        u32::try_from(payload.len()).map_err(|_| RunnerControlTransportError::FrameTooLarge {
+            actual_bytes: payload.len(),
+            max_bytes: RUNNER_CONTROL_MAX_FRAME_BYTES,
+        })?;
+    stream.write_all(&payload_len.to_be_bytes()).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
+    Ok(())
 }
 
 fn sanitize_container_component(value: &str) -> String {

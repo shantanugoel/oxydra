@@ -19,6 +19,8 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 ```bash
 mkdir -p .oxydra/users
 cp examples/config/agent.toml .oxydra/agent.toml
+cp examples/config/runner.toml .oxydra/runner.toml
+cp examples/config/runner-user.toml .oxydra/users/alice.toml
 ```
 
 Set your provider API key:
@@ -84,7 +86,11 @@ The runner requires two config files:
 - **`runner.toml`** — Global settings: workspace root, default isolation tier, guest images, user mappings
 - **`users/<id>.toml`** — Per-user overrides: resource limits, sandbox tier, mount paths, credential references
 
-See `examples/config/agent.toml` for a complete annotated agent configuration.
+See `examples/config/` for complete annotated configuration files:
+
+- [`agent.toml`](examples/config/agent.toml) — Agent runtime, provider, memory, and reliability settings
+- [`runner.toml`](examples/config/runner.toml) — Runner global settings (workspace root, sandbox tier, guest images, users)
+- [`runner-user.toml`](examples/config/runner-user.toml) — Per-user overrides (mounts, resources, credentials, behavior)
 
 ## Workspace layout
 

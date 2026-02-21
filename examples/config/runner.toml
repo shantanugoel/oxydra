@@ -1,0 +1,32 @@
+# Oxydra runner global configuration.
+# Copy to ./.oxydra/runner.toml and customize as needed.
+#
+# All values shown below are the defaults. Uncomment and change as needed.
+# For full documentation, see docs/guidebook/02-configuration-system.md
+#                                 and docs/guidebook/08-runner-and-guests.md
+
+# Root directory under which per-user workspace directories are created.
+# Each user gets <workspace_root>/<user_id>/{shared,tmp,vault}.
+workspace_root = ".oxydra/workspaces"
+
+# Default sandbox isolation tier for all users.
+# Options: "micro_vm" (strongest), "container", "process" (weakest, dev only)
+default_tier = "micro_vm"
+
+# --- Guest VM images ---
+# OCI image references used when spawning guest VMs.
+[guest_images]
+oxydra_vm = "oxydra-vm:latest"   # The agent runtime guest image
+shell_vm  = "shell-vm:latest"    # The shell/browser sidecar image
+
+# --- User registrations ---
+# Map of user IDs to their per-user config file paths.
+# Each user's config_path points to a separate TOML file containing
+# mounts, resource limits, credentials, and behavior overrides.
+# See examples/config/runner-user.toml for the per-user config format.
+
+[users.alice]
+config_path = ".oxydra/users/alice.toml"
+
+# [users.bob]
+# config_path = ".oxydra/users/bob.toml"

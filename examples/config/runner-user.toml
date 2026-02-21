@@ -1,0 +1,36 @@
+# Oxydra runner per-user configuration.
+# Referenced from runner.toml via users.<id>.config_path.
+#
+# All values shown below are optional. Uncomment and change as needed.
+# For full documentation, see docs/guidebook/08-runner-and-guests.md
+
+# --- Mount path overrides ---
+# Override default workspace mount directories for this user.
+# If omitted, the runner derives paths from <workspace_root>/<user_id>/.
+[mounts]
+# shared = "/data/oxydra/alice/shared"   # Persistent data across sessions
+# tmp    = "/data/oxydra/alice/tmp"      # Temporary files + gateway endpoint
+# vault  = "/data/oxydra/alice/vault"    # Sensitive credentials (restricted access)
+
+# --- Resource limits ---
+# Constrain the guest VM's resource usage.
+[resources]
+# max_vcpus      = 2       # Maximum virtual CPUs
+# max_memory_mib = 2048    # Maximum memory in MiB
+# max_processes  = 256     # Maximum number of processes
+
+# --- Credential references ---
+# Map of logical credential names to secret store paths or env var names.
+# These are passed to the guest via the bootstrap envelope and resolved
+# at runtime. Values must not be empty.
+[credential_refs]
+# openai_key    = "vault:secret/data/openai#api_key"
+# anthropic_key = "env:ANTHROPIC_API_KEY"
+
+# --- Behavior overrides ---
+# Per-user overrides for sandbox behavior. These take precedence over
+# the global defaults in runner.toml.
+[behavior]
+# sandbox_tier    = "container"   # Override the global default_tier for this user
+# shell_enabled   = true          # Enable/disable shell tool access
+# browser_enabled = false         # Enable/disable browser tool access

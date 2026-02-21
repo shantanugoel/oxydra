@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -23,6 +24,8 @@ struct OxydraVmArgs {
     user_id: String,
     #[arg(long = "workspace-root")]
     workspace_root: PathBuf,
+    #[arg(long = "bootstrap-stdin")]
+    bootstrap_stdin: bool,
     #[arg(long = "gateway-bind", default_value = DEFAULT_GATEWAY_BIND_ADDRESS)]
     gateway_bind: String,
 }
@@ -33,6 +36,12 @@ enum VmError {
     InvalidUserId,
     #[error(transparent)]
     Bootstrap(#[from] BootstrapError),
+    #[error("failed to read bootstrap frame from stdin {stage}: {source}")]
+    ReadBootstrapFrame {
+        stage: &'static str,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to bind gateway listener `{address}`: {source}")]
     BindGateway {
         address: String,
@@ -66,7 +75,13 @@ async fn run() -> Result<(), VmError> {
         return Err(VmError::InvalidUserId);
     }
 
-    let bootstrap = bootstrap_vm_runtime(None, None, CliOverrides::default()).await?;
+    let bootstrap_frame = if args.bootstrap_stdin {
+        Some(read_bootstrap_frame_from_stdin()?)
+    } else {
+        None
+    };
+    let bootstrap =
+        bootstrap_vm_runtime(bootstrap_frame.as_deref(), None, CliOverrides::default()).await?;
     let provider_id = bootstrap.config.selection.provider.clone();
     let model_id = bootstrap.config.selection.model.clone();
 
@@ -129,12 +144,42 @@ fn gateway_endpoint(address: SocketAddr) -> String {
     format!("ws://{address}/ws")
 }
 
+fn read_bootstrap_frame_from_stdin() -> Result<Vec<u8>, VmError> {
+    let mut stdin = io::stdin().lock();
+    read_bootstrap_frame_from_reader(&mut stdin)
+}
+
+fn read_bootstrap_frame_from_reader(reader: &mut impl Read) -> Result<Vec<u8>, VmError> {
+    let mut len_buf = [0_u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .map_err(|source| VmError::ReadBootstrapFrame {
+            stage: "length prefix",
+            source,
+        })?;
+    let payload_len = u32::from_be_bytes(len_buf) as usize;
+    let mut payload = vec![0_u8; payload_len];
+    reader
+        .read_exact(&mut payload)
+        .map_err(|source| VmError::ReadBootstrapFrame {
+            stage: "payload",
+            source,
+        })?;
+    let mut frame = Vec::with_capacity(4 + payload_len);
+    frame.extend_from_slice(&len_buf);
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         env, fs,
+        io::Cursor,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    use types::{RunnerBootstrapEnvelope, SandboxTier, SidecarEndpoint, SidecarTransport};
 
     use super::*;
 
@@ -150,7 +195,22 @@ mod tests {
         .expect("args should parse");
         assert_eq!(args.user_id, "alice");
         assert_eq!(args.workspace_root, PathBuf::from("/tmp/workspace"));
+        assert!(!args.bootstrap_stdin);
         assert_eq!(args.gateway_bind, DEFAULT_GATEWAY_BIND_ADDRESS);
+    }
+
+    #[test]
+    fn vm_args_accept_bootstrap_stdin_flag() {
+        let args = OxydraVmArgs::try_parse_from([
+            "oxydra-vm",
+            "--user-id",
+            "alice",
+            "--workspace-root",
+            "/tmp/workspace",
+            "--bootstrap-stdin",
+        ])
+        .expect("args should parse with bootstrap stdin flag");
+        assert!(args.bootstrap_stdin);
     }
 
     #[test]
@@ -164,6 +224,26 @@ mod tests {
         let marker = fs::read_to_string(marker_path).expect("marker file should be readable");
         assert_eq!(marker, "ws://127.0.0.1:42001/ws");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bootstrap_frame_reader_preserves_length_prefixed_payload() {
+        let encoded = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Container,
+            workspace_root: "/tmp/oxydra/alice".to_owned(),
+            sidecar_endpoint: Some(SidecarEndpoint {
+                transport: SidecarTransport::Unix,
+                address: "/tmp/shell-daemon.sock".to_owned(),
+            }),
+        }
+        .to_length_prefixed_json()
+        .expect("bootstrap envelope should encode");
+        let mut cursor = Cursor::new(encoded.clone());
+
+        let frame = read_bootstrap_frame_from_reader(&mut cursor)
+            .expect("frame reader should return length-prefixed bytes");
+        assert_eq!(frame, encoded);
     }
 
     fn temp_dir(label: &str) -> PathBuf {

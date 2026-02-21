@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     future::Future,
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
@@ -139,6 +139,9 @@ impl Runner {
             sidecar_endpoint,
         };
         bootstrap.validate()?;
+        if sandbox_tier == SandboxTier::Process {
+            launch.launch.runtime.send_startup_bootstrap(&bootstrap)?;
+        }
 
         info!(
             user_id = %user_id,
@@ -399,6 +402,50 @@ impl RunnerGuestHandle {
             pid: None,
             lifecycle: RunnerGuestLifecycle::Simulated,
         }
+    }
+
+    fn send_startup_bootstrap(
+        &mut self,
+        bootstrap: &RunnerBootstrapEnvelope,
+    ) -> Result<(), RunnerError> {
+        let frame = bootstrap.to_length_prefixed_json()?;
+        self.send_startup_frame(&frame)
+    }
+
+    fn send_startup_frame(&mut self, frame: &[u8]) -> Result<(), RunnerError> {
+        let RunnerGuestLifecycle::Process { child } = &mut self.lifecycle else {
+            return Ok(());
+        };
+        let program = self.command.program.clone();
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| RunnerError::GuestLifecycle {
+                action: "write_startup_frame",
+                role: self.role,
+                program: program.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "startup stdin channel is not available",
+                ),
+            })?;
+        stdin
+            .write_all(frame)
+            .map_err(|source| RunnerError::GuestLifecycle {
+                action: "write_startup_frame",
+                role: self.role,
+                program: program.clone(),
+                source,
+            })?;
+        stdin
+            .flush()
+            .map_err(|source| RunnerError::GuestLifecycle {
+                action: "write_startup_frame",
+                role: self.role,
+                program,
+                source,
+            })?;
+        Ok(())
     }
 
     pub fn shutdown(&mut self) -> Result<(), RunnerError> {

@@ -2,14 +2,53 @@ use std::{
     env, fs,
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use tokio_tungstenite::tungstenite::{Message as WsMessage, accept};
+use types::RunnerBootstrapEnvelope;
 
 use super::*;
+
+#[cfg(unix)]
+const BOOTSTRAP_CAPTURE_ENV_KEY: &str = "OXYDRA_RUNNER_BOOTSTRAP_CAPTURE";
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[derive(Debug)]
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = env::var(key).ok();
+        // SAFETY: tests guard environment writes with a process-wide mutex.
+        unsafe { env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.previous {
+            // SAFETY: tests guard environment writes with a process-wide mutex.
+            unsafe { env::set_var(self.key, value) };
+        } else {
+            // SAFETY: tests guard environment writes with a process-wide mutex.
+            unsafe { env::remove_var(self.key) };
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct MockSandboxBackend {
@@ -248,6 +287,60 @@ fn startup_insecure_process_mode_disables_shell_and_browser() {
     assert_eq!(launches[0].sandbox_tier, SandboxTier::Process);
     assert!(!launches[0].requested_shell);
     assert!(!launches[0].requested_browser);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn process_startup_sends_bootstrap_frame_to_runtime_stdin() {
+    let _env_lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let root = temp_dir("process-bootstrap-stdin");
+    let global_path = write_runner_config_fixture(&root, "micro_vm");
+    write_user_config(&root.join("users/alice.toml"), "");
+    let script_path = root.join("capture-bootstrap.sh");
+    let captured_frame_path = root.join("captured-bootstrap-frame.bin");
+
+    fs::write(
+        &script_path,
+        format!("#!/bin/sh\ncat > \"${BOOTSTRAP_CAPTURE_ENV_KEY}\"\n"),
+    )
+    .expect("capture script should be writable");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("capture script metadata should load")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions)
+        .expect("capture script should become executable");
+
+    let _exec = EnvVarGuard::set(
+        PROCESS_EXECUTABLE_ENV_KEY,
+        script_path.to_string_lossy().as_ref(),
+    );
+    let _capture = EnvVarGuard::set(
+        BOOTSTRAP_CAPTURE_ENV_KEY,
+        captured_frame_path.to_string_lossy().as_ref(),
+    );
+
+    let runner = Runner::from_global_config_path(&global_path).expect("runner should initialize");
+    let mut startup = runner
+        .start_user_for_host(
+            RunnerStartRequest {
+                user_id: "alice".to_owned(),
+                insecure: true,
+            },
+            "linux",
+        )
+        .expect("process startup should succeed");
+    wait_for_file(&captured_frame_path);
+
+    let encoded = fs::read(&captured_frame_path).expect("captured bootstrap frame should exist");
+    let decoded = RunnerBootstrapEnvelope::from_length_prefixed_json(&encoded)
+        .expect("captured bootstrap frame should decode");
+    assert_eq!(decoded, startup.bootstrap);
+    startup
+        .shutdown()
+        .expect("startup shutdown should clean up runtime handle");
 
     let _ = fs::remove_dir_all(root);
 }
@@ -524,4 +617,14 @@ fn temp_dir(label: &str) -> PathBuf {
     ));
     fs::create_dir_all(&path).expect("temp dir should be creatable");
     path
+}
+
+fn wait_for_file(path: &Path) {
+    for _ in 0..100 {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for file `{}`", path.display());
 }

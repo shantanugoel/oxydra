@@ -376,7 +376,10 @@ mod tests {
     };
 
     use tokio::sync::Mutex as AsyncMutex;
-    use types::{ModelId, ProviderId, RunnerBootstrapEnvelope, SandboxTier};
+    use types::{
+        ModelId, ProviderId, RunnerBootstrapEnvelope, SandboxTier, SidecarEndpoint,
+        SidecarTransport,
+    };
 
     use super::*;
 
@@ -716,6 +719,60 @@ remote_url = "libsql://example-org.turso.io"
             error,
             types::ToolError::ExecutionFailed { tool, message }
                 if tool == "shell_exec" && message.contains("disabled")
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_vm_runtime_with_sidecar_metadata_routes_shell_status_through_sidecar_path() {
+        let _lock = async_test_lock().lock().await;
+        let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
+        let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
+        let root = temp_dir("bootstrap-sidecar-metadata");
+        let paths = test_paths(&root);
+        write_bootstrap_config(&paths);
+        let frame = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Container,
+            workspace_root: "/tmp/oxydra-alice".to_owned(),
+            sidecar_endpoint: Some(SidecarEndpoint {
+                transport: SidecarTransport::Unix,
+                address: "tcp://invalid-sidecar-endpoint".to_owned(),
+            }),
+        }
+        .to_length_prefixed_json()
+        .expect("sidecar bootstrap frame should encode");
+
+        let bootstrap =
+            bootstrap_vm_runtime_with_paths(&paths, Some(&frame), None, CliOverrides::default())
+                .await
+                .expect("bootstrap runtime should initialize");
+
+        assert!(
+            bootstrap
+                .bootstrap
+                .as_ref()
+                .and_then(|envelope| envelope.sidecar_endpoint.as_ref())
+                .is_some()
+        );
+        assert!(!bootstrap.tool_availability.shell.is_ready());
+        let error = bootstrap
+            .tool_registry
+            .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
+            .await
+            .expect_err("invalid sidecar metadata should keep shell tool unavailable");
+        #[cfg(unix)]
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == "shell_exec" && message.contains("not a valid unix socket path")
+        ));
+        #[cfg(not(unix))]
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == "shell_exec" && message.contains("unsupported")
         ));
 
         let _ = fs::remove_dir_all(root);

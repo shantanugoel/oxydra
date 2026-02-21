@@ -228,9 +228,11 @@ impl CrateSandboxBackend {
                 request.user_id.clone(),
                 "--workspace-root".to_owned(),
                 request.workspace.root.to_string_lossy().into_owned(),
+                "--bootstrap-stdin".to_owned(),
             ],
         );
-        let runtime = self.spawn_process_guest(RunnerGuestRole::OxydraVm, runtime_command)?;
+        let runtime = self
+            .spawn_process_guest_with_startup_stdin(RunnerGuestRole::OxydraVm, runtime_command)?;
         let hardening_attempt = attempt_process_tier_hardening();
 
         let mut warnings = vec![PROCESS_TIER_WARNING.to_owned()];
@@ -292,6 +294,27 @@ impl CrateSandboxBackend {
         child_command
             .args(&command.args)
             .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = child_command
+            .spawn()
+            .map_err(|source| RunnerError::LaunchGuest {
+                role,
+                program: command.program.clone(),
+                source,
+            })?;
+        Ok(RunnerGuestHandle::from_child(role, command, child))
+    }
+
+    fn spawn_process_guest_with_startup_stdin(
+        &self,
+        role: RunnerGuestRole,
+        command: RunnerCommandSpec,
+    ) -> Result<RunnerGuestHandle, RunnerError> {
+        let mut child_command = Command::new(&command.program);
+        child_command
+            .args(&command.args)
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let child = child_command

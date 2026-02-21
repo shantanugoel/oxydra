@@ -17,9 +17,9 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 7 | Anthropic provider + config + switching | **Complete** | Anthropic impl, figment config, ReliableProvider. **Gap: streaming is a shim** |
 | 8 | Memory trait + libSQL persistence | **Complete** | Memory trait, libSQL, SQL migrations, session management |
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
-| 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers |
+| 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. **Gaps:** non-process bootstrapping incomplete (container/microvm args + bootstrap), linux microvm config mismatch, runner control plane not wired (logs/shutdown) |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. **Gap: WASM isolation is simulated (host-based)** |
-| 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server. **Gap: TUI rendering missing** |
+| 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server. **Gaps:** TUI rendering + interactive client missing; `runner --tui` is probe-only |
 | 13 | Model catalog governance | Planned | |
 | 14 | External channels + identity mapping | Planned | |
 | 15 | Multi-agent orchestration | Planned | |
@@ -111,6 +111,9 @@ Built the foundation layer with zero internal dependencies:
 - Model selection validated against catalog at startup
 - **Gap:** `ResponsesProvider` for OpenAI's stateful `/v1/responses` API was planned but not implemented; only the stateless chat completions endpoint is used
 
+**Gaps / follow-ups to complete Phase 2:**
+- **OpenAI Responses API provider:** add `ResponsesProvider`, SSE parsing for `/v1/responses`, and session-level `previous_response_id` handling for server-side state.
+
 ### Phase 3: Streaming + SSE Parsing
 
 **Crates:** `provider`
@@ -163,6 +166,9 @@ Built the foundation layer with zero internal dependencies:
 - Credential resolution: explicit config → provider env var → generic fallback
 - **Gap:** `stream()` is a shim wrapping `complete()`
 
+**Gaps / follow-ups to complete Phase 7:**
+- **Anthropic streaming:** implement true SSE streaming for `/v1/messages` with `content_block_delta` and related event types.
+
 ### Phase 8: Memory Trait + libSQL Persistence
 
 **Crates:** `memory`
@@ -188,6 +194,9 @@ Built the foundation layer with zero internal dependencies:
 - `chunks_fts` FTS5 virtual table for keyword search
 - **Gap:** `upsert_chunks` method returns "not implemented"
 
+**Gaps / follow-ups to complete Phase 9:**
+- **Memory retrieval upserts:** implement `upsert_chunks` to index external chunks into `chunks`/`chunks_vec`/FTS tables.
+
 ### Phase 10: Runner + Isolation Infrastructure
 
 **Crates:** `types`, `runner`, `sandbox`, `tools`, `runtime`, `shell-daemon`
@@ -200,6 +209,11 @@ Built the foundation layer with zero internal dependencies:
 - Shell daemon protocol: `SpawnSession`, `ExecCommand`, `StreamOutput`, `KillSession`
 - `ShellSession` / `BrowserSession` traits with `VsockShellSession` and `LocalProcessShellSession`
 - `--insecure` mode: Process tier, no VM/container, shell/browser tools disabled, warning emitted
+
+**Gaps / follow-ups to complete Phase 10:**
+- **Container/microvm bootstrapping:** pass `--user-id`/`--workspace-root` consistently and deliver bootstrap envelope to non-process guests (eg. via mounted file, env var, or stdin bridge) so sidecar/runtime policy wiring matches Process tier.
+- **Runner control plane:** wire `RunnerStartup::serve_control_unix_listener` (or equivalent) so a persistent runner daemon can expose health, graceful shutdown, and centralized log capture.
+- **Linux microvm config:** clarify whether `guest_images.*` should be Firecracker config files vs OCI tags; update config schema + validation accordingly.
 
 ### Phase 11: Security Policy + WASM Tool Isolation
 
@@ -214,6 +228,9 @@ Built the foundation layer with zero internal dependencies:
 - `RegexSet` output scrubbing for credentials (api_key, token, password, bearer patterns)
 - Entropy-based secret detection (Shannon entropy >= 3.8)
 - **Gap:** WASM isolation is simulated — `HostWasmToolRunner` enforces policies via host-side path checks using `std::fs`, not via `wasmtime` WASM sandboxing; `wasmtime` is not a dependency
+
+**Gaps / follow-ups to complete Phase 11:**
+- **Real WASM isolation:** replace host `std::fs` execution with `wasmtime` + WASI sandboxes and preopened mounts.
 
 ### Phase 12: Channel Trait + TUI + Gateway Daemon
 
@@ -232,6 +249,9 @@ Built the foundation layer with zero internal dependencies:
 - Gateway endpoint discovery via `tmp/gateway-endpoint` marker file
 - `--tui` mode: connect-only to existing `oxydra-vm`, exit with error if no guest running
 - **Gap:** `ratatui` + `crossterm` rendering loop not implemented
+
+**Gaps / follow-ups to complete Phase 12:**
+- **Interactive TUI client:** add a real TUI binary (ratatui + crossterm) so users can send/receive messages; clarify `runner --tui` as a probe or wire it to launch the interactive client.
 
 ## Forward Plan: Phases 13-21
 
@@ -363,10 +383,13 @@ The five identified gaps are incorporated as additional work items:
 | Gap | Affected Phase | Resolution Target | Priority |
 |-----|---------------|-------------------|----------|
 | Anthropic SSE streaming | Phase 7 | Before Phase 14 (external channels need reliable streaming) | High |
-| TUI ratatui rendering | Phase 12 | Before Phase 14 (TUI must be usable before adding more channels) | High |
+| TUI ratatui rendering + interactive client | Phase 12 | Before Phase 14 (TUI must be usable before adding more channels) | High |
 | WASM tool isolation (simulated → real) | Phase 11 | Before Phase 15 (multi-agent needs hard isolation boundaries) | High |
 | OpenAI ResponsesProvider | Phase 2 | Before Phase 15 (subagent delegation benefits from server-side state) | Medium |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
+| Runner control plane + persistent daemon + VM log capture | Phase 10 | Before Phase 12 (TUI/ops need lifecycle control) | High |
+| Container/microvm bootstrap wiring (args + envelope) | Phase 10 | Before Phase 12 (runtime needs correct startup status) | High |
+| Linux microvm config input mismatch (Firecracker vs OCI tags) | Phase 10 | Before Phase 12 (microvm tier must be launchable) | Medium |
 
 These gaps do not block any currently completed phase's functionality but should be resolved before the phases that depend on them.
 

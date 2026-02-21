@@ -11,13 +11,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(feature = "wasm-isolation")]
+use sandbox::WasmWasiToolRunner;
 use sandbox::{
     HostWasmToolRunner, SecurityPolicy, SessionStatus, SessionUnavailable,
     SessionUnavailableReason, ShellSession, ShellSessionConfig, VsockShellSession,
     WasmCapabilityProfile, WasmToolRunner, WasmWorkspaceMounts, WorkspaceSecurityPolicy,
 };
-#[cfg(feature = "wasm-isolation")]
-use sandbox::WasmWasiToolRunner;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 #[cfg(unix)]

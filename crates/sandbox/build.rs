@@ -1,8 +1,4 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{env, path::Path, process::Command};
 
 fn main() {
     // Only build the WASM guest when the wasm-isolation feature is enabled.
@@ -27,10 +23,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         guest_src_dir.join("src").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        guest_cargo_toml.display()
-    );
+    println!("cargo:rerun-if-changed={}", guest_cargo_toml.display());
 
     let guest_output_dir = manifest_path.join("guest");
     let wasm_dest = guest_output_dir.join("oxydra_wasm_guest.wasm");
@@ -83,4 +76,3 @@ fn compile_wasm_guest(guest_cargo_toml: &Path, workspace_root: &Path, wasm_dest:
         )
     });
 }
-

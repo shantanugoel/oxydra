@@ -29,10 +29,10 @@ use types::{
 
 mod policy;
 mod wasm_runner;
-mod web_fetch;
-mod web_search;
 #[cfg(feature = "wasm-isolation")]
 mod wasm_wasi_runner;
+mod web_fetch;
+mod web_search;
 
 pub use policy::{
     SecurityPolicy, SecurityPolicyViolation, SecurityPolicyViolationReason, WorkspaceSecurityPolicy,

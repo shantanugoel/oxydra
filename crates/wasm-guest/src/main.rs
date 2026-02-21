@@ -93,9 +93,11 @@ fn dispatch(op: &str, args: &Value) -> GuestResult {
 }
 
 fn required_string<'a>(args: &'a Value, field: &str, op: &str) -> Result<&'a str, GuestResult> {
-    args.get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| GuestResult::err(format!("operation `{op}` requires string argument `{field}`")))
+    args.get(field).and_then(Value::as_str).ok_or_else(|| {
+        GuestResult::err(format!(
+            "operation `{op}` requires string argument `{field}`"
+        ))
+    })
 }
 
 fn optional_string<'a>(args: &'a Value, field: &str) -> Option<&'a str> {
@@ -126,9 +128,7 @@ fn file_write(args: &Value) -> GuestResult {
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(e) = fs::create_dir_all(parent) {
-                return GuestResult::err(format!(
-                    "failed to create directories for `{path}`: {e}"
-                ));
+                return GuestResult::err(format!("failed to create directories for `{path}`: {e}"));
             }
         }
     }
@@ -265,15 +265,15 @@ fn collect_search_matches(
         return Ok(());
     }
 
-    let metadata = fs::metadata(path)
-        .map_err(|e| format!("failed to inspect `{}`: {e}", path.display()))?;
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("failed to inspect `{}`: {e}", path.display()))?;
 
     if metadata.is_dir() {
-        let entries = fs::read_dir(path)
-            .map_err(|e| format!("failed to list `{}`: {e}", path.display()))?;
+        let entries =
+            fs::read_dir(path).map_err(|e| format!("failed to list `{}`: {e}", path.display()))?;
         for entry in entries {
-            let entry = entry
-                .map_err(|e| format!("failed to read entry in `{}`: {e}", path.display()))?;
+            let entry =
+                entry.map_err(|e| format!("failed to read entry in `{}`: {e}", path.display()))?;
             collect_search_matches(&entry.path(), query, matches)?;
             if matches.len() >= MAX_SEARCH_MATCHES {
                 break;
@@ -311,9 +311,7 @@ fn vault_copyto_read(args: &Value) -> GuestResult {
     };
     match fs::read_to_string(source_path) {
         Ok(content) => GuestResult::ok(content),
-        Err(e) => {
-            GuestResult::err(format!("failed to read vault source `{source_path}`: {e}"))
-        }
+        Err(e) => GuestResult::err(format!("failed to read vault source `{source_path}`: {e}")),
     }
 }
 

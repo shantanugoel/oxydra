@@ -93,9 +93,11 @@ impl WasmWasiToolRunner {
         // Spawn epoch ticker: increments every 100 ms.
         // set_epoch_deadline(100) → ~10 second execution timeout.
         let engine_clone = engine.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(100));
-            engine_clone.increment_epoch();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                engine_clone.increment_epoch();
+            }
         });
 
         Ok(Self {
@@ -286,7 +288,10 @@ fn execute_guest_sync(
         wasi_builder
             .preopened_dir(host_path, &guest_path, dir_perms, file_perms)
             .map_err(|e| {
-                format!("failed to preopen `{}` → `{guest_path}`: {e}", host_path.display())
+                format!(
+                    "failed to preopen `{}` → `{guest_path}`: {e}",
+                    host_path.display()
+                )
             })?;
     }
 
@@ -301,10 +306,13 @@ fn execute_guest_sync(
         .instances(1)
         .build();
 
-    let mut store = Store::new(engine, StoreData {
-        wasi: wasi_p1_ctx,
-        limits,
-    });
+    let mut store = Store::new(
+        engine,
+        StoreData {
+            wasi: wasi_p1_ctx,
+            limits,
+        },
+    );
     store.limiter(|data| &mut data.limits);
     store.set_epoch_deadline(100); // 100 ticks × 100 ms = ~10 s timeout
 
@@ -375,7 +383,7 @@ fn canonicalize_path_or_parent(path: &Path) -> Result<PathBuf, String> {
                 return Err(format!(
                     "path `{}` has no canonicalizable ancestor",
                     abs.display()
-                ))
+                ));
             }
         }
         if ancestor.exists() {
@@ -427,9 +435,7 @@ impl WasmToolRunner for WasmWasiToolRunner {
         let output = match tool_name {
             "web_fetch" => crate::web_fetch::execute(&self.http_client, arguments).await,
             "web_search" => crate::web_search::execute(&self.http_client, arguments).await,
-            _ => {
-                self.execute_in_wasm(tool_name, profile, arguments).await
-            }
+            _ => self.execute_in_wasm(tool_name, profile, arguments).await,
         }
         .map_err(|message| SandboxError::WasmInvocationFailed {
             tool: tool_name.to_owned(),
@@ -450,7 +456,10 @@ impl WasmToolRunner for WasmWasiToolRunner {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use serde_json::json;
 

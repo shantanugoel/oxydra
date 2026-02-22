@@ -487,6 +487,48 @@ fn models_dev_json_snippet_deserializes() {
 }
 
 #[test]
+fn models_dev_interleaved_boolean_deserializes() {
+    let snippet = r#"
+    {
+      "openai": {
+        "id": "openai",
+        "name": "OpenAI",
+        "env": ["OPENAI_API_KEY"],
+        "models": {
+          "o3-mini": {
+            "id": "o3-mini",
+            "name": "OpenAI o3-mini",
+            "reasoning": true,
+            "interleaved": true,
+            "limit": { "context": 200000, "output": 100000 }
+          },
+          "o3-mini-false": {
+            "id": "o3-mini-false",
+            "name": "OpenAI o3-mini false",
+            "reasoning": true,
+            "interleaved": false,
+            "limit": { "context": 200000, "output": 100000 }
+          }
+        }
+      }
+    }
+    "#;
+
+    let catalog = ModelCatalog::from_snapshot_str(snippet).expect("snippet should parse");
+    let openai = &catalog.providers["openai"];
+
+    let o3_mini = &openai.models["o3-mini"];
+    assert!(o3_mini.interleaved.is_some());
+    assert_eq!(
+        o3_mini.interleaved.as_ref().unwrap().field,
+        "reasoning_content"
+    );
+
+    let o3_mini_false = &openai.models["o3-mini-false"];
+    assert!(o3_mini_false.interleaved.is_none());
+}
+
+#[test]
 fn catalog_serialization_round_trip_is_deterministic() {
     let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned snapshot must parse");
 

@@ -163,6 +163,33 @@ pub struct InterleavedSpec {
     pub field: String,
 }
 
+const DEFAULT_INTERLEAVED_FIELD: &str = "reasoning_content";
+
+fn deserialize_interleaved<'de, D>(deserializer: D) -> Result<Option<InterleavedSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<Value> = Option::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        Value::Null | Value::Bool(false) => Ok(None),
+        Value::Bool(true) => Ok(Some(InterleavedSpec {
+            field: DEFAULT_INTERLEAVED_FIELD.to_string(),
+        })),
+        Value::Object(_) => {
+            let spec = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Some(spec))
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "invalid interleaved value: expected boolean or object, got {}",
+            other
+        ))),
+    }
+}
+
 /// Input/output modality lists (e.g. `["text", "image"]`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Modalities {
@@ -214,7 +241,11 @@ pub struct ModelDescriptor {
     #[serde(default)]
     pub tool_call: bool,
     /// Interleaved reasoning output configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_interleaved"
+    )]
     pub interleaved: Option<InterleavedSpec>,
     /// Supports JSON mode / structured output.
     #[serde(default)]

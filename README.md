@@ -39,7 +39,16 @@ export GEMINI_API_KEY=your-key
 cargo build --workspace
 ```
 
-### 3. Run
+### 3. Docker socket (macOS)
+
+When using the container isolation tier, the runner connects to Docker via the default socket path. On macOS, if you use a Docker runtime other than Docker Desktop (e.g. Colima, Rancher Desktop, or Lima), you must set `DOCKER_HOST` to point at the correct socket:
+
+```bash
+# Colima example
+export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
+```
+
+### 4. Run
 
 Start a runner for a user (process-tier isolation):
 

@@ -14,10 +14,11 @@ use bollard::{
     errors::Error as BollardError,
     models::{ContainerCreateBody, HostConfig},
     query_parameters::{
-        CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
+        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
+        StopContainerOptionsBuilder,
     },
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode, Uri, body::Bytes};
 use hyper_util::client::legacy::Client;
@@ -1259,6 +1260,35 @@ async fn launch_docker_container_async(
 ) -> Result<(), RunnerError> {
     let docker = docker_client(&params.endpoint)?;
     remove_container_if_exists(&docker, &params.endpoint, &params.container_name).await?;
+
+    // Pull the image if it doesn't exist locally.
+    if docker.inspect_image(&params.image).await.is_err() {
+        let (from_image, tag) = match params.image.rsplit_once(':') {
+            Some((img, tag)) => (img, tag),
+            None => (params.image.as_str(), "latest"),
+        };
+        docker
+            .create_image(
+                Some(
+                    CreateImageOptionsBuilder::new()
+                        .from_image(from_image)
+                        .tag(tag)
+                        .build(),
+                ),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|source| {
+                docker_operation_error(
+                    &params.endpoint,
+                    "pull_image",
+                    &params.container_name,
+                    source,
+                )
+            })?;
+    }
 
     let mut binds: Vec<String> = [
         params.workspace.root,

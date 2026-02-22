@@ -16,9 +16,10 @@ pub use channel::{
     GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus,
 };
 pub use config::{
-    AgentConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
+    AgentConfig, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
     ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig,
-    RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SummarizationConfig, validate_config_version,
+    RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SummarizationConfig, UnknownModelCaps,
+    validate_config_version,
 };
 pub use error::{ChannelError, MemoryError, ProviderError, RuntimeError, ToolError};
 pub use memory::{

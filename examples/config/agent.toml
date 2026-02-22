@@ -69,3 +69,30 @@ base_url = "https://api.openai.com"
 provider_type = "anthropic"
 base_url = "https://api.anthropic.com"
 # api_key = "sk-ant-..."
+
+# --- Example: Google Gemini ---
+# [providers.registry.gemini]
+# provider_type = "gemini"
+# api_key_env = "GEMINI_API_KEY"
+
+# --- Example: OpenAI Responses API (stateful session chaining) ---
+# [providers.registry.openai-responses]
+# provider_type = "openai_responses"
+# api_key_env = "OPENAI_API_KEY"
+
+# --- Example: OpenRouter (or other OpenAI-compatible proxy) ---
+# Requires catalog.skip_catalog_validation = true for models not in the
+# pinned catalog.
+# [providers.registry.openrouter]
+# provider_type = "openai"
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+# catalog_provider = "openrouter"
+# reasoning = true              # If the model supports reasoning/thinking
+# max_context_tokens = 200000   # Override default 128K context
+# max_output_tokens = 8192      # Override default 16K output
+
+# --- Catalog resolution and validation ---
+[catalog]
+skip_catalog_validation = false  # Set true to allow models not in the catalog
+# pinned_url = "https://raw.githubusercontent.com/..."  # Override pinned snapshot URL

@@ -21,6 +21,8 @@ pub struct AgentConfig {
     pub providers: ProviderConfigs,
     #[serde(default)]
     pub reliability: ReliabilityConfig,
+    #[serde(default)]
+    pub catalog: CatalogConfig,
 }
 
 impl Default for AgentConfig {
@@ -32,6 +34,7 @@ impl Default for AgentConfig {
             selection: ProviderSelection::default(),
             providers: ProviderConfigs::default(),
             reliability: ReliabilityConfig::default(),
+            catalog: CatalogConfig::default(),
         }
     }
 }
@@ -368,6 +371,16 @@ pub struct ProviderRegistryEntry {
     /// `OpenaiResponses` → `"openai"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_provider: Option<String>,
+    /// Per-entry capability overrides for unknown models (used only when
+    /// `skip_catalog_validation` is enabled and the model is not in the catalog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
 }
 
 impl ProviderRegistryEntry {
@@ -375,6 +388,16 @@ impl ProviderRegistryEntry {
     ///
     /// Uses the explicit `catalog_provider` if set, otherwise defaults
     /// based on `provider_type`.
+    /// Extracts capability overrides for use with unknown model synthesis.
+    pub fn unknown_model_caps(&self) -> UnknownModelCaps {
+        UnknownModelCaps {
+            reasoning: self.reasoning,
+            max_input_tokens: self.max_input_tokens,
+            max_output_tokens: self.max_output_tokens,
+            max_context_tokens: self.max_context_tokens,
+        }
+    }
+
     pub fn effective_catalog_provider(&self) -> String {
         if let Some(ref cp) = self.catalog_provider {
             cp.clone()
@@ -442,6 +465,39 @@ impl Default for ReliabilityConfig {
             jitter: false,
         }
     }
+}
+
+/// Catalog resolution and validation configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogConfig {
+    /// When `true`, unknown models (not found in the catalog) are allowed
+    /// through with synthetic default capabilities instead of being rejected.
+    #[serde(default)]
+    pub skip_catalog_validation: bool,
+    /// Optional URL for fetching the pinned catalog snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_url: Option<String>,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        Self {
+            skip_catalog_validation: false,
+            pinned_url: None,
+        }
+    }
+}
+
+/// Capability overrides specified on a per-registry-entry basis.
+///
+/// Used when `skip_catalog_validation` is on and the model is not in the
+/// catalog, to provide sensible defaults for the synthetic descriptor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnknownModelCaps {
+    pub reasoning: Option<bool>,
+    pub max_input_tokens: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+    pub max_context_tokens: Option<u32>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -565,6 +621,10 @@ fn default_provider_registry() -> BTreeMap<String, ProviderRegistryEntry> {
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
             extra_headers: None,
             catalog_provider: None,
+            reasoning: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
         },
     );
     registry.insert(
@@ -576,6 +636,10 @@ fn default_provider_registry() -> BTreeMap<String, ProviderRegistryEntry> {
             api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
             extra_headers: None,
             catalog_provider: None,
+            reasoning: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
         },
     );
     registry
@@ -673,6 +737,10 @@ mod tests {
                 api_key_env: Some("CORP_OPENAI_KEY".to_owned()),
                 extra_headers: None,
                 catalog_provider: None,
+                reasoning: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
+                max_context_tokens: None,
             },
         );
         let entry = config
@@ -705,6 +773,10 @@ mod tests {
             api_key_env: None,
             extra_headers: None,
             catalog_provider: None,
+            reasoning: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
         };
         assert_eq!(openai_entry.effective_catalog_provider(), "openai");
 
@@ -807,6 +879,10 @@ mod tests {
                 "value".to_owned(),
             )])),
             catalog_provider: Some("openai".to_owned()),
+            reasoning: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
         };
         let json = serde_json::to_string(&entry).expect("should serialize");
         let deserialized: ProviderRegistryEntry =

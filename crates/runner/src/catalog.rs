@@ -9,6 +9,9 @@ use types::{CapsOverrideEntry, CapsOverrides, CatalogProvider, ModelCatalog};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
+/// Default pinned snapshot URL.
+pub const DEFAULT_PINNED_URL: &str = "https://raw.githubusercontent.com/shantanugoel/oxydra/refs/heads/main/crates/types/data/pinned_model_catalog.json";
+
 /// Default set of providers to include when filtering the models.dev catalog.
 pub const DEFAULT_FILTER_PROVIDERS: &[&str] = &["openai", "anthropic", "google"];
 
@@ -99,81 +102,173 @@ pub fn write_overrides(overrides: &CapsOverrides, path: &Path) -> Result<(), Cat
     Ok(())
 }
 
-/// Run the full catalog fetch pipeline: fetch, filter, merge, canonicalize, write.
-pub fn run_fetch(providers: &[&str]) -> Result<(), CatalogError> {
-    let catalog_path = PathBuf::from(ModelCatalog::pinned_snapshot_path());
-    let overrides_path = PathBuf::from(ModelCatalog::pinned_overrides_path());
+/// Run the catalog fetch pipeline.
+///
+/// Default (no flags): fetch unfiltered from models.dev, write to user cache.
+/// With `--pinned`: fetch from the pinned snapshot URL, write to user cache.
+/// With `--providers`: fetch from models.dev, filter + merge overrides, write
+/// to the in-repo pinned snapshot (dev workflow for updating committed snapshot).
+pub fn run_fetch(
+    providers: &[&str],
+    pinned: bool,
+    pinned_url: Option<&str>,
+) -> Result<(), CatalogError> {
+    if pinned {
+        // Fetch from pinned URL and write to user cache
+        let url = pinned_url.unwrap_or(DEFAULT_PINNED_URL);
+        eprintln!("Fetching pinned catalog from {url}...");
+        let body = reqwest::blocking::get(url)?.text()?;
 
-    eprintln!("Fetching models.dev catalog...");
-    let raw = fetch_models_dev_json()?;
+        let cache_path = ModelCatalog::user_cache_path()
+            .ok_or_else(|| CatalogError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "could not determine user cache path (HOME not set)",
+            )))?;
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
 
-    eprintln!("Filtering to providers: {}", providers.join(", "));
-    let catalog = filter_catalog(&raw, providers)?;
+        // Validate it parses
+        let catalog = ModelCatalog::from_snapshot_str(&body)
+            .map_err(|e| CatalogError::Fetch(format!("pinned catalog parse error: {e}")))?;
 
-    let canonical = canonicalize_json(&catalog)?;
-    write_canonical_catalog(&canonical, &catalog_path)?;
-    eprintln!("Wrote pinned catalog: {}", catalog_path.display());
+        fs::write(&cache_path, &body)?;
+        eprintln!("Wrote pinned catalog to cache: {}", cache_path.display());
+        show_catalog_summary(&catalog);
+        return Ok(());
+    }
 
-    let existing_overrides = load_overrides(&overrides_path)?;
-    let merged_overrides = merge_overrides(&existing_overrides, providers);
-    write_overrides(&merged_overrides, &overrides_path)?;
-    eprintln!("Wrote caps overrides: {}", overrides_path.display());
+    // Check if --providers was specified (non-default list or explicit flag)
+    let has_providers_filter = !providers.is_empty();
 
-    show_catalog_summary(&catalog);
+    if has_providers_filter {
+        // Dev workflow: fetch, filter, merge overrides, write to in-repo snapshot
+        let catalog_path = PathBuf::from(ModelCatalog::pinned_snapshot_path());
+        let overrides_path = PathBuf::from(ModelCatalog::pinned_overrides_path());
+
+        eprintln!("Fetching models.dev catalog...");
+        let raw = fetch_models_dev_json()?;
+
+        eprintln!("Filtering to providers: {}", providers.join(", "));
+        let catalog = filter_catalog(&raw, providers)?;
+
+        let canonical = canonicalize_json(&catalog)?;
+        write_canonical_catalog(&canonical, &catalog_path)?;
+        eprintln!("Wrote pinned catalog: {}", catalog_path.display());
+
+        let existing_overrides = load_overrides(&overrides_path)?;
+        let merged_overrides = merge_overrides(&existing_overrides, providers);
+        write_overrides(&merged_overrides, &overrides_path)?;
+        eprintln!("Wrote caps overrides: {}", overrides_path.display());
+
+        show_catalog_summary(&catalog);
+    } else {
+        // Default: fetch unfiltered, write to user cache
+        eprintln!("Fetching models.dev catalog...");
+        let raw = fetch_models_dev_json()?;
+
+        let cache_path = ModelCatalog::user_cache_path()
+            .ok_or_else(|| CatalogError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "could not determine user cache path (HOME not set)",
+            )))?;
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Validate it parses
+        let catalog: ModelCatalog = serde_json::from_str(&raw)?;
+
+        let canonical = canonicalize_json(&catalog)?;
+        fs::write(&cache_path, &canonical)?;
+        eprintln!("Wrote catalog cache: {}", cache_path.display());
+        show_catalog_summary(&catalog);
+    }
+
     Ok(())
 }
 
-/// Verify that a freshly fetched + filtered + canonicalized catalog matches
-/// the committed pinned snapshot. Returns `true` if they are identical.
-pub fn run_verify(providers: &[&str]) -> Result<bool, CatalogError> {
-    eprintln!("Fetching models.dev catalog for verification...");
-    let raw = fetch_models_dev_json()?;
-    let catalog = filter_catalog(&raw, providers)?;
-    let fresh_json = canonicalize_json(&catalog)?;
+/// Verify that the resolved catalog (cache → pinned snapshot) has a valid
+/// schema by attempting to parse it and checking structural integrity.
+/// Returns `true` if the catalog is valid.
+pub fn run_verify() -> Result<bool, CatalogError> {
+    eprintln!("Verifying resolved model catalog...");
 
-    let committed_json = ModelCatalog::pinned_snapshot_json();
-
-    if fresh_json == committed_json {
-        eprintln!("Pinned catalog is up to date.");
-        Ok(true)
+    // Resolve the current catalog: check cache first, then pinned snapshot.
+    let (source, catalog) = if let Some(catalog) = ModelCatalog::load_from_cache() {
+        let source = ModelCatalog::user_cache_path()
+            .filter(|p| p.is_file())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| {
+                ModelCatalog::workspace_cache_path().display().to_string()
+            });
+        (source, catalog)
     } else {
-        eprintln!("Pinned catalog has drifted from models.dev upstream.");
-
-        if let Ok(committed_catalog) = ModelCatalog::from_snapshot_str(committed_json) {
-            for provider_id in providers {
-                let committed_count = committed_catalog
-                    .providers
-                    .get(*provider_id)
-                    .map(|p| p.models.len())
-                    .unwrap_or(0);
-                let fresh_count = catalog
-                    .providers
-                    .get(*provider_id)
-                    .map(|p| p.models.len())
-                    .unwrap_or(0);
-                if committed_count != fresh_count {
-                    eprintln!("  {provider_id}: {committed_count} -> {fresh_count} models");
-                }
+        match ModelCatalog::from_pinned_snapshot() {
+            Ok(catalog) => ("compiled-in pinned snapshot".to_owned(), catalog),
+            Err(e) => {
+                eprintln!("Failed to load any catalog: {e}");
+                return Ok(false);
             }
         }
+    };
 
-        eprintln!("Run `oxydra catalog fetch` to update the snapshot.");
-        Ok(false)
+    // Validate structural integrity: at least one provider with at least one model
+    if catalog.providers.is_empty() {
+        eprintln!("Catalog from {source} is empty (no providers).");
+        return Ok(false);
     }
+
+    let mut total_models = 0usize;
+    let mut empty_providers = Vec::new();
+    for (provider_id, provider) in &catalog.providers {
+        if provider.models.is_empty() {
+            empty_providers.push(provider_id.as_str());
+        }
+        total_models += provider.models.len();
+    }
+
+    // Verify each model descriptor round-trips through serialization
+    let canonical = canonicalize_json(&catalog)?;
+    if ModelCatalog::from_snapshot_str(&canonical).is_err() {
+        eprintln!("Catalog from {source} fails re-serialization round-trip.");
+        return Ok(false);
+    }
+
+    eprintln!("Catalog source: {source}");
+    eprintln!(
+        "Schema valid: {} providers, {total_models} models",
+        catalog.providers.len()
+    );
+    if !empty_providers.is_empty() {
+        eprintln!(
+            "Warning: providers with no models: {}",
+            empty_providers.join(", ")
+        );
+    }
+
+    show_catalog_summary(&catalog);
+    Ok(true)
 }
 
-/// Pretty-print a summary of the current pinned catalog.
+/// Pretty-print a summary of the resolved catalog (cached or pinned).
 pub fn run_show() -> Result<(), CatalogError> {
-    let committed = ModelCatalog::pinned_snapshot_json();
-    let catalog = ModelCatalog::from_snapshot_str(committed)
-        .map_err(|e| CatalogError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))?;
+    let catalog = ModelCatalog::load_from_cache().map_or_else(
+        || {
+            let committed = ModelCatalog::pinned_snapshot_json();
+            ModelCatalog::from_snapshot_str(committed).map_err(|e| {
+                CatalogError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+            })
+        },
+        Ok,
+    )?;
     show_catalog_summary(&catalog);
     Ok(())
 }
 
 fn show_catalog_summary(catalog: &ModelCatalog) {
-    println!("Pinned Model Catalog");
-    println!("====================");
+    println!("Model Catalog");
+    println!("=============");
     let mut total = 0;
     for (provider_id, provider) in &catalog.providers {
         let count = provider.models.len();

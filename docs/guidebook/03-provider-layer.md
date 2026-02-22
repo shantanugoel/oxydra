@@ -79,7 +79,25 @@ The runtime uses these to decide whether to call `stream()` or fall back to `com
 
 ## Model Catalog
 
-The `ModelCatalog` is a registry of `ModelDescriptor` entries organized by catalog provider, embedded into the binary at build time from `types/data/pinned_model_catalog.json`. A companion `oxydra_caps_overrides.json` file provides Oxydra-specific overlays. Both are loaded together via `ModelCatalog::from_pinned_snapshot()`.
+The `ModelCatalog` is a registry of `ModelDescriptor` entries organized by catalog provider. At runtime, the catalog is resolved using a three-tier loading strategy:
+
+1. **Cached catalog** — checks `~/.config/oxydra/model_catalog.json` (user-level), then `.oxydra/model_catalog.json` (workspace-level)
+2. **Auto-fetch** — if no cache exists, fetches from `https://models.dev/api.json`, writes to the user cache on success
+3. **Pinned snapshot** — falls back to the compiled-in `types/data/pinned_model_catalog.json` if auto-fetch fails
+
+A companion `oxydra_caps_overrides.json` file provides Oxydra-specific overlays, applied to whichever catalog is loaded.
+
+If the auto-fetched catalog uses an unsupported schema (parse failure), the system logs a warning with source info and falls back to the pinned snapshot.
+
+### Unknown Models and `skip_catalog_validation`
+
+When `catalog.skip_catalog_validation = true` in the agent config, models not found in any loaded catalog are assigned a synthetic `ModelDescriptor` with:
+- `supports_streaming = true`, `supports_tools = true`
+- `supports_json_mode = false`, `supports_reasoning_traces = false` (unless overridden)
+- Default context: 128K tokens, default output: 16K tokens
+- Per-registry-entry overrides (`reasoning`, `max_input_tokens`, `max_output_tokens`, `max_context_tokens`) can customize these defaults
+
+This enables OpenAI-compatible proxies (e.g. OpenRouter) to use models not in the pinned catalog.
 
 ### ModelDescriptor (models.dev-aligned)
 
@@ -149,11 +167,13 @@ Requests against unknown model IDs fail at validation time before any network ca
 
 ### Catalog Snapshot Commands
 
-The runner provides CLI commands for managing the pinned catalog:
+The runner provides CLI commands for managing the catalog:
 
-- **`catalog fetch`** — fetches the full catalog from `https://models.dev/api.json`, filters to configured providers (default: `openai`, `anthropic`, `google`), writes the canonical JSON snapshot and merges capability overrides
-- **`catalog verify`** — re-fetches and compares against the committed snapshot, reporting drift
-- **`catalog show`** — pretty-prints a summary of the current pinned catalog
+- **`catalog fetch`** (default) — fetches the full unfiltered catalog from `https://models.dev/api.json` and writes to `~/.config/oxydra/model_catalog.json` (user cache)
+- **`catalog fetch --pinned`** — fetches from the pinned snapshot URL and writes to user cache
+- **`catalog fetch --providers openai,anthropic,google`** — fetches from models.dev, filters to specified providers, and writes to the in-repo pinned snapshot (dev workflow for updating the committed snapshot). Also merges capability overrides.
+- **`catalog verify`** — re-fetches and compares against the resolved catalog (cache → pinned), reporting drift
+- **`catalog show`** — pretty-prints a summary of the resolved catalog (cached or pinned)
 
 The fetch pipeline (`runner/src/catalog.rs`) ensures deterministic output via `BTreeMap` ordering and trailing-newline convention. The `regenerate_snapshot` / `verify_snapshot_bytes` functions are available for CI integration.
 

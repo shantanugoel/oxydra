@@ -1,12 +1,25 @@
-use std::{collections::BTreeMap, fmt, fs, io, path::Path};
+use std::{
+    collections::BTreeMap,
+    env, fmt, fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{error::ProviderError, tool::FunctionDecl};
+use crate::{config::UnknownModelCaps, error::ProviderError, tool::FunctionDecl};
 
 const PINNED_MODEL_CATALOG_SNAPSHOT: &str = include_str!("../data/pinned_model_catalog.json");
 const PINNED_CAPS_OVERRIDES: &str = include_str!("../data/oxydra_caps_overrides.json");
+
+/// Cache file name for the locally-stored model catalog.
+const MODEL_CATALOG_CACHE_FILE: &str = "model_catalog.json";
+
+/// User-level config directory relative to $HOME.
+const USER_CONFIG_DIR: &str = ".config/oxydra";
+
+/// Workspace-level config directory.
+const WORKSPACE_CONFIG_DIR: &str = ".oxydra";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -277,6 +290,35 @@ pub struct ModelDescriptor {
 }
 
 impl ModelDescriptor {
+    /// Creates a synthetic descriptor for an unknown model with sensible
+    /// defaults and user-specified capability overrides.
+    ///
+    /// Used when `skip_catalog_validation` is enabled and the model is not
+    /// found in any loaded catalog.
+    pub fn default_for_unknown(model_id: &str, overrides: &UnknownModelCaps) -> Self {
+        Self {
+            id: model_id.to_owned(),
+            name: model_id.to_owned(),
+            family: None,
+            attachment: false,
+            reasoning: overrides.reasoning.unwrap_or(false),
+            tool_call: true,
+            interleaved: None,
+            structured_output: false,
+            temperature: true,
+            knowledge: None,
+            release_date: None,
+            last_updated: None,
+            modalities: Modalities::default(),
+            open_weights: false,
+            cost: ModelCost::default(),
+            limit: ModelLimits {
+                context: overrides.max_context_tokens.unwrap_or(128_000),
+                output: overrides.max_output_tokens.unwrap_or(16_384),
+            },
+        }
+    }
+
     /// Derives a [`ProviderCaps`] from the models.dev fields.
     ///
     /// This provides a baseline derivation. Step 2 will add an Oxydra overlay
@@ -470,6 +512,53 @@ impl<'de> Deserialize<'de> for ModelCatalog {
 }
 
 impl ModelCatalog {
+    /// Returns the user-level cache path: `~/.config/oxydra/model_catalog.json`.
+    pub fn user_cache_path() -> Option<PathBuf> {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(USER_CONFIG_DIR).join(MODEL_CATALOG_CACHE_FILE))
+    }
+
+    /// Returns the workspace-level cache path: `.oxydra/model_catalog.json`.
+    pub fn workspace_cache_path() -> PathBuf {
+        PathBuf::from(WORKSPACE_CONFIG_DIR).join(MODEL_CATALOG_CACHE_FILE)
+    }
+
+    /// Loads a catalog from a JSON file on disk and applies the compiled-in
+    /// capability overrides.
+    pub fn from_file(path: &Path) -> Result<Self, ProviderError> {
+        let content = fs::read_to_string(path).map_err(|e| ProviderError::RequestFailed {
+            provider: ProviderId::from("catalog"),
+            message: format!("failed to read catalog from {}: {e}", path.display()),
+        })?;
+        let catalog = Self::from_snapshot_str(&content)?;
+        let overrides: CapsOverrides = serde_json::from_str(PINNED_CAPS_OVERRIDES)?;
+        Ok(catalog.with_caps_overrides(overrides))
+    }
+
+    /// Tries to load a cached catalog from user-level then workspace-level
+    /// cache paths. Returns `None` if no cache file exists.
+    pub fn load_from_cache() -> Option<Self> {
+        // Try user cache first
+        if let Some(user_path) = Self::user_cache_path() {
+            if user_path.is_file() {
+                if let Ok(catalog) = Self::from_file(&user_path) {
+                    return Some(catalog);
+                }
+            }
+        }
+
+        // Try workspace cache
+        let workspace_path = Self::workspace_cache_path();
+        if workspace_path.is_file() {
+            if let Ok(catalog) = Self::from_file(&workspace_path) {
+                return Some(catalog);
+            }
+        }
+
+        None
+    }
+
     pub fn new(providers: BTreeMap<String, CatalogProvider>) -> Self {
         Self {
             providers,

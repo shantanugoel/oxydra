@@ -6305,6 +6305,7 @@ dependencies = [
  "memory",
  "provider",
  "ratatui",
+ "reqwest 0.12.28",
  "runtime",
  "serde",
  "serde_json",

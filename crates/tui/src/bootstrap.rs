@@ -17,8 +17,9 @@ use serde::Serialize;
 use thiserror::Error;
 use tools::{RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools};
 use types::{
-    AgentConfig, BootstrapEnvelopeError, ConfigError, Memory, MemoryError, ModelCatalog, Provider,
-    ProviderError, RunnerBootstrapEnvelope, StartupStatusReport,
+    AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, Memory, MemoryError,
+    ModelCatalog, ModelDescriptor, Provider, ProviderError, ProviderId, RunnerBootstrapEnvelope,
+    StartupStatusReport,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -75,6 +76,8 @@ pub struct CliOverrides {
     pub providers: Option<ProviderOverrides>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reliability: Option<ReliabilityOverrides>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogOverrides>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -171,6 +174,12 @@ pub struct ReliabilityOverrides {
     pub jitter: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CatalogOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_catalog_validation: Option<bool>,
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error("failed to resolve configuration path: {0}")]
@@ -227,27 +236,130 @@ pub fn load_agent_config_with_paths(
     Ok(config)
 }
 
+/// Resolves the model catalog using the following priority:
+///
+/// 1. Cached catalog (user-level `~/.config/oxydra/model_catalog.json`,
+///    then workspace `.oxydra/model_catalog.json`)
+/// 2. Auto-fetch from `https://models.dev/api.json` (writes to user cache on success)
+/// 3. Compiled-in pinned snapshot as final fallback
+pub fn resolve_model_catalog(provider_id: &ProviderId) -> Result<ModelCatalog, CliError> {
+    // Try cached catalogs first
+    if let Some(catalog) = ModelCatalog::load_from_cache() {
+        tracing::debug!("loaded model catalog from cache");
+        return Ok(catalog);
+    }
+
+    // Auto-fetch from models.dev
+    const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+    let fetch_result = std::thread::spawn(|| {
+        reqwest::blocking::get(MODELS_DEV_URL).and_then(|r| r.text())
+    })
+    .join()
+    .map_err(|_| "fetch thread panicked".to_owned())
+    .and_then(|r| r.map_err(|e| e.to_string()));
+    match fetch_result {
+        Ok(body) => match ModelCatalog::from_snapshot_str(&body) {
+            Ok(catalog) => {
+                // Apply compiled-in overrides
+                let overrides_str = ModelCatalog::pinned_overrides_json();
+                let overrides: types::CapsOverrides =
+                    serde_json::from_str(overrides_str).unwrap_or_default();
+                let catalog = catalog.with_caps_overrides(overrides);
+
+                // Write to user cache
+                if let Some(user_path) = ModelCatalog::user_cache_path() {
+                    if let Some(parent) = user_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(e) = std::fs::write(&user_path, &body) {
+                        tracing::warn!(
+                            path = %user_path.display(),
+                            error = %e,
+                            "failed to write catalog cache"
+                        );
+                    } else {
+                        tracing::debug!(path = %user_path.display(), "wrote catalog cache");
+                    }
+                }
+
+                return Ok(catalog);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    source = "models.dev",
+                    error = %e,
+                    "unsupported catalog schema from auto-fetch; falling back to pinned snapshot"
+                );
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to auto-fetch models.dev catalog; falling back to pinned snapshot"
+            );
+        }
+    }
+
+    // Fall back to compiled-in pinned snapshot
+    ModelCatalog::from_pinned_snapshot().map_err(|error| {
+        ProviderError::RequestFailed {
+            provider: provider_id.clone(),
+            message: format!("failed to load model catalog: {error}"),
+        }
+        .into()
+    })
+}
+
 pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, CliError> {
     config.validate()?;
 
     let provider_id = config.selection.provider.clone();
     let entry = config.providers.resolve(&provider_id.0)?;
-    let model_catalog =
-        ModelCatalog::from_pinned_snapshot().map_err(|error| ProviderError::RequestFailed {
-            provider: provider_id.clone(),
-            message: format!("failed to load model catalog: {error}"),
-        })?;
+    let mut model_catalog = resolve_model_catalog(&provider_id)?;
 
-    // Validate the selected model exists in the catalog under the resolved
-    // entry's catalog provider namespace.
     let catalog_provider_id = entry.effective_catalog_provider();
-    let catalog_provider = types::ProviderId::from(catalog_provider_id.as_str());
-    model_catalog
-        .validate(&catalog_provider, &config.selection.model)
-        .map_err(|_| ConfigError::UnknownModelForCatalogProvider {
-            model: config.selection.model.0.clone(),
-            catalog_provider: catalog_provider_id.clone(),
-        })?;
+    let catalog_provider = ProviderId::from(catalog_provider_id.as_str());
+    let skip_validation = config.catalog.skip_catalog_validation;
+
+    // If the model is not in the catalog and skip_catalog_validation is on,
+    // insert a synthetic descriptor so downstream validation passes.
+    let model_found = model_catalog
+        .get(&catalog_provider, &config.selection.model)
+        .is_some();
+
+    if !model_found {
+        if skip_validation {
+            let caps = entry.unknown_model_caps();
+            let synthetic = ModelDescriptor::default_for_unknown(&config.selection.model.0, &caps);
+            tracing::info!(
+                model = %config.selection.model,
+                catalog_provider = %catalog_provider_id,
+                "model not in catalog; using synthetic descriptor (skip_catalog_validation=true)"
+            );
+
+            // Ensure the catalog provider exists
+            let provider_entry = model_catalog
+                .providers
+                .entry(catalog_provider_id.clone())
+                .or_insert_with(|| CatalogProvider {
+                    id: catalog_provider_id.clone(),
+                    name: catalog_provider_id.clone(),
+                    env: vec![],
+                    api: None,
+                    doc: None,
+                    models: std::collections::BTreeMap::new(),
+                });
+            provider_entry
+                .models
+                .insert(config.selection.model.0.clone(), synthetic);
+        } else {
+            return Err(ConfigError::UnknownModelForCatalogProvider {
+                model: config.selection.model.0.clone(),
+                catalog_provider: catalog_provider_id.clone(),
+            }
+            .into());
+        }
+    }
 
     // Check for deprecated models via the Oxydra overlay and emit a warning.
     if model_catalog
@@ -263,7 +375,11 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
 
     let inner: Box<dyn Provider> = provider::build_provider(provider_id, entry, model_catalog)?;
 
-    inner.capabilities(&config.selection.model)?;
+    // Skip the separate capabilities validation when using a synthetic
+    // descriptor — the defaults already provide what's needed.
+    if !skip_validation || model_found {
+        inner.capabilities(&config.selection.model)?;
+    }
 
     Ok(ReliableProvider::new(
         inner,
@@ -993,6 +1109,10 @@ api_key = "test-openai-key"
                 api_key_env: None,
                 extra_headers: None,
                 catalog_provider: None, // should default to "openai"
+                reasoning: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
+                max_context_tokens: None,
             },
         );
 

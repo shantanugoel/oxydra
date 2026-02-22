@@ -48,6 +48,7 @@ pub struct AgentConfig {
     pub selection: ProviderSelection,  // Active provider name + model
     pub providers: ProviderConfigs,    // Named provider registry
     pub reliability: ReliabilityConfig,
+    pub catalog: CatalogConfig,        // Catalog resolution and validation
 }
 ```
 
@@ -108,6 +109,10 @@ pub struct ProviderRegistryEntry {
     pub api_key_env: Option<String>,           // Custom env var for API key
     pub extra_headers: Option<BTreeMap<String, String>>,  // Additional HTTP headers
     pub catalog_provider: Option<String>,       // Override catalog namespace for model validation
+    pub reasoning: Option<bool>,               // Override for unknown model reasoning capability
+    pub max_input_tokens: Option<u32>,         // Override max input tokens for unknown models
+    pub max_output_tokens: Option<u32>,        // Override max output tokens for unknown models
+    pub max_context_tokens: Option<u32>,       // Override max context tokens for unknown models
 }
 ```
 
@@ -123,6 +128,39 @@ pub enum ProviderType {
     OpenaiResponses,  // OpenAI Responses API (/v1/responses) with stateful chaining
 }
 ```
+
+### `CatalogConfig`
+
+Controls model catalog resolution and validation:
+
+```rust
+pub struct CatalogConfig {
+    pub skip_catalog_validation: bool,  // Default: false
+    pub pinned_url: Option<String>,     // Optional override for pinned snapshot URL
+}
+```
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `skip_catalog_validation` | `false` | When `true`, unknown models are allowed through with synthetic default capabilities |
+| `pinned_url` | (none) | Override the default URL for fetching the pinned catalog snapshot |
+
+When `skip_catalog_validation` is enabled, models not found in any loaded catalog are assigned a synthetic descriptor with sensible defaults (`supports_streaming=true`, `supports_tools=true`, context=128K, output=16K). Per-registry-entry capability overrides can fine-tune these defaults.
+
+**Catalog cache locations:**
+- User-level: `~/.config/oxydra/model_catalog.json`
+- Workspace-level: `.oxydra/model_catalog.json`
+
+#### Per-Registry-Entry Capability Overrides
+
+Each `ProviderRegistryEntry` supports optional capability fields used when `skip_catalog_validation` is on and the model is not in the catalog:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `reasoning` | `Option<bool>` | Whether the model supports reasoning/thinking |
+| `max_input_tokens` | `Option<u32>` | Override max input tokens (default: 128000) |
+| `max_output_tokens` | `Option<u32>` | Override max output tokens (default: 16384) |
+| `max_context_tokens` | `Option<u32>` | Override max context tokens (default: 128000) |
 
 ### `ReliabilityConfig`
 
@@ -284,4 +322,19 @@ provider_type = "anthropic"
 # base_url = "https://llm-proxy.corp.internal/v1"
 # api_key_env = "CORP_LLM_KEY"
 # catalog_provider = "openai"  # validate models against OpenAI catalog
+
+# --- Catalog settings ---
+
+[catalog]
+# skip_catalog_validation = true  # allow unknown models with synthetic caps
+
+# --- OpenRouter with skip_catalog_validation ---
+# [providers.registry.openrouter]
+# provider_type = "openai"
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+# catalog_provider = "openrouter"
+# reasoning = true
+# max_context_tokens = 200000
+# max_output_tokens = 8192
 ```

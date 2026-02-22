@@ -20,7 +20,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring |
-| 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides |
+| 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides, cached catalog resolution, `skip_catalog_validation` escape hatch, updated CLI (`fetch --pinned`, unfiltered cache) |
 | 14 | External channels + identity mapping | Planned | |
 | 15 | Multi-agent orchestration | Planned | |
 | 16 | Observability (OpenTelemetry) | Planned | |

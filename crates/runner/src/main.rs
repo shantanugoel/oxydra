@@ -22,18 +22,20 @@ enum CliCommand {
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 enum CatalogAction {
-    /// Fetch models.dev catalog, filter, and write pinned snapshot
+    /// Fetch models.dev catalog and write to cache or pinned snapshot
     Fetch {
-        /// Comma-separated provider IDs to include (default: openai,anthropic,google)
+        /// Comma-separated provider IDs to include. When specified, fetches
+        /// from models.dev, filters, and writes to the in-repo pinned snapshot
+        /// (dev workflow). Without this flag, writes unfiltered to user cache.
         #[arg(long, value_delimiter = ',')]
         providers: Option<Vec<String>>,
+        /// Fetch from the pinned snapshot URL instead of models.dev and write
+        /// to user cache. When used, --providers is ignored.
+        #[arg(long)]
+        pinned: bool,
     },
-    /// Verify pinned snapshot matches upstream
-    Verify {
-        /// Comma-separated provider IDs to verify (default: openai,anthropic,google)
-        #[arg(long, value_delimiter = ',')]
-        providers: Option<Vec<String>>,
-    },
+    /// Verify that the resolved catalog (cached or pinned) has a valid schema
+    Verify,
     /// Display summary of pinned catalog
     Show,
 }
@@ -188,21 +190,19 @@ fn handle_command(command: CliCommand) -> Result<(), CliError> {
 
 fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {
     match action {
-        CatalogAction::Fetch { providers } => {
+        CatalogAction::Fetch { providers, pinned } => {
             let providers = resolve_catalog_providers(providers);
             let provider_refs: Vec<&str> = providers.iter().map(String::as_str).collect();
-            runner::catalog::run_fetch(&provider_refs)?;
+            runner::catalog::run_fetch(&provider_refs, pinned, None)?;
             Ok(())
         }
-        CatalogAction::Verify { providers } => {
-            let providers = resolve_catalog_providers(providers);
-            let provider_refs: Vec<&str> = providers.iter().map(String::as_str).collect();
-            let matches = runner::catalog::run_verify(&provider_refs)?;
-            if matches {
+        CatalogAction::Verify => {
+            let valid = runner::catalog::run_verify()?;
+            if valid {
                 Ok(())
             } else {
                 Err(CliError::Arguments(
-                    "catalog verification failed: pinned snapshot has drifted from upstream"
+                    "catalog verification failed: schema is invalid or catalog is empty"
                         .to_owned(),
                 ))
             }
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(
             args.command,
             Some(CliCommand::Catalog {
-                action: CatalogAction::Fetch { providers: None }
+                action: CatalogAction::Fetch { providers: None, pinned: false }
             })
         );
     }
@@ -433,7 +433,8 @@ mod tests {
             args.command,
             Some(CliCommand::Catalog {
                 action: CatalogAction::Fetch {
-                    providers: Some(vec!["openai".to_owned(), "google".to_owned()])
+                    providers: Some(vec!["openai".to_owned(), "google".to_owned()]),
+                    pinned: false,
                 }
             })
         );
@@ -446,7 +447,7 @@ mod tests {
         assert_eq!(
             args.command,
             Some(CliCommand::Catalog {
-                action: CatalogAction::Verify { providers: None }
+                action: CatalogAction::Verify
             })
         );
     }

@@ -7,10 +7,12 @@
 config_version = "1.0.0"
 
 # --- Provider selection ---
-# Supported providers: "openai", "anthropic"
+# The provider name must match an entry in [providers.registry.*].
+# Supported provider types: "openai", "anthropic", "gemini", "openai_responses"
 # Available models (from pinned catalog):
 #   OpenAI:    gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, o3-mini
 #   Anthropic: claude-3-5-haiku-latest, claude-3-5-sonnet-latest
+#   Google:    (populated by `catalog fetch`; set GEMINI_API_KEY)
 [selection]
 provider = "openai"
 model    = "gpt-4o-mini"
@@ -52,16 +54,18 @@ backoff_base_ms = 250   # Initial backoff delay
 backoff_max_ms  = 2000  # Maximum backoff delay
 jitter          = false # Add randomized jitter to backoff
 
-# --- Provider endpoints and credentials ---
+# --- Provider registry, endpoints, and credentials ---
 # API keys can also be set via environment variables:
-#   OPENAI_API_KEY, ANTHROPIC_API_KEY, or fallback API_KEY
+#   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or fallback API_KEY
 #
 # The base_url can point to any OpenAI-compatible endpoint (e.g. OpenRouter,
 # Azure OpenAI, or a local proxy).
-[providers.openai]
+[providers.registry.openai]
+provider_type = "openai"
 base_url = "https://api.openai.com"
 # api_key = "sk-..."
 
-[providers.anthropic]
+[providers.registry.anthropic]
+provider_type = "anthropic"
 base_url = "https://api.anthropic.com"
 # api_key = "sk-ant-..."

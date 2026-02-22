@@ -1,14 +1,42 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use runner::{
     Runner, RunnerControlTransportError, RunnerError, RunnerStartRequest, RunnerTuiConnectRequest,
+    catalog::{CatalogError, DEFAULT_FILTER_PROVIDERS},
 };
 use thiserror::Error;
 use types::init_tracing;
 
 const DEFAULT_RUNNER_CONFIG_PATH: &str = ".oxydra/runner.toml";
 const TUI_BINARY_NAME: &str = "oxydra-tui";
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+enum CliCommand {
+    /// Model catalog governance commands
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+enum CatalogAction {
+    /// Fetch models.dev catalog, filter, and write pinned snapshot
+    Fetch {
+        /// Comma-separated provider IDs to include (default: openai,anthropic,google)
+        #[arg(long, value_delimiter = ',')]
+        providers: Option<Vec<String>>,
+    },
+    /// Verify pinned snapshot matches upstream
+    Verify {
+        /// Comma-separated provider IDs to verify (default: openai,anthropic,google)
+        #[arg(long, value_delimiter = ',')]
+        providers: Option<Vec<String>>,
+    },
+    /// Display summary of pinned catalog
+    Show,
+}
 
 #[derive(Debug, Clone, Parser, PartialEq, Eq)]
 #[command(name = "runner", about = "Oxydra runner control CLI")]
@@ -27,6 +55,8 @@ struct CliArgs {
     probe: bool,
     #[arg(long = "daemon")]
     daemon: bool,
+    #[command(subcommand)]
+    command: Option<CliCommand>,
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +67,8 @@ enum CliError {
     Runner(#[from] RunnerError),
     #[error(transparent)]
     ControlTransport(#[from] RunnerControlTransportError),
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
     #[error(
         "`{binary}` was not found in PATH. \
          Install it with `cargo install --path crates/tui` or ensure it is on your PATH."
@@ -61,6 +93,11 @@ fn main() -> ExitCode {
 fn run() -> Result<(), CliError> {
     init_tracing();
     let args = CliArgs::parse();
+
+    // Catalog subcommands don't require a runner config or user id.
+    if let Some(command) = args.command {
+        return handle_command(command);
+    }
 
     let runner = Runner::from_global_config_path(&args.config_path)?;
     let user_id = resolve_user_id(args.user_id, &runner)?;
@@ -141,6 +178,49 @@ fn run() -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+fn handle_command(command: CliCommand) -> Result<(), CliError> {
+    match command {
+        CliCommand::Catalog { action } => handle_catalog_action(action),
+    }
+}
+
+fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {
+    match action {
+        CatalogAction::Fetch { providers } => {
+            let providers = resolve_catalog_providers(providers);
+            let provider_refs: Vec<&str> = providers.iter().map(String::as_str).collect();
+            runner::catalog::run_fetch(&provider_refs)?;
+            Ok(())
+        }
+        CatalogAction::Verify { providers } => {
+            let providers = resolve_catalog_providers(providers);
+            let provider_refs: Vec<&str> = providers.iter().map(String::as_str).collect();
+            let matches = runner::catalog::run_verify(&provider_refs)?;
+            if matches {
+                Ok(())
+            } else {
+                Err(CliError::Arguments(
+                    "catalog verification failed: pinned snapshot has drifted from upstream"
+                        .to_owned(),
+                ))
+            }
+        }
+        CatalogAction::Show => {
+            runner::catalog::run_show()?;
+            Ok(())
+        }
+    }
+}
+
+fn resolve_catalog_providers(providers: Option<Vec<String>>) -> Vec<String> {
+    providers.unwrap_or_else(|| {
+        DEFAULT_FILTER_PROVIDERS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    })
 }
 
 fn resolve_user_id(user_id: Option<String>, runner: &Runner) -> Result<String, CliError> {
@@ -317,6 +397,84 @@ mod tests {
         assert!(
             msg.contains("cargo install"),
             "should include install suggestion"
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_catalog_show_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "catalog", "show"])
+            .expect("catalog show should parse");
+        assert_eq!(
+            args.command,
+            Some(CliCommand::Catalog {
+                action: CatalogAction::Show
+            })
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_catalog_fetch_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "catalog", "fetch"])
+            .expect("catalog fetch should parse");
+        assert_eq!(
+            args.command,
+            Some(CliCommand::Catalog {
+                action: CatalogAction::Fetch { providers: None }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_catalog_fetch_with_providers() {
+        let args =
+            CliArgs::try_parse_from(["runner", "catalog", "fetch", "--providers", "openai,google"])
+                .expect("catalog fetch with providers should parse");
+        assert_eq!(
+            args.command,
+            Some(CliCommand::Catalog {
+                action: CatalogAction::Fetch {
+                    providers: Some(vec!["openai".to_owned(), "google".to_owned()])
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_catalog_verify_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "catalog", "verify"])
+            .expect("catalog verify should parse");
+        assert_eq!(
+            args.command,
+            Some(CliCommand::Catalog {
+                action: CatalogAction::Verify { providers: None }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_without_subcommand_has_no_command() {
+        let args = CliArgs::try_parse_from(["runner"]).expect("no subcommand should parse");
+        assert_eq!(args.command, None);
+    }
+
+    #[test]
+    fn resolve_catalog_providers_uses_defaults_when_none() {
+        let providers = resolve_catalog_providers(None);
+        assert_eq!(
+            providers,
+            vec!["openai", "anthropic", "google"],
+            "should default to the three configured providers"
+        );
+    }
+
+    #[test]
+    fn resolve_catalog_providers_uses_explicit_values() {
+        let providers =
+            resolve_catalog_providers(Some(vec!["openai".to_owned(), "mistral".to_owned()]));
+        assert_eq!(
+            providers,
+            vec!["openai", "mistral"],
+            "should use the explicitly provided provider list"
         );
     }
 }

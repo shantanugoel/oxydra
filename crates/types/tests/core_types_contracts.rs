@@ -1,16 +1,18 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::json;
 use types::{
-    Context, MemoryChunkDocument, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError,
-    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
-    MemoryRecord, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
-    MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
-    ModelDescriptor, ModelId, ProviderCaps, ProviderError, ProviderId, Response, RuntimeError,
-    ToolCall, ToolError, init_tracing,
+    CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, MemoryChunkDocument,
+    MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest,
+    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord,
+    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
+    MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
+    ModelLimits, ProviderCaps, ProviderError, ProviderId, Response, RuntimeError, ToolCall,
+    ToolError, derive_caps, init_tracing,
 };
 
 #[test]
@@ -238,26 +240,20 @@ fn tracing_subscriber_initializes_and_emits() {
 fn model_catalog_validates_provider_and_model_id() {
     let provider = ProviderId::from("openai");
     let known_model = ModelId::from("gpt-4o-mini");
-    let catalog = ModelCatalog::new(vec![ModelDescriptor {
-        provider: provider.clone(),
-        model: known_model.clone(),
-        display_name: Some("GPT-4o mini".to_owned()),
-        caps: ProviderCaps {
-            supports_streaming: false,
-            supports_tools: true,
-            supports_json_mode: true,
-            supports_reasoning_traces: false,
-            max_input_tokens: Some(128_000),
-            max_output_tokens: Some(16_384),
-            max_context_tokens: Some(128_000),
+    let catalog = test_catalog_with_model(
+        "openai",
+        "gpt-4o-mini",
+        "GPT-4o mini",
+        ModelLimits {
+            context: 128_000,
+            output: 16_384,
         },
-        deprecated: false,
-    }]);
+    );
 
     let descriptor = catalog
         .validate(&provider, &known_model)
         .expect("known model must validate");
-    assert_eq!(descriptor.model, known_model);
+    assert_eq!(descriptor.id, known_model.0);
 
     let unknown = catalog.validate(&provider, &ModelId::from("unknown-model"));
     assert!(matches!(
@@ -273,48 +269,53 @@ fn model_catalog_validates_provider_and_model_id() {
 fn pinned_catalog_snapshot_parses_and_validates_known_model() {
     let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned snapshot must parse");
     assert!(
-        !catalog.models.is_empty(),
+        !catalog.providers.is_empty(),
         "pinned catalog must not be empty"
     );
-    assert!(catalog.models.iter().all(|descriptor| {
-        !descriptor.provider.0.trim().is_empty() && !descriptor.model.0.trim().is_empty()
+    assert!(catalog.all_models().all(|(provider_id, model_id, _)| {
+        !provider_id.trim().is_empty() && !model_id.trim().is_empty()
     }));
 
     let openai_provider = ProviderId::from("openai");
-    let known_model = catalog
-        .models
-        .iter()
-        .find(|descriptor| descriptor.provider == openai_provider)
-        .map(|descriptor| descriptor.model.clone())
+    let known_model_id = catalog
+        .providers
+        .get("openai")
+        .and_then(|p| p.models.keys().next())
+        .map(|id| ModelId::from(id.as_str()))
         .expect("pinned snapshot should include at least one openai model");
     let descriptor = catalog
-        .validate(&openai_provider, &known_model)
+        .validate(&openai_provider, &known_model_id)
         .expect("known pinned model should validate");
-    assert_eq!(descriptor.model, known_model);
+    assert_eq!(descriptor.id, known_model_id.0);
 
     let anthropic_provider = ProviderId::from("anthropic");
-    let anthropic_model = catalog
-        .models
-        .iter()
-        .find(|descriptor| descriptor.provider == anthropic_provider)
-        .map(|descriptor| descriptor.model.clone())
+    let anthropic_model_id = catalog
+        .providers
+        .get("anthropic")
+        .and_then(|p| p.models.keys().next())
+        .map(|id| ModelId::from(id.as_str()))
         .expect("pinned snapshot should include at least one anthropic model");
     let anthropic_descriptor = catalog
-        .validate(&anthropic_provider, &anthropic_model)
+        .validate(&anthropic_provider, &anthropic_model_id)
         .expect("known anthropic pinned model should validate");
-    assert_eq!(anthropic_descriptor.model, anthropic_model);
+    assert_eq!(anthropic_descriptor.id, anthropic_model_id.0);
 }
 
 #[test]
 fn pinned_catalog_snapshot_rejects_missing_required_fields() {
+    // CatalogProvider requires `id` and `name`; a model requires `id` and `name`.
+    // This JSON has a provider entry missing the `name` field on a model.
     let invalid_snapshot = r#"
     {
-      "models": [
-        {
-          "provider": "openai",
-          "display_name": "Missing model field"
+      "openai": {
+        "id": "openai",
+        "name": "OpenAI",
+        "models": {
+          "missing-name": {
+            "id": "missing-name"
+          }
         }
-      ]
+      }
     }
     "#;
 
@@ -324,20 +325,24 @@ fn pinned_catalog_snapshot_rejects_missing_required_fields() {
 
 #[test]
 fn model_catalog_regenerator_writes_canonical_sorted_snapshot() {
+    // Provider keys and model keys are BTreeMap-ordered, so output is deterministic.
     let unsorted_snapshot = r#"
     {
-      "models": [
-        {
-          "provider": "openai",
-          "model": "z-model",
-          "caps": {}
-        },
-        {
-          "provider": "openai",
-          "model": "a-model",
-          "caps": {}
+      "zebra": {
+        "id": "zebra",
+        "name": "Zebra Provider",
+        "models": {
+          "z-model": { "id": "z-model", "name": "Z Model" },
+          "a-model": { "id": "a-model", "name": "A Model" }
         }
-      ]
+      },
+      "alpha": {
+        "id": "alpha",
+        "name": "Alpha Provider",
+        "models": {
+          "b-model": { "id": "b-model", "name": "B Model" }
+        }
+      }
     }
     "#;
 
@@ -355,8 +360,18 @@ fn model_catalog_regenerator_writes_canonical_sorted_snapshot() {
 
     let catalog =
         ModelCatalog::from_snapshot_str(&regenerated).expect("regenerated snapshot should parse");
-    assert_eq!(catalog.models[0].model, ModelId::from("a-model"));
-    assert_eq!(catalog.models[1].model, ModelId::from("z-model"));
+
+    // BTreeMap ordering: "alpha" before "zebra"
+    let provider_ids: Vec<&str> = catalog.providers.keys().map(|k| k.as_str()).collect();
+    assert_eq!(provider_ids, vec!["alpha", "zebra"]);
+
+    // Within "zebra": "a-model" before "z-model"
+    let zebra_model_ids: Vec<&str> = catalog.providers["zebra"]
+        .models
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(zebra_model_ids, vec!["a-model", "z-model"]);
 }
 
 #[test]
@@ -374,4 +389,444 @@ fn provider_caps_serialize_round_trip() {
     let encoded = serde_json::to_string(&caps).expect("caps should serialize");
     let decoded: ProviderCaps = serde_json::from_str(&encoded).expect("caps should deserialize");
     assert_eq!(decoded, caps);
+}
+
+#[test]
+fn models_dev_json_snippet_deserializes() {
+    // A representative subset of models.dev JSON should parse into the new structs.
+    let snippet = r#"
+    {
+      "openai": {
+        "id": "openai",
+        "name": "OpenAI",
+        "env": ["OPENAI_API_KEY"],
+        "api": "https://api.openai.com/v1",
+        "doc": "https://platform.openai.com/docs",
+        "models": {
+          "gpt-4o": {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "family": "gpt-4o",
+            "attachment": true,
+            "reasoning": false,
+            "tool_call": true,
+            "structured_output": true,
+            "temperature": true,
+            "knowledge": "2023-10",
+            "release_date": "2024-05-13",
+            "modalities": { "input": ["text", "image"], "output": ["text"] },
+            "open_weights": false,
+            "cost": { "input": 2.5, "output": 10.0, "cache_read": 1.25 },
+            "limit": { "context": 128000, "output": 16384 }
+          },
+          "o3-mini": {
+            "id": "o3-mini",
+            "name": "OpenAI o3-mini",
+            "family": "o3",
+            "reasoning": true,
+            "tool_call": true,
+            "interleaved": { "field": "reasoning_content" },
+            "structured_output": true,
+            "modalities": { "input": ["text"], "output": ["text"] },
+            "cost": { "input": 1.1, "output": 4.4 },
+            "limit": { "context": 200000, "output": 100000 }
+          }
+        }
+      }
+    }
+    "#;
+
+    let catalog = ModelCatalog::from_snapshot_str(snippet).expect("snippet should parse");
+    assert_eq!(catalog.providers.len(), 1);
+
+    let openai = &catalog.providers["openai"];
+    assert_eq!(openai.id, "openai");
+    assert_eq!(openai.name, "OpenAI");
+    assert_eq!(openai.env, vec!["OPENAI_API_KEY"]);
+    assert_eq!(openai.api.as_deref(), Some("https://api.openai.com/v1"));
+    assert_eq!(openai.models.len(), 2);
+
+    let gpt4o = &openai.models["gpt-4o"];
+    assert_eq!(gpt4o.id, "gpt-4o");
+    assert_eq!(gpt4o.name, "GPT-4o");
+    assert_eq!(gpt4o.family.as_deref(), Some("gpt-4o"));
+    assert!(gpt4o.attachment);
+    assert!(!gpt4o.reasoning);
+    assert!(gpt4o.tool_call);
+    assert!(gpt4o.structured_output);
+    assert!(gpt4o.temperature);
+    assert_eq!(gpt4o.knowledge.as_deref(), Some("2023-10"));
+    assert_eq!(gpt4o.modalities.input, vec!["text", "image"]);
+    assert_eq!(gpt4o.modalities.output, vec!["text"]);
+    assert!(!gpt4o.open_weights);
+    assert!((gpt4o.cost.input - 2.5).abs() < f64::EPSILON);
+    assert!((gpt4o.cost.output - 10.0).abs() < f64::EPSILON);
+    assert!((gpt4o.cost.cache_read.unwrap() - 1.25).abs() < f64::EPSILON);
+    assert_eq!(gpt4o.limit.context, 128_000);
+    assert_eq!(gpt4o.limit.output, 16_384);
+
+    let o3_mini = &openai.models["o3-mini"];
+    assert!(o3_mini.reasoning);
+    assert!(o3_mini.interleaved.is_some());
+    assert_eq!(
+        o3_mini.interleaved.as_ref().unwrap().field,
+        "reasoning_content"
+    );
+
+    // Verify to_provider_caps derivation
+    let caps = gpt4o.to_provider_caps();
+    assert!(caps.supports_streaming); // default true
+    assert!(caps.supports_tools);
+    assert!(caps.supports_json_mode);
+    assert!(!caps.supports_reasoning_traces);
+    assert_eq!(caps.max_context_tokens, Some(128_000));
+    assert_eq!(caps.max_output_tokens, Some(16_384));
+
+    let o3_caps = o3_mini.to_provider_caps();
+    assert!(o3_caps.supports_reasoning_traces);
+}
+
+#[test]
+fn catalog_serialization_round_trip_is_deterministic() {
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned snapshot must parse");
+
+    let first_pass = serde_json::to_string_pretty(&catalog).expect("first serialize");
+    let reparsed: ModelCatalog = serde_json::from_str(&first_pass).expect("reparse should succeed");
+    let second_pass = serde_json::to_string_pretty(&reparsed).expect("second serialize");
+
+    assert_eq!(
+        first_pass, second_pass,
+        "serialize → deserialize → serialize must produce identical output"
+    );
+}
+
+#[test]
+fn all_models_iterator_yields_all_entries() {
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned snapshot must parse");
+
+    let expected_count: usize = catalog.providers.values().map(|p| p.models.len()).sum();
+    let actual_count = catalog.all_models().count();
+    assert_eq!(actual_count, expected_count);
+    assert!(
+        actual_count > 0,
+        "catalog should contain at least one model"
+    );
+
+    // Every yielded triple should be consistent with the underlying maps
+    for (provider_id, model_id, descriptor) in catalog.all_models() {
+        assert_eq!(descriptor.id, model_id);
+        assert!(catalog.providers.contains_key(provider_id));
+        assert!(catalog.providers[provider_id].models.contains_key(model_id));
+    }
+}
+
+#[test]
+fn to_provider_caps_maps_fields_correctly() {
+    let descriptor = ModelDescriptor {
+        id: "test-model".to_owned(),
+        name: "Test Model".to_owned(),
+        family: None,
+        attachment: false,
+        reasoning: false,
+        tool_call: true,
+        interleaved: None,
+        structured_output: true,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: Default::default(),
+        open_weights: false,
+        cost: Default::default(),
+        limit: ModelLimits {
+            context: 100_000,
+            output: 8192,
+        },
+    };
+
+    let caps = descriptor.to_provider_caps();
+    assert!(caps.supports_streaming);
+    assert!(caps.supports_tools);
+    assert!(caps.supports_json_mode);
+    assert!(!caps.supports_reasoning_traces);
+    assert_eq!(caps.max_input_tokens, Some(100_000));
+    assert_eq!(caps.max_output_tokens, Some(8192));
+    assert_eq!(caps.max_context_tokens, Some(100_000));
+
+    // With reasoning + interleaved
+    let reasoning_descriptor = ModelDescriptor {
+        reasoning: true,
+        interleaved: Some(types::InterleavedSpec {
+            field: "thinking".to_owned(),
+        }),
+        ..descriptor
+    };
+    let reasoning_caps = reasoning_descriptor.to_provider_caps();
+    assert!(reasoning_caps.supports_reasoning_traces);
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 verification: ProviderCaps derivation + Oxydra overlay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn caps_derived_from_model_descriptor() {
+    let descriptor = ModelDescriptor {
+        id: "test-model".to_owned(),
+        name: "Test Model".to_owned(),
+        family: None,
+        attachment: false,
+        reasoning: false,
+        tool_call: true,
+        interleaved: None,
+        structured_output: false,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: Default::default(),
+        open_weights: false,
+        cost: Default::default(),
+        limit: ModelLimits {
+            context: 64_000,
+            output: 4096,
+        },
+    };
+
+    let overrides = CapsOverrides::default();
+    let caps = derive_caps("test-provider", &descriptor, &overrides);
+
+    assert!(caps.supports_tools, "tool_call=true → supports_tools=true");
+    assert!(
+        !caps.supports_json_mode,
+        "structured_output=false → supports_json_mode=false"
+    );
+    assert!(
+        !caps.supports_reasoning_traces,
+        "reasoning=false → supports_reasoning_traces=false"
+    );
+    assert_eq!(caps.max_context_tokens, Some(64_000));
+    assert_eq!(caps.max_output_tokens, Some(4096));
+}
+
+#[test]
+fn caps_overlay_applies() {
+    let descriptor = ModelDescriptor {
+        id: "claude-3-5-sonnet-latest".to_owned(),
+        name: "Claude 3.5 Sonnet".to_owned(),
+        family: None,
+        attachment: false,
+        reasoning: false,
+        tool_call: true,
+        interleaved: None,
+        structured_output: false,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: Default::default(),
+        open_weights: false,
+        cost: Default::default(),
+        limit: ModelLimits {
+            context: 200_000,
+            output: 8192,
+        },
+    };
+
+    // Baseline: to_provider_caps defaults streaming to true
+    let baseline = descriptor.to_provider_caps();
+    assert!(baseline.supports_streaming);
+
+    // Model-specific overlay sets streaming to false
+    let mut overrides = CapsOverrides::default();
+    overrides.overrides.insert(
+        "anthropic/claude-3-5-sonnet-latest".to_owned(),
+        CapsOverrideEntry {
+            supports_streaming: Some(false),
+            ..Default::default()
+        },
+    );
+
+    let caps = derive_caps("anthropic", &descriptor, &overrides);
+    assert!(
+        !caps.supports_streaming,
+        "model-specific overlay should override baseline"
+    );
+    assert!(
+        caps.supports_tools,
+        "non-overridden field should keep baseline value"
+    );
+}
+
+#[test]
+fn caps_default_by_provider() {
+    let descriptor = ModelDescriptor {
+        id: "some-model".to_owned(),
+        name: "Some Model".to_owned(),
+        family: None,
+        attachment: false,
+        reasoning: false,
+        tool_call: false,
+        interleaved: None,
+        structured_output: false,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: Default::default(),
+        open_weights: false,
+        cost: Default::default(),
+        limit: ModelLimits {
+            context: 100_000,
+            output: 4096,
+        },
+    };
+
+    // Provider default sets supports_tools to true
+    let mut overrides = CapsOverrides::default();
+    overrides.provider_defaults.insert(
+        "my-provider".to_owned(),
+        CapsOverrideEntry {
+            supports_tools: Some(true),
+            ..Default::default()
+        },
+    );
+
+    let caps = derive_caps("my-provider", &descriptor, &overrides);
+    assert!(
+        caps.supports_tools,
+        "provider default should override baseline when no model override exists"
+    );
+}
+
+#[test]
+fn caps_model_override_takes_precedence_over_provider_default() {
+    let descriptor = ModelDescriptor {
+        id: "special-model".to_owned(),
+        name: "Special Model".to_owned(),
+        family: None,
+        attachment: false,
+        reasoning: false,
+        tool_call: false,
+        interleaved: None,
+        structured_output: false,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: Default::default(),
+        open_weights: false,
+        cost: Default::default(),
+        limit: ModelLimits {
+            context: 100_000,
+            output: 4096,
+        },
+    };
+
+    let mut overrides = CapsOverrides::default();
+    // Provider default: streaming = false
+    overrides.provider_defaults.insert(
+        "my-provider".to_owned(),
+        CapsOverrideEntry {
+            supports_streaming: Some(false),
+            ..Default::default()
+        },
+    );
+    // Model-specific: streaming = true
+    overrides.overrides.insert(
+        "my-provider/special-model".to_owned(),
+        CapsOverrideEntry {
+            supports_streaming: Some(true),
+            ..Default::default()
+        },
+    );
+
+    let caps = derive_caps("my-provider", &descriptor, &overrides);
+    assert!(
+        caps.supports_streaming,
+        "model-specific override should take precedence over provider default"
+    );
+}
+
+#[test]
+fn caps_overrides_json_round_trip() {
+    let mut overrides = CapsOverrides::default();
+    overrides.provider_defaults.insert(
+        "openai".to_owned(),
+        CapsOverrideEntry {
+            supports_streaming: Some(true),
+            ..Default::default()
+        },
+    );
+    overrides.overrides.insert(
+        "openai/gpt-4o".to_owned(),
+        CapsOverrideEntry {
+            max_output_tokens: Some(32_768),
+            ..Default::default()
+        },
+    );
+
+    let json = serde_json::to_string_pretty(&overrides).expect("overrides should serialize");
+    let parsed: CapsOverrides = serde_json::from_str(&json).expect("overrides should deserialize");
+    assert_eq!(parsed, overrides);
+}
+
+#[test]
+fn pinned_caps_overrides_parses() {
+    // The pinned overrides file bundled via include_str! should parse.
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned snapshot must parse");
+    // Provider defaults should be loaded
+    assert!(
+        !catalog.caps_overrides.provider_defaults.is_empty(),
+        "pinned overrides should have provider defaults"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+fn test_catalog_with_model(
+    provider_id: &str,
+    model_id: &str,
+    model_name: &str,
+    limit: ModelLimits,
+) -> ModelCatalog {
+    let mut models = BTreeMap::new();
+    models.insert(
+        model_id.to_owned(),
+        ModelDescriptor {
+            id: model_id.to_owned(),
+            name: model_name.to_owned(),
+            family: None,
+            attachment: false,
+            reasoning: false,
+            tool_call: true,
+            interleaved: None,
+            structured_output: false,
+            temperature: true,
+            knowledge: None,
+            release_date: None,
+            last_updated: None,
+            modalities: Default::default(),
+            open_weights: false,
+            cost: Default::default(),
+            limit,
+        },
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        provider_id.to_owned(),
+        CatalogProvider {
+            id: provider_id.to_owned(),
+            name: provider_id.to_owned(),
+            env: vec![],
+            api: None,
+            doc: None,
+            models,
+        },
+    );
+
+    ModelCatalog::new(providers)
 }

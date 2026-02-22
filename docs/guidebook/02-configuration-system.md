@@ -45,8 +45,8 @@ pub struct AgentConfig {
     pub config_version: String,        // Must match major version 1
     pub runtime: RuntimeConfig,
     pub memory: MemoryConfig,
-    pub selection: ProviderSelection,  // Active provider + model
-    pub providers: ProviderConfigs,    // Per-provider settings
+    pub selection: ProviderSelection,  // Active provider name + model
+    pub providers: ProviderConfigs,    // Named provider registry
     pub reliability: ReliabilityConfig,
 }
 ```
@@ -60,7 +60,7 @@ Controls the agent loop's operational limits:
 | `max_turns` | 8 | Maximum tool-calling iterations per session turn |
 | `turn_timeout_secs` | 60 | Per-turn timeout in seconds |
 | `max_cost` | (none) | Optional cost budget per session |
-| `stream_buffer_size` | 32 | Bounded mpsc channel capacity for streaming |
+| `context_budget` | (nested) | Context window management (trigger ratio, safety buffer, fallback max tokens) |
 | `summarization` | (nested) | Rolling summary trigger/target ratios |
 
 ### `MemoryConfig`
@@ -69,12 +69,11 @@ Controls persistence and retrieval:
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `enabled` | true | Whether memory persistence is active |
-| `db_path` | `"oxydra_memory.db"` | Local libSQL database file path |
+| `enabled` | false | Whether memory persistence is active |
+| `db_path` | `".oxydra/memory.db"` | Local libSQL database file path |
 | `remote_url` | (none) | Optional Turso remote URL |
 | `auth_token` | (none) | Required if `remote_url` is set |
-| `retrieval.enabled` | true | Whether hybrid retrieval is active |
-| `retrieval.max_results` | 5 | Maximum retrieval results per query |
+| `retrieval.top_k` | 8 | Number of retrieval results per query |
 | `retrieval.vector_weight` | 0.7 | Weight for vector similarity (must sum to 1.0 with fts_weight) |
 | `retrieval.fts_weight` | 0.3 | Weight for full-text search scoring |
 
@@ -82,56 +81,97 @@ Controls persistence and retrieval:
 
 ```rust
 pub struct ProviderSelection {
-    pub provider: String,  // "openai" or "anthropic"
-    pub model: String,     // e.g., "gpt-4o", "claude-3-5-sonnet-latest"
+    pub provider: ProviderId,  // Name of a registry entry (e.g., "openai", "my-proxy")
+    pub model: ModelId,        // e.g., "gpt-4o", "claude-3-5-sonnet-latest"
 }
 ```
 
-### `ProviderConfigs`
+The `provider` field references a named entry in the provider registry, not a hardcoded provider type. This allows multiple instances of the same provider type (e.g., two OpenAI-compatible endpoints) with different names.
+
+### `ProviderConfigs` (Provider Registry)
 
 ```rust
 pub struct ProviderConfigs {
-    pub openai: OpenAIConfig,
-    pub anthropic: AnthropicConfig,
+    pub registry: BTreeMap<String, ProviderRegistryEntry>,
 }
 ```
 
-Each provider config carries:
-- `api_key: Option<String>` — explicit key (highest priority)
-- `base_url: Option<String>` — custom endpoint (for proxies, OpenRouter, etc.)
+Each key in `registry` is a user-chosen provider instance name (referenced by `ProviderSelection.provider`). The default registry ships with `"openai"` and `"anthropic"` entries.
+
+### `ProviderRegistryEntry`
+
+```rust
+pub struct ProviderRegistryEntry {
+    pub provider_type: ProviderType,           // openai, anthropic, gemini, openai_responses
+    pub base_url: Option<String>,              // Custom endpoint URL
+    pub api_key: Option<String>,               // Explicit API key (highest priority)
+    pub api_key_env: Option<String>,           // Custom env var for API key
+    pub extra_headers: Option<BTreeMap<String, String>>,  // Additional HTTP headers
+    pub catalog_provider: Option<String>,       // Override catalog namespace for model validation
+}
+```
+
+### `ProviderType`
+
+Discriminant for the underlying provider implementation:
+
+```rust
+pub enum ProviderType {
+    Openai,           // OpenAI Chat Completions API (/v1/chat/completions)
+    Anthropic,        // Anthropic Messages API (/v1/messages)
+    Gemini,           // Google Gemini API (v1beta/models/:generateContent)
+    OpenaiResponses,  // OpenAI Responses API (/v1/responses) with stateful chaining
+}
+```
 
 ### `ReliabilityConfig`
 
 ```rust
 pub struct ReliabilityConfig {
     pub max_attempts: u32,    // Default: 3
-    pub backoff_base_ms: u64, // Default: 1000
-    pub backoff_max_ms: u64,  // Default: 30000
+    pub backoff_base_ms: u64, // Default: 250
+    pub backoff_max_ms: u64,  // Default: 2000
+    pub jitter: bool,         // Default: false
 }
 ```
 
 ## Credential Resolution
 
-API keys follow a strict 3-tier resolution chain, implemented in `provider/src/lib.rs`:
+API keys follow a 4-tier resolution chain, implemented in `provider/src/lib.rs` via `resolve_api_key_for_entry()`:
 
 ```
-1. Explicit config  →  providers.openai.api_key in agent.toml
-2. Provider env var →  OPENAI_API_KEY or ANTHROPIC_API_KEY
-3. Generic fallback →  API_KEY (development only)
+1. Explicit config      →  providers.registry.<name>.api_key in agent.toml
+2. Custom env var       →  providers.registry.<name>.api_key_env (e.g. "CORP_OPENAI_KEY")
+3. Provider-type env var →  OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY
+4. Generic fallback     →  API_KEY (development only)
 ```
 
 The resolution is deterministic: the first non-empty value wins. Secrets are never logged or included in trace spans.
+
+## Catalog Provider Namespace
+
+Each registry entry has an `effective_catalog_provider()` that determines which namespace in the model catalog is used for model validation. The defaults are:
+
+| Provider Type | Default Catalog Provider |
+|---------------|--------------------------|
+| `Openai` | `"openai"` |
+| `Anthropic` | `"anthropic"` |
+| `Gemini` | `"google"` |
+| `OpenaiResponses` | `"openai"` |
+
+This can be overridden with the `catalog_provider` field, which is useful when a proxy serves models from a different provider's catalog.
 
 ## Startup Validation
 
 `AgentConfig::validate()` runs at startup and enforces:
 
 1. **Version gating** — `config_version` must have major version `1` (parses semver-like strings)
-2. **Provider validity** — `selection.provider` must be `"openai"` or `"anthropic"`
+2. **Provider registry resolution** — `selection.provider` must match a key in `providers.registry`
 3. **Model validity** — `selection.model` must not be empty
-4. **Runtime limits** — `max_turns > 0`, `turn_timeout_secs > 0`
-5. **Memory coherence** — if `remote_url` is set, `auth_token` is required; retrieval weights must sum to `1.0`
-6. **Reliability bounds** — `backoff_base <= backoff_max`, both `> 0`
+4. **Catalog validation** — `validate_model_in_catalog()` checks the selected model exists under the resolved registry entry's catalog provider namespace
+5. **Runtime limits** — `max_turns > 0`, `turn_timeout_secs > 0`
+6. **Memory coherence** — if `remote_url` is set, `auth_token` is required; retrieval weights must sum to `1.0`
+7. **Reliability bounds** — `backoff_base <= backoff_max`, both `> 0`
 
 If validation fails, the system exits immediately with a descriptive error rather than entering an undefined state.
 
@@ -184,31 +224,64 @@ config_version = "1.0"
 max_turns = 10
 turn_timeout_secs = 120
 
+[runtime.context_budget]
+trigger_ratio              = 0.85
+safety_buffer_tokens       = 1024
+fallback_max_context_tokens = 128000
+
+[runtime.summarization]
+target_ratio = 0.5
+min_turns    = 6
+
 [memory]
 enabled = true
-db_path = "oxydra_memory.db"
+db_path = ".oxydra/memory.db"
 
 [memory.retrieval]
-enabled = true
-max_results = 5
+top_k         = 8
 vector_weight = 0.7
-fts_weight = 0.3
+fts_weight    = 0.3
 
 [selection]
 provider = "anthropic"
 model = "claude-3-5-sonnet-latest"
 
 [reliability]
-max_attempts = 3
-backoff_base_ms = 1000
-backoff_max_ms = 30000
-```
+max_attempts    = 3
+backoff_base_ms = 250
+backoff_max_ms  = 2000
+jitter          = false
 
-```toml
-# .oxydra/providers.toml
-[openai]
-# api_key resolved from OPENAI_API_KEY env var
+# --- Provider registry ---
+# Each entry is a named provider instance. The [selection].provider
+# field references a key from this registry.
 
-[anthropic]
-# api_key resolved from ANTHROPIC_API_KEY env var
+[providers.registry.openai]
+provider_type = "openai"
+# base_url = "https://api.openai.com"
+# api_key_env = "OPENAI_API_KEY"      # default for openai type
+
+[providers.registry.anthropic]
+provider_type = "anthropic"
+# base_url = "https://api.anthropic.com"
+# api_key_env = "ANTHROPIC_API_KEY"   # default for anthropic type
+
+# --- Additional provider examples ---
+
+# Google Gemini
+# [providers.registry.gemini]
+# provider_type = "gemini"
+# api_key_env = "GEMINI_API_KEY"
+
+# OpenAI Responses API (stateful session chaining)
+# [providers.registry.openai-responses]
+# provider_type = "openai_responses"
+# api_key_env = "OPENAI_API_KEY"
+
+# Corporate proxy serving OpenAI-compatible models
+# [providers.registry.my-proxy]
+# provider_type = "openai"
+# base_url = "https://llm-proxy.corp.internal/v1"
+# api_key_env = "CORP_LLM_KEY"
+# catalog_provider = "openai"  # validate models against OpenAI catalog
 ```

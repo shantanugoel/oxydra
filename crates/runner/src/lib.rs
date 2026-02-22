@@ -42,6 +42,7 @@ use types::{
 };
 
 mod backend;
+pub mod catalog;
 
 #[cfg(test)]
 mod tests;

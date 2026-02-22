@@ -20,7 +20,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring |
-| 13 | Model catalog + provider registry | Planned | |
+| 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides |
 | 14 | External channels + identity mapping | Planned | |
 | 15 | Multi-agent orchestration | Planned | |
 | 16 | Observability (OpenTelemetry) | Planned | |
@@ -78,15 +78,19 @@ Three gaps were identified during the initial code review of phases 1-12, and tw
 - `WasmWasiToolRunner` is feature-gated behind `wasm-isolation` (default on); `HostWasmToolRunner` remains as the fallback when the feature is disabled
 - **TOCTOU eliminated**: the WASI boundary makes symlink-escape and check-to-use races structurally impossible for file tools
 
-### Gap 5: OpenAI Responses API Provider (Phase 2)
+### ~~Gap 5: OpenAI Responses API Provider (Phase 2)~~ — Resolved
 
 **What was planned:** A `ResponsesProvider` implementation targeting OpenAI's `/v1/responses` endpoint with stateful session chaining via `previous_response_id`. This API persists conversation state server-side, reducing token transmission overhead for long multi-turn sessions. The project brief described `input` array format, typed `output` items, built-in tool declarations, and distinct SSE event types.
 
-**What was built:** Only the `OpenAIProvider` exists, targeting the stateless `/v1/chat/completions` endpoint. The full conversation history is re-sent on every turn. No `ResponsesProvider` struct, no `/v1/responses` endpoint usage, no `previous_response_id` tracking, and no Responses API SSE event parsing exist in the codebase.
+**What was built:** Only the `OpenAIProvider` existed, targeting the stateless `/v1/chat/completions` endpoint.
 
-**Impact:** Functional correctness is unaffected — the chat completions API handles all current use cases. Token efficiency degrades for long multi-turn sessions since the full history must be transmitted every turn (mitigated by the rolling summarization in the memory layer). The Responses API's server-side state management would be particularly valuable for multi-agent subagent delegation (clean context isolation without duplicating memory payloads).
-
-**Fix scope:** Implement `ResponsesProvider` as a new provider struct in `crates/provider/`, targeting `/v1/responses`. Track `previous_response_id` in session state. Implement the `input` array serialization format and `output` item parsing. Add a separate SSE parser branch for Responses API event types (`response.output_item.added`, `response.output_text.delta`, etc.). The existing `Provider` trait, `StreamItem` enum, and reliability wrapper all support this without modification.
+**Resolution:** `ResponsesProvider` implemented in `crates/provider/src/responses.rs` as part of Phase 13. Key details:
+- Targets `/v1/responses` with session chaining via `previous_response_id` stored in `Arc<Mutex<Option<String>>>`
+- Typed `input` array format (`message`, `function_call_output`) and typed `output` items (`message`, `function_call`)
+- Real SSE streaming with Responses API event types (`response.output_item.added`, `response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`)
+- `ResponsesToolCallAccumulator` for fragmented tool call argument merging
+- Fallback to full context on chaining errors
+- Overrides `catalog_provider_id()` to return `"openai"` for shared model catalog namespace
 
 ## Completed Phases: Detail
 
@@ -108,15 +112,15 @@ Built the foundation layer with zero internal dependencies:
 
 **Crates:** `types`, `provider`
 
-- `Provider` trait with `#[async_trait]`, `complete()`, `stream()`, `capabilities()` methods
-- `ProviderCaps` struct declaring feature support
+- `Provider` trait with `#[async_trait]`, `complete()`, `stream()`, `capabilities()`, `catalog_provider_id()` methods
+- `ProviderCaps` struct declaring feature support (including `max_context_tokens`)
 - `OpenAiProvider` implementing the trait against `/v1/chat/completions`
-- `ModelCatalog` loaded from embedded JSON snapshot (8 models: Claude 3.5 Haiku/Sonnet, GPT-4.1/4.1-mini/4.1-nano/4o/4o-mini, o3-mini)
+- `ModelCatalog` loaded from embedded JSON snapshot, organized by catalog provider namespace
+- `ModelDescriptor` fully aligned with models.dev schema (capability flags, pricing, limits, modalities)
 - Model selection validated against catalog at startup
-- **Gap:** `ResponsesProvider` for OpenAI's stateful `/v1/responses` API was planned but not implemented; only the stateless chat completions endpoint is used
+- ~~**Gap:** `ResponsesProvider` for OpenAI's stateful `/v1/responses` API was planned but not implemented~~ **Resolved** — see Phase 13
 
-**Gaps / follow-ups to complete Phase 2:**
-- **OpenAI Responses API provider:** add `ResponsesProvider`, SSE parsing for `/v1/responses`, and session-level `previous_response_id` handling for server-side state.
+**Gaps / follow-ups:** None remaining (ResponsesProvider resolved in Phase 13).
 
 ### Phase 3: Streaming + SSE Parsing
 
@@ -167,7 +171,7 @@ Built the foundation layer with zero internal dependencies:
 - `config_version` field with validation
 - `ReliableProvider` wrapper: exponential backoff, retry with jitter, fallback chains
 - Provider switching via config without code changes
-- Credential resolution: explicit config → provider env var → generic fallback
+- Credential resolution: 4-tier (explicit config → custom env var → provider-type env var → generic `API_KEY` fallback)
 - **Gap:** `stream()` is a shim wrapping `complete()`
 
 **Gaps / follow-ups to complete Phase 7:**
@@ -263,22 +267,27 @@ Built the foundation layer with zero internal dependencies:
 **Gaps / follow-ups to complete Phase 12:**
 - ~~**Interactive TUI client:**~~ **Resolved** — ratatui rendering loop, widgets, event handling, app loop, standalone binary, and runner exec wiring all implemented and tested.
 
-## Forward Plan: Phases 13-21
-
 ### Phase 13: Model Catalog Governance + Provider Flexibility
 
-**Crates:** `types`, `provider`, `runner`, `tui`
-**Builds on:** Phases 1, 2, 12
+**Crates:** `types`, `provider`, `runner`
 
-**Scope:**
-- Promote pinned model metadata to a complete typed schema (`ModelDescriptor` with deprecation state, pricing, capability flags) and enforce validation at startup
-- Implement deterministic snapshot generation command invokable through TUI/runner and reproducible in CI
-- Replace per-provider config blocks with a provider registry: named providers with `provider_type`, `base_url`, `api_key_env`, and optional headers
-- Allow multiple providers per type; models reference `provider_id` instead of hard-coded provider keys
-- Add Google Gemini provider with configurable base URLs
-- Implement OpenAI Responses API provider (Gap 5) with `previous_response_id` chaining and SSE parsing
+- **Provider registry:** Replaced flat per-provider config blocks (`providers.openai`, `providers.anthropic`) with `providers.registry.<name>` map of `ProviderRegistryEntry` — each entry has `provider_type`, `base_url`, `api_key`, `api_key_env`, `extra_headers`, and optional `catalog_provider`
+- **`ProviderType` enum:** `Openai`, `Anthropic`, `Gemini`, `OpenaiResponses` (serde as `snake_case`)
+- **Default registry:** Ships with `"openai"` and `"anthropic"` entries; users add custom entries for proxies, Gemini, Responses, etc.
+- **4-tier credential resolution:** explicit `api_key` → custom `api_key_env` → provider-type default env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) → generic `API_KEY` fallback
+- **Catalog provider mapping:** `effective_catalog_provider()` defaults by type (`Openai` → `"openai"`, `Gemini` → `"google"`, etc.) or uses explicit `catalog_provider` override
+- **`build_provider()` factory:** Constructs providers from registry entries, resolving API key and base URL, dispatching to the correct provider implementation
+- **Models.dev-aligned `ModelDescriptor`:** Full schema alignment — `id`, `name`, `family`, `attachment`, `reasoning`, `tool_call`, `interleaved`, `structured_output`, `temperature`, `knowledge`, `release_date`, `last_updated`, `modalities`, `open_weights`, `cost`, `limit`
+- **Capability overrides:** `CapsOverrides` with `provider_defaults` and per-model `overrides` keyed as `"provider/model"`; `derive_caps()` merges baseline → provider defaults → model-specific overlays; `is_deprecated()` for deprecation tracking
+- **`ProviderCaps` extended:** Added `max_context_tokens` alongside `max_input_tokens`/`max_output_tokens`
+- **Google Gemini provider (`gemini.rs`):** Full implementation with real SSE streaming, `v1beta/models/{model}:generateContent` and `streamGenerateContent?alt=sse`, `x-goog-api-key` header authentication
+- **OpenAI Responses provider (`responses.rs`):** `/v1/responses` endpoint with `previous_response_id` session chaining via `Arc<Mutex<Option<String>>>`, typed input/output blocks, fallback to full context on chaining errors, `ResponsesToolCallAccumulator`
+- **Catalog snapshot commands:** `runner catalog fetch` (fetch from models.dev, filter, write snapshot + overrides), `runner catalog verify` (re-fetch and compare), `runner catalog show` (pretty-print summary)
+- **Config validation:** `AgentConfig::validate()` resolves provider via registry; `validate_model_in_catalog()` uses `effective_catalog_provider()`; `ConfigError::UnknownModelForCatalogProvider` replaces old model validation errors
 
-**Verification gate:** Catalog snapshot command produces deterministic typed artifact; config validation rejects unknown/invalid model metadata and provider references; model selection resolves to a named provider; Gemini and OpenAI Responses providers pass contract tests; snapshot regeneration is reproducible in CI.
+**Gaps / follow-ups:** None. All Phase 13 scope items implemented.
+
+## Forward Plan: Phases 14-21
 
 ### Phase 14: External Channels + Identity Mapping
 
@@ -397,7 +406,7 @@ The five identified gaps are incorporated as additional work items:
 | Anthropic SSE streaming | Phase 7 | Before Phase 14 (external channels need reliable streaming) | High |
 | ~~TUI ratatui rendering + interactive client~~ | Phase 12 | ~~Before Phase 14~~ **Resolved** — ratatui rendering loop, crossterm input, `TuiViewModel`, widgets, `TuiApp` select loop, standalone `oxydra-tui` binary, runner exec wiring | ~~High~~ |
 | ~~WASM tool isolation (simulated → real)~~ | Phase 11 | ~~Before Phase 15~~ **Resolved** — `WasmWasiToolRunner` with wasmtime + WASI preopened directories; `wasm32-wasip1` guest binary embedded via `build.rs`; TOCTOU eliminated | ~~High~~ |
-| OpenAI ResponsesProvider | Phase 2 | Phase 13 (provider registry + Responses provider implementation) | Medium |
+| OpenAI ResponsesProvider | Phase 2 | ~~Phase 13~~ **Resolved** — `ResponsesProvider` with `/v1/responses`, `previous_response_id` session chaining, typed input/output, SSE streaming | ~~Medium~~ |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
 | ~~Runner control plane + persistent daemon + VM log capture~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — daemon flag, Unix control socket, log pump threads | ~~High~~ |
 | ~~Container/microvm bootstrap wiring (args + bootstrap-stdin + envelope)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — bootstrap file written pre-launch, bind-mounted into containers, injected into FC boot_args | ~~Critical~~ |

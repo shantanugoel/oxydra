@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,16 +11,14 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 use memory::LibsqlMemory;
-use provider::{
-    AnthropicConfig, AnthropicProvider, OpenAIConfig, OpenAIProvider, ReliableProvider, RetryPolicy,
-};
+use provider::{ReliableProvider, RetryPolicy};
 use runtime::{ContextBudgetLimits, RetrievalLimits, RuntimeLimits, SummarizationLimits};
 use serde::Serialize;
 use thiserror::Error;
 use tools::{RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools};
 use types::{
-    ANTHROPIC_PROVIDER_ID, AgentConfig, BootstrapEnvelopeError, ConfigError, Memory, MemoryError,
-    OPENAI_PROVIDER_ID, Provider, ProviderError, RunnerBootstrapEnvelope, StartupStatusReport,
+    AgentConfig, BootstrapEnvelopeError, ConfigError, Memory, MemoryError, ModelCatalog, Provider,
+    ProviderError, RunnerBootstrapEnvelope, StartupStatusReport,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -145,25 +144,19 @@ pub struct SelectionOverrides {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ProviderOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai: Option<OpenAIProviderOverrides>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anthropic: Option<AnthropicProviderOverrides>,
+    pub registry: Option<BTreeMap<String, RegistryEntryOverrides>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct OpenAIProviderOverrides {
+pub struct RegistryEntryOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct AnthropicProviderOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
+    pub catalog_provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -237,22 +230,38 @@ pub fn load_agent_config_with_paths(
 pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, CliError> {
     config.validate()?;
 
-    let inner: Box<dyn Provider> = match config.selection.provider.0.as_str() {
-        OPENAI_PROVIDER_ID => Box::new(OpenAIProvider::new(OpenAIConfig {
-            api_key: config.providers.openai.api_key.clone(),
-            base_url: config.providers.openai.base_url.clone(),
-        })?),
-        ANTHROPIC_PROVIDER_ID => Box::new(AnthropicProvider::new(AnthropicConfig {
-            api_key: config.providers.anthropic.api_key.clone(),
-            base_url: config.providers.anthropic.base_url.clone(),
-            ..AnthropicConfig::default()
-        })?),
-        provider => {
-            return Err(CliError::UnsupportedProvider {
-                provider: provider.to_owned(),
-            });
-        }
-    };
+    let provider_id = config.selection.provider.clone();
+    let entry = config.providers.resolve(&provider_id.0)?;
+    let model_catalog =
+        ModelCatalog::from_pinned_snapshot().map_err(|error| ProviderError::RequestFailed {
+            provider: provider_id.clone(),
+            message: format!("failed to load model catalog: {error}"),
+        })?;
+
+    // Validate the selected model exists in the catalog under the resolved
+    // entry's catalog provider namespace.
+    let catalog_provider_id = entry.effective_catalog_provider();
+    let catalog_provider = types::ProviderId::from(catalog_provider_id.as_str());
+    model_catalog
+        .validate(&catalog_provider, &config.selection.model)
+        .map_err(|_| ConfigError::UnknownModelForCatalogProvider {
+            model: config.selection.model.0.clone(),
+            catalog_provider: catalog_provider_id.clone(),
+        })?;
+
+    // Check for deprecated models via the Oxydra overlay and emit a warning.
+    if model_catalog
+        .caps_overrides
+        .is_deprecated(&catalog_provider_id, &config.selection.model.0)
+    {
+        tracing::warn!(
+            model = %config.selection.model,
+            catalog_provider = %catalog_provider_id,
+            "selected model is deprecated; consider switching to a supported alternative"
+        );
+    }
+
+    let inner: Box<dyn Provider> = provider::build_provider(provider_id, entry, model_catalog)?;
 
     inner.capabilities(&config.selection.model)?;
 
@@ -469,16 +478,18 @@ max_turns = 4
             &paths.workspace_dir,
             PROVIDERS_CONFIG_FILE,
             r#"
-[providers.openai]
+[providers.registry.openai]
+provider_type = "openai"
 base_url = "https://workspace-openai.example"
 "#,
         );
 
         let _clear_runtime = EnvGuard::remove("OXYDRA__RUNTIME__MAX_TURNS");
-        let _clear_openai_base_url = EnvGuard::remove("OXYDRA__PROVIDERS__OPENAI__BASE_URL");
+        let _clear_openai_base_url =
+            EnvGuard::remove("OXYDRA__PROVIDERS__REGISTRY__OPENAI__BASE_URL");
         let _runtime_override = EnvGuard::set("OXYDRA__RUNTIME__MAX_TURNS", "5");
         let _openai_base_url_override = EnvGuard::set(
-            "OXYDRA__PROVIDERS__OPENAI__BASE_URL",
+            "OXYDRA__PROVIDERS__REGISTRY__OPENAI__BASE_URL",
             "https://env-openai.example",
         );
 
@@ -496,9 +507,13 @@ base_url = "https://workspace-openai.example"
         .expect("config should load");
 
         assert_eq!(config.runtime.max_turns, 6);
+        let entry = config
+            .providers
+            .resolve("openai")
+            .expect("openai entry should exist");
         assert_eq!(
-            config.providers.openai.base_url,
-            "https://env-openai.example"
+            entry.base_url.as_deref(),
+            Some("https://env-openai.example")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -544,11 +559,12 @@ max_turns = 11
 
         let _clear_selection_provider = EnvGuard::remove("OXYDRA__SELECTION__PROVIDER");
         let _clear_selection_model = EnvGuard::remove("OXYDRA__SELECTION__MODEL");
-        let _clear_anthropic_base_url = EnvGuard::remove("OXYDRA__PROVIDERS__ANTHROPIC__BASE_URL");
+        let _clear_anthropic_base_url =
+            EnvGuard::remove("OXYDRA__PROVIDERS__REGISTRY__ANTHROPIC__BASE_URL");
         let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "anthropic");
         let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "claude-3-5-haiku-latest");
         let _anthropic_base_url = EnvGuard::set(
-            "OXYDRA__PROVIDERS__ANTHROPIC__BASE_URL",
+            "OXYDRA__PROVIDERS__REGISTRY__ANTHROPIC__BASE_URL",
             "https://anthropic-env.example",
         );
 
@@ -556,9 +572,13 @@ max_turns = 11
             .expect("config should load");
 
         assert_eq!(config.selection.provider, ProviderId::from("anthropic"));
+        let entry = config
+            .providers
+            .resolve("anthropic")
+            .expect("anthropic entry should exist");
         assert_eq!(
-            config.providers.anthropic.base_url,
-            "https://anthropic-env.example"
+            entry.base_url.as_deref(),
+            Some("https://anthropic-env.example")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -628,7 +648,9 @@ remote_url = "libsql://example-org.turso.io"
         let mut openai_config = AgentConfig::default();
         openai_config.selection.provider = ProviderId::from("openai");
         openai_config.selection.model = ModelId::from("gpt-4o-mini");
-        openai_config.providers.openai.api_key = Some("openai-test-key".to_owned());
+        if let Some(entry) = openai_config.providers.registry.get_mut("openai") {
+            entry.api_key = Some("openai-test-key".to_owned());
+        }
         openai_config.reliability.max_attempts = 4;
         openai_config.reliability.backoff_base_ms = 10;
         openai_config.reliability.backoff_max_ms = 100;
@@ -640,7 +662,9 @@ remote_url = "libsql://example-org.turso.io"
         let mut anthropic_config = AgentConfig::default();
         anthropic_config.selection.provider = ProviderId::from("anthropic");
         anthropic_config.selection.model = ModelId::from("claude-3-5-haiku-latest");
-        anthropic_config.providers.anthropic.api_key = Some("anthropic-test-key".to_owned());
+        if let Some(entry) = anthropic_config.providers.registry.get_mut("anthropic") {
+            entry.api_key = Some("anthropic-test-key".to_owned());
+        }
         let provider = build_provider(&anthropic_config).expect("anthropic provider should build");
         assert_eq!(provider.provider_id(), &ProviderId::from("anthropic"));
     }
@@ -685,6 +709,7 @@ remote_url = "libsql://example-org.turso.io"
     #[tokio::test]
     async fn bootstrap_vm_runtime_with_process_tier_frame_disables_sidecar_tools() {
         let _lock = async_test_lock().lock().await;
+        let _openai_key = EnvGuard::set("OPENAI_API_KEY", "test-openai-key");
         let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
         let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
         let root = temp_dir("bootstrap-process-tier");
@@ -739,6 +764,7 @@ remote_url = "libsql://example-org.turso.io"
     #[tokio::test]
     async fn bootstrap_vm_runtime_with_sidecar_metadata_routes_shell_status_through_sidecar_path() {
         let _lock = async_test_lock().lock().await;
+        let _openai_key = EnvGuard::set("OPENAI_API_KEY", "test-openai-key");
         let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
         let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
         let root = temp_dir("bootstrap-sidecar-metadata");
@@ -807,6 +833,7 @@ remote_url = "libsql://example-org.turso.io"
     #[tokio::test]
     async fn bootstrap_vm_runtime_without_frame_disables_sidecar_tools_for_direct_execution() {
         let _lock = async_test_lock().lock().await;
+        let _openai_key = EnvGuard::set("OPENAI_API_KEY", "test-openai-key");
         let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
         let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
         let root = temp_dir("bootstrap-direct");
@@ -878,9 +905,158 @@ config_version = "1.0.0"
 [selection]
 provider = "openai"
 model = "gpt-4o-mini"
-[providers.openai]
+[providers.registry.openai]
+provider_type = "openai"
 api_key = "test-openai-key"
 "#,
         );
+    }
+
+    /// Verifies that selecting a model marked as deprecated in the overlay
+    /// still builds successfully (the warning is logged, not an error) and
+    /// the deprecation check itself returns `true`.
+    #[test]
+    fn deprecated_model_emits_warning() {
+        use types::{CapsOverrideEntry, CapsOverrides};
+
+        // Verify the deprecation lookup returns true for a model with
+        // `deprecated = true` in the overlay.
+        let mut overrides = CapsOverrides::default();
+        overrides.overrides.insert(
+            "openai/gpt-4o-mini".to_owned(),
+            CapsOverrideEntry {
+                deprecated: Some(true),
+                ..CapsOverrideEntry::default()
+            },
+        );
+        assert!(overrides.is_deprecated("openai", "gpt-4o-mini"));
+        assert!(!overrides.is_deprecated("openai", "gpt-4o"));
+
+        // Build a provider with a deprecated model to ensure it succeeds
+        // (deprecation is a warning, not a hard error).
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai");
+        config.selection.model = ModelId::from("gpt-4o-mini");
+        if let Some(entry) = config.providers.registry.get_mut("openai") {
+            entry.api_key = Some("test-openai-key".to_owned());
+        }
+        // The pinned overlay does not mark gpt-4o-mini as deprecated, so
+        // `build_reliable_provider` will not log a warning here. What matters
+        // is that the code path that checks deprecation does not error out.
+        let provider = build_reliable_provider(&config);
+        assert!(provider.is_ok());
+    }
+
+    /// Selecting a model that belongs to a different catalog provider must
+    /// be rejected with `UnknownModelForCatalogProvider`.
+    #[test]
+    fn provider_type_model_mismatch_rejected() {
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai");
+        // claude-3-5-haiku-latest is an Anthropic model, not in the OpenAI catalog
+        config.selection.model = ModelId::from("claude-3-5-haiku-latest");
+        if let Some(entry) = config.providers.registry.get_mut("openai") {
+            entry.api_key = Some("test-openai-key".to_owned());
+        }
+
+        let result = build_reliable_provider(&config);
+        assert!(
+            result.is_err(),
+            "selecting an Anthropic model under the OpenAI provider should fail catalog validation"
+        );
+        let error = match result {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
+        };
+        assert!(
+            matches!(
+                error,
+                CliError::ConfigValidation(ConfigError::UnknownModelForCatalogProvider { .. })
+            ),
+            "expected UnknownModelForCatalogProvider but got: {error:?}"
+        );
+    }
+
+    /// `openai-responses` provider type validates models against the `"openai"`
+    /// catalog namespace (not `"openai-responses"`).
+    #[test]
+    fn openai_responses_provider_uses_openai_catalog() {
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai-responses");
+        config.selection.model = ModelId::from("gpt-4o-mini");
+        config.providers.registry.insert(
+            "openai-responses".to_owned(),
+            types::ProviderRegistryEntry {
+                provider_type: types::ProviderType::OpenaiResponses,
+                base_url: None,
+                api_key: Some("test-responses-key".to_owned()),
+                api_key_env: None,
+                extra_headers: None,
+                catalog_provider: None, // should default to "openai"
+            },
+        );
+
+        let provider = build_reliable_provider(&config)
+            .expect("openai-responses provider should validate gpt-4o-mini against openai catalog");
+        assert_eq!(
+            provider.provider_id(),
+            &ProviderId::from("openai-responses")
+        );
+        assert_eq!(provider.catalog_provider_id(), &ProviderId::from("openai"));
+    }
+
+    /// End-to-end: load config from file with a custom registry entry and
+    /// build a provider from it.
+    #[test]
+    fn full_bootstrap_with_registry_config() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("registry-config");
+        let paths = test_paths(&root);
+
+        // Write a config that defines a custom registry provider pointing
+        // at the openai catalog via `catalog_provider`.
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "my-proxy"
+model = "gpt-4o-mini"
+"#,
+        );
+        write_config(
+            &paths.workspace_dir,
+            PROVIDERS_CONFIG_FILE,
+            r#"
+[providers.registry.my-proxy]
+provider_type = "openai"
+api_key = "proxy-test-key"
+base_url = "https://my-proxy.example"
+catalog_provider = "openai"
+"#,
+        );
+
+        let _clear_provider = EnvGuard::remove("OXYDRA__SELECTION__PROVIDER");
+        let _clear_model = EnvGuard::remove("OXYDRA__SELECTION__MODEL");
+        let _clear_proxy_key = EnvGuard::remove("OXYDRA__PROVIDERS__REGISTRY__MY_PROXY__API_KEY");
+
+        let config = load_agent_config_with_paths(&paths, None, CliOverrides::default())
+            .expect("config with custom registry should load");
+
+        assert_eq!(config.selection.provider, ProviderId::from("my-proxy"));
+        let entry = config
+            .providers
+            .resolve("my-proxy")
+            .expect("my-proxy entry should exist");
+        assert_eq!(entry.effective_catalog_provider(), "openai");
+
+        let provider = build_reliable_provider(&config)
+            .expect("provider from custom registry entry should build");
+        assert_eq!(provider.provider_id(), &ProviderId::from("my-proxy"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

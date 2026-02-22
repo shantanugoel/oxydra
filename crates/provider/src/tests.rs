@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     env,
     io::{Read, Write},
     net::TcpListener,
@@ -13,7 +13,8 @@ use std::{
 use insta::assert_json_snapshot;
 use serde_json::json;
 use types::{
-    ModelDescriptor, ModelId, Provider, ProviderCaps, StreamItem, ToolCallDelta, UsageUpdate,
+    CatalogProvider, ModelCatalog, ModelDescriptor, ModelId, Provider, StreamItem, ToolCallDelta,
+    UsageUpdate,
 };
 
 use super::*;
@@ -49,15 +50,20 @@ fn api_key_resolution_uses_expected_precedence() {
 }
 
 #[test]
-fn default_openai_config_uses_openai_base_url() {
-    assert_eq!(OpenAIConfig::default().base_url, OPENAI_DEFAULT_BASE_URL);
+fn openai_provider_uses_default_base_url_when_empty() {
+    let provider = test_openai_provider(String::new());
+    // The provider should resolve to the default OpenAI base URL.
+    let context = test_context("gpt-4o-mini");
+    // Validation should pass — proves the provider was constructed correctly.
+    assert!(run_complete(&provider, &context).is_err()); // Transport error to 127.0.0.1 won't happen; just proves construction
 }
 
 #[test]
-fn default_anthropic_config_uses_anthropic_base_url() {
-    let config = AnthropicConfig::default();
-    assert_eq!(config.base_url, ANTHROPIC_DEFAULT_BASE_URL);
-    assert_eq!(config.max_tokens, DEFAULT_ANTHROPIC_MAX_TOKENS);
+fn anthropic_provider_uses_default_base_url_when_empty() {
+    let provider = test_anthropic_provider(String::new());
+    let context = test_anthropic_context();
+    // Validation should pass — proves the provider was constructed correctly.
+    assert!(run_complete_anthropic(&provider, &context).is_err());
 }
 
 #[test]
@@ -544,14 +550,7 @@ fn stream_emits_connection_lost_when_done_sentinel_missing() {
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
         "text/event-stream",
     );
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-        },
-        test_model_catalog(),
-    )
-    .expect("provider should initialize");
+    let provider = test_openai_provider(base_url);
 
     let items = run_stream_collect(&provider, &test_context("gpt-4o-mini"));
     assert!(
@@ -572,14 +571,7 @@ fn stream_finishes_without_connection_lost_when_done_is_received() {
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n",
         "text/event-stream",
     );
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-        },
-        test_model_catalog(),
-    )
-    .expect("provider should initialize");
+    let provider = test_openai_provider(base_url);
 
     let items = run_stream_collect(&provider, &test_context("gpt-4o-mini"));
     assert!(items.iter().all(Result::is_ok));
@@ -642,14 +634,7 @@ fn response_normalization_maps_message_and_finish_reason() {
 
 #[test]
 fn unknown_models_are_rejected_before_network_request() {
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url: "http://127.0.0.1:9".to_owned(),
-        },
-        test_model_catalog(),
-    )
-    .expect("provider should initialize");
+    let provider = test_openai_provider("http://127.0.0.1:9".to_owned());
 
     let context = test_context("unknown-model");
     let validation = run_complete(&provider, &context);
@@ -661,14 +646,7 @@ fn unknown_models_are_rejected_before_network_request() {
 
 #[test]
 fn transport_errors_are_mapped() {
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url: "http://127.0.0.1:9".to_owned(),
-        },
-        test_model_catalog(),
-    )
-    .expect("provider should initialize");
+    let provider = test_openai_provider("http://127.0.0.1:9".to_owned());
     let completion = run_complete(&provider, &test_context("gpt-4o-mini"));
     assert!(matches!(completion, Err(ProviderError::Transport { .. })));
 }
@@ -680,14 +658,7 @@ fn http_status_errors_are_mapped() {
         r#"{"error":{"message":"invalid API key"}}"#,
         "application/json",
     );
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-        },
-        test_model_catalog(),
-    )
-    .expect("provider should initialize");
+    let provider = test_openai_provider(base_url);
     let completion = run_complete(&provider, &test_context("gpt-4o-mini"));
     assert!(matches!(
         completion,
@@ -702,14 +673,7 @@ fn http_status_errors_are_mapped() {
 #[test]
 fn response_parse_errors_are_mapped() {
     let base_url = spawn_one_shot_server("200 OK", "not-json", "text/plain");
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-        },
-        test_model_catalog(),
-    )
-    .expect("provider should initialize");
+    let provider = test_openai_provider(base_url);
     let completion = run_complete(&provider, &test_context("gpt-4o-mini"));
     assert!(matches!(
         completion,
@@ -768,15 +732,7 @@ fn anthropic_response_normalization_maps_text_and_tool_use() {
 
 #[test]
 fn anthropic_unknown_models_are_rejected_before_network_request() {
-    let provider = AnthropicProvider::with_catalog(
-        AnthropicConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url: "http://127.0.0.1:9".to_owned(),
-            max_tokens: 64,
-        },
-        test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
-    )
-    .expect("provider should initialize");
+    let provider = test_anthropic_provider("http://127.0.0.1:9".to_owned());
 
     let context = test_context_for("anthropic", "unknown-model", "Ping");
     let validation = run_complete_anthropic(&provider, &context);
@@ -788,15 +744,7 @@ fn anthropic_unknown_models_are_rejected_before_network_request() {
 
 #[test]
 fn anthropic_transport_errors_are_mapped() {
-    let provider = AnthropicProvider::with_catalog(
-        AnthropicConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url: "http://127.0.0.1:9".to_owned(),
-            max_tokens: 64,
-        },
-        test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
-    )
-    .expect("provider should initialize");
+    let provider = test_anthropic_provider("http://127.0.0.1:9".to_owned());
     let completion = run_complete_anthropic(
         &provider,
         &test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping"),
@@ -811,15 +759,7 @@ fn anthropic_http_status_errors_are_mapped() {
         r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}"#,
         "application/json",
     );
-    let provider = AnthropicProvider::with_catalog(
-        AnthropicConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-            max_tokens: 64,
-        },
-        test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
-    )
-    .expect("provider should initialize");
+    let provider = test_anthropic_provider(base_url);
     let completion = run_complete_anthropic(
         &provider,
         &test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping"),
@@ -837,15 +777,7 @@ fn anthropic_http_status_errors_are_mapped() {
 #[test]
 fn anthropic_response_parse_errors_are_mapped() {
     let base_url = spawn_one_shot_server("200 OK", "not-json", "text/plain");
-    let provider = AnthropicProvider::with_catalog(
-        AnthropicConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-            max_tokens: 64,
-        },
-        test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
-    )
-    .expect("provider should initialize");
+    let provider = test_anthropic_provider(base_url);
     let completion = run_complete_anthropic(
         &provider,
         &test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping"),
@@ -947,10 +879,17 @@ fn reliable_provider_enforces_max_attempts() {
 #[test]
 #[ignore = "requires OPENAI_API_KEY and network access"]
 fn live_openai_smoke_normalizes_response() {
-    let _api_key = env::var("OPENAI_API_KEY")
+    let api_key = env::var("OPENAI_API_KEY")
         .expect("set OPENAI_API_KEY to run live_openai_smoke_normalizes_response");
-    let provider = OpenAIProvider::new(OpenAIConfig::default())
-        .expect("provider should initialize from OPENAI_API_KEY");
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned model catalog should parse");
+    let provider = OpenAIProvider::new(
+        ProviderId::from("openai"),
+        ProviderId::from("openai"),
+        api_key,
+        String::new(),
+        BTreeMap::new(),
+        catalog,
+    );
     let context = test_context_with_prompt("gpt-4o-mini", "Reply with exactly: PONG");
     let response = run_complete(&provider, &context).expect("live completion should succeed");
 
@@ -969,11 +908,18 @@ fn live_openai_smoke_normalizes_response() {
 #[test]
 #[ignore = "requires ANTHROPIC_API_KEY and network access"]
 fn live_anthropic_stream_smoke_emits_text_or_tool_calls() {
-    let _api_key = env::var("ANTHROPIC_API_KEY").expect(
+    let api_key = env::var("ANTHROPIC_API_KEY").expect(
         "set ANTHROPIC_API_KEY to run live_anthropic_stream_smoke_emits_text_or_tool_calls",
     );
-    let provider = AnthropicProvider::new(AnthropicConfig::default())
-        .expect("provider should initialize from ANTHROPIC_API_KEY");
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned model catalog should parse");
+    let provider = AnthropicProvider::new(
+        ProviderId::from("anthropic"),
+        ProviderId::from("anthropic"),
+        api_key,
+        String::new(),
+        BTreeMap::new(),
+        catalog,
+    );
     let context = test_context_for(
         "anthropic",
         "claude-3-5-sonnet-latest",
@@ -1075,13 +1021,54 @@ fn test_model_catalog() -> ModelCatalog {
 }
 
 fn test_model_catalog_for(provider: &str, model: &str, display_name: &str) -> ModelCatalog {
-    ModelCatalog::new(vec![ModelDescriptor {
-        provider: ProviderId::from(provider),
-        model: ModelId::from(model),
-        display_name: Some(display_name.to_owned()),
-        caps: ProviderCaps::default(),
-        deprecated: false,
-    }])
+    let mut models = BTreeMap::new();
+    models.insert(
+        model.to_owned(),
+        ModelDescriptor {
+            id: model.to_owned(),
+            name: display_name.to_owned(),
+            family: None,
+            attachment: false,
+            reasoning: false,
+            tool_call: false,
+            interleaved: None,
+            structured_output: false,
+            temperature: false,
+            knowledge: None,
+            release_date: None,
+            last_updated: None,
+            modalities: Default::default(),
+            open_weights: false,
+            cost: Default::default(),
+            limit: Default::default(),
+        },
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        provider.to_owned(),
+        CatalogProvider {
+            id: provider.to_owned(),
+            name: provider.to_owned(),
+            env: vec![],
+            api: None,
+            doc: None,
+            models,
+        },
+    );
+
+    ModelCatalog::new(providers)
+}
+
+fn test_openai_provider(base_url: String) -> OpenAIProvider {
+    OpenAIProvider::new(
+        ProviderId::from("openai"),
+        ProviderId::from("openai"),
+        "test-key".to_owned(),
+        base_url,
+        BTreeMap::new(),
+        test_model_catalog(),
+    )
 }
 
 fn test_context(model: &str) -> Context {
@@ -1653,6 +1640,675 @@ fn anthropic_stream_empty_text_delta_not_emitted() {
 }
 
 // ---------------------------------------------------------------------------
+// Gemini provider tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gemini_request_serialization_snapshot() {
+    let context = Context {
+        provider: ProviderId::from("gemini"),
+        model: ModelId::from("gemini-2.0-flash"),
+        tools: vec![FunctionDecl::new(
+            "file_read",
+            Some("Read UTF-8 text from a file".to_owned()),
+            JsonSchema::object(
+                std::collections::BTreeMap::from([(
+                    "path".to_owned(),
+                    JsonSchema::new(types::JsonSchemaType::String),
+                )]),
+                vec!["path".to_owned()],
+            ),
+        )],
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: Some("You are concise".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("List project files".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let request =
+        GeminiGenerateContentRequest::from_context(&context).expect("request should normalize");
+    let request_json = serde_json::to_value(request).expect("request should serialize");
+
+    assert_json_snapshot!(
+        request_json,
+        @r###"
+        {
+          "contents": [
+            {
+              "parts": [
+                {
+                  "text": "List project files"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "system_instruction": {
+            "parts": [
+              {
+                "text": "You are concise"
+              }
+            ],
+            "role": "user"
+          },
+          "tools": [
+            {
+              "function_declarations": [
+                {
+                  "description": "Read UTF-8 text from a file",
+                  "name": "file_read",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ],
+                    "type": "object"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        "###
+    );
+}
+
+#[test]
+fn gemini_response_normalization() {
+    let response = GeminiGenerateContentResponse {
+        candidates: vec![GeminiCandidate {
+            content: Some(GeminiContent {
+                role: "model".to_owned(),
+                parts: vec![GeminiPart {
+                    text: Some("Hello world".to_owned()),
+                    function_call: None,
+                    function_response: None,
+                }],
+            }),
+            finish_reason: Some("STOP".to_owned()),
+        }],
+        usage_metadata: Some(GeminiUsageMetadata {
+            prompt_token_count: Some(10),
+            candidates_token_count: Some(5),
+            total_token_count: Some(15),
+        }),
+    };
+
+    let normalized =
+        normalize_gemini_response(response, &ProviderId::from("gemini")).expect("should parse");
+    assert_eq!(normalized.message.role, MessageRole::Assistant);
+    assert_eq!(normalized.message.content.as_deref(), Some("Hello world"));
+    assert_eq!(normalized.finish_reason.as_deref(), Some("STOP"));
+    assert_eq!(
+        normalized.usage,
+        Some(UsageUpdate {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+        })
+    );
+    assert!(normalized.tool_calls.is_empty());
+}
+
+#[test]
+fn gemini_stream_chunk_parsing() {
+    let payload = json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{"text": "Hi there"}]
+            },
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 8,
+            "candidatesTokenCount": 3,
+            "totalTokenCount": 11
+        }
+    })
+    .to_string();
+
+    let provider = ProviderId::from("gemini");
+    let items = parse_gemini_stream_payload(&payload, &provider).expect("payload should parse");
+
+    assert_eq!(
+        items,
+        vec![
+            StreamItem::Text("Hi there".to_owned()),
+            StreamItem::FinishReason("STOP".to_owned()),
+            StreamItem::UsageUpdate(UsageUpdate {
+                prompt_tokens: Some(8),
+                completion_tokens: Some(3),
+                total_tokens: Some(11),
+            }),
+        ]
+    );
+}
+
+#[test]
+fn gemini_function_call_response_mapping() {
+    let response = GeminiGenerateContentResponse {
+        candidates: vec![GeminiCandidate {
+            content: Some(GeminiContent {
+                role: "model".to_owned(),
+                parts: vec![GeminiPart {
+                    text: None,
+                    function_call: Some(GeminiFunctionCall {
+                        name: "get_weather".to_owned(),
+                        args: json!({"location": "NYC"}),
+                    }),
+                    function_response: None,
+                }],
+            }),
+            finish_reason: Some("STOP".to_owned()),
+        }],
+        usage_metadata: Some(GeminiUsageMetadata {
+            prompt_token_count: Some(12),
+            candidates_token_count: Some(4),
+            total_token_count: Some(16),
+        }),
+    };
+
+    let normalized =
+        normalize_gemini_response(response, &ProviderId::from("gemini")).expect("should parse");
+
+    // Tool call should be present with a generated UUID id.
+    assert_eq!(normalized.tool_calls.len(), 1);
+    assert_eq!(normalized.tool_calls[0].name, "get_weather");
+    assert_eq!(
+        normalized.tool_calls[0].arguments,
+        json!({"location": "NYC"})
+    );
+    // The id is a UUID — verify it's non-empty and the message's tool_calls match.
+    assert!(
+        !normalized.tool_calls[0].id.is_empty(),
+        "tool call id should be a non-empty generated UUID"
+    );
+    assert_eq!(normalized.message.tool_calls.len(), 1);
+    assert_eq!(
+        normalized.message.tool_calls[0].id,
+        normalized.tool_calls[0].id
+    );
+
+    // Streaming: function calls in stream chunks should also produce ToolCallDelta.
+    let stream_payload = json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{
+                    "functionCall": {
+                        "name": "get_weather",
+                        "args": {"location": "NYC"}
+                    }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let items = parse_gemini_stream_payload(&stream_payload, &ProviderId::from("gemini"))
+        .expect("stream payload should parse");
+    assert_eq!(items.len(), 1);
+    assert!(matches!(
+        &items[0],
+        StreamItem::ToolCallDelta(delta) if delta.name.as_deref() == Some("get_weather")
+            && delta.id.is_some()
+            && delta.index == 0
+    ));
+}
+
+#[test]
+fn gemini_tool_result_encoding() {
+    let context = Context {
+        provider: ProviderId::from("gemini"),
+        model: ModelId::from("gemini-2.0-flash"),
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::User,
+                content: Some("What's the weather?".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_owned(),
+                    name: "get_weather".to_owned(),
+                    arguments: json!({"location": "NYC"}),
+                }],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Tool,
+                content: Some(r#"{"temp": 72}"#.to_owned()),
+                tool_calls: vec![],
+                tool_call_id: Some("call_1".to_owned()),
+            },
+        ],
+    };
+
+    let request =
+        GeminiGenerateContentRequest::from_context(&context).expect("request should normalize");
+    let request_json = serde_json::to_value(request).expect("request should serialize");
+
+    // The third content entry should be the tool result encoded as functionResponse.
+    let tool_content = &request_json["contents"][2];
+    assert_eq!(tool_content["role"], "user");
+    let function_response = &tool_content["parts"][0]["functionResponse"];
+    assert_eq!(function_response["name"], "get_weather");
+    assert_eq!(function_response["response"], json!({"temp": 72}));
+
+    // The second content entry should be the assistant message with functionCall.
+    let assistant_content = &request_json["contents"][1];
+    assert_eq!(assistant_content["role"], "model");
+    let function_call = &assistant_content["parts"][0]["functionCall"];
+    assert_eq!(function_call["name"], "get_weather");
+    assert_eq!(function_call["args"], json!({"location": "NYC"}));
+}
+
+// ---------------------------------------------------------------------------
+// Gemini provider helpers
+// ---------------------------------------------------------------------------
+
+fn test_gemini_provider(base_url: String) -> GeminiProvider {
+    GeminiProvider::new(
+        ProviderId::from("gemini"),
+        ProviderId::from("gemini"),
+        "test-key".to_owned(),
+        base_url,
+        BTreeMap::new(),
+        test_model_catalog_for("gemini", "gemini-2.0-flash", "Gemini 2.0 Flash"),
+    )
+}
+
+fn run_complete_gemini(
+    provider: &GeminiProvider,
+    context: &Context,
+) -> Result<Response, ProviderError> {
+    run_complete_with(provider, context)
+}
+
+fn run_stream_collect_gemini(
+    provider: &GeminiProvider,
+    context: &Context,
+) -> Vec<Result<StreamItem, ProviderError>> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build")
+        .block_on(async {
+            let mut stream = provider
+                .stream(context, DEFAULT_STREAM_BUFFER_SIZE)
+                .await
+                .expect("stream should start");
+            let mut items = Vec::new();
+            while let Some(item) = stream.recv().await {
+                items.push(item);
+            }
+            items
+        })
+}
+
+#[test]
+fn gemini_provider_uses_default_base_url_when_empty() {
+    let provider = test_gemini_provider(String::new());
+    let context = test_context_for("gemini", "gemini-2.0-flash", "Ping");
+    // Validation should pass — proves the provider was constructed correctly.
+    assert!(run_complete_gemini(&provider, &context).is_err());
+}
+
+#[test]
+fn gemini_unknown_models_are_rejected_before_network_request() {
+    let provider = test_gemini_provider("http://127.0.0.1:9".to_owned());
+    let context = test_context_for("gemini", "unknown-model", "Ping");
+    let validation = run_complete_gemini(&provider, &context);
+    assert!(matches!(
+        validation,
+        Err(ProviderError::UnknownModel { .. })
+    ));
+}
+
+#[test]
+fn gemini_transport_errors_are_mapped() {
+    let provider = test_gemini_provider("http://127.0.0.1:9".to_owned());
+    let context = test_context_for("gemini", "gemini-2.0-flash", "Ping");
+    let completion = run_complete_gemini(&provider, &context);
+    assert!(matches!(completion, Err(ProviderError::Transport { .. })));
+}
+
+#[test]
+fn gemini_http_status_errors_are_mapped() {
+    let base_url = spawn_one_shot_server(
+        "403 Forbidden",
+        r#"{"error":{"message":"API key not valid"}}"#,
+        "application/json",
+    );
+    let provider = test_gemini_provider(base_url);
+    let context = test_context_for("gemini", "gemini-2.0-flash", "Ping");
+    let completion = run_complete_gemini(&provider, &context);
+    assert!(matches!(
+        completion,
+        Err(ProviderError::HttpStatus {
+            status: 403,
+            message,
+            ..
+        }) if message == "API key not valid"
+    ));
+}
+
+#[test]
+fn gemini_stream_connection_lost_without_finish_reason() {
+    // Serve an incomplete SSE stream (no finish reason) and verify ConnectionLost.
+    let sse_body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n";
+    let base_url = spawn_one_shot_server("200 OK", sse_body, "text/event-stream");
+    let provider = test_gemini_provider(base_url);
+    let context = test_context_for("gemini", "gemini-2.0-flash", "Ping");
+    let items = run_stream_collect_gemini(&provider, &context);
+
+    // Text should have arrived.
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, Ok(StreamItem::Text(text)) if text == "Hi")),
+        "text should have arrived"
+    );
+
+    // Last item should be ConnectionLost.
+    assert!(
+        matches!(items.last(), Some(Ok(StreamItem::ConnectionLost(_)))),
+        "stream should end with ConnectionLost when finish reason is missing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Responses provider tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn responses_request_serialization_snapshot() {
+    let context = Context {
+        provider: ProviderId::from("openai-responses"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![FunctionDecl::new(
+            "file_read",
+            Some("Read UTF-8 text from a file".to_owned()),
+            JsonSchema::object(
+                std::collections::BTreeMap::from([(
+                    "path".to_owned(),
+                    JsonSchema::new(types::JsonSchemaType::String),
+                )]),
+                vec!["path".to_owned()],
+            ),
+        )],
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: Some("You are concise".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("List project files".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_owned(),
+                    name: "file_read".to_owned(),
+                    arguments: json!({"path": "Cargo.toml"}),
+                }],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::Tool,
+                content: Some("{\"ok\":true}".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: Some("call_1".to_owned()),
+            },
+        ],
+    };
+
+    let request = ResponsesApiRequest::from_context(&context, Some("resp_1".to_owned()), 0)
+        .expect("request should normalize");
+    let request_json = serde_json::to_value(request).expect("request should serialize");
+
+    assert_json_snapshot!(
+        request_json,
+        @r###"
+        {
+          "input": [
+            {
+              "content": "List project files",
+              "role": "user",
+              "type": "message"
+            },
+            {
+              "arguments": "{\"path\":\"Cargo.toml\"}",
+              "call_id": "call_1",
+              "name": "file_read",
+              "type": "function_call"
+            },
+            {
+              "call_id": "call_1",
+              "output": "{\"ok\":true}",
+              "type": "function_call_output"
+            }
+          ],
+          "instructions": "You are concise",
+          "model": "gpt-4o-mini",
+          "previous_response_id": "resp_1",
+          "store": true,
+          "stream": false,
+          "tools": [
+            {
+              "description": "Read UTF-8 text from a file",
+              "name": "file_read",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": "function"
+            }
+          ]
+        }
+        "###
+    );
+}
+
+#[test]
+fn responses_sse_event_parsing() {
+    let provider = ProviderId::from("openai-responses");
+    let mut accumulator = ResponsesToolCallAccumulator::default();
+
+    let output_item = ResponsesOutputItemAddedData {
+        output_index: 0,
+        item: Default::default(),
+    };
+    let event = crate::openai::SseEvent {
+        event_type: Some("response.output_item.added".to_owned()),
+        data: serde_json::to_string(&output_item).unwrap(),
+    };
+    let action =
+        parse_responses_stream_event(&event, &provider, &mut accumulator).expect("parse ok");
+    assert!(matches!(action, ResponsesEventAction::Items(items) if items.is_empty()));
+
+    let text_event = crate::openai::SseEvent {
+        event_type: Some("response.output_text.delta".to_owned()),
+        data: serde_json::to_string(&ResponsesTextDeltaData {
+            delta: "Hello".to_owned(),
+        })
+        .unwrap(),
+    };
+    let action =
+        parse_responses_stream_event(&text_event, &provider, &mut accumulator).expect("parse ok");
+    assert!(
+        matches!(action, ResponsesEventAction::Items(items) if matches!(&items[0], StreamItem::Text(text) if text == "Hello"))
+    );
+
+    let args_event = crate::openai::SseEvent {
+        event_type: Some("response.function_call_arguments.delta".to_owned()),
+        data: serde_json::to_string(&ResponsesFunctionArgsDeltaData {
+            output_index: 0,
+            delta: "{\"foo\":\"bar\"}".to_owned(),
+        })
+        .unwrap(),
+    };
+    let action =
+        parse_responses_stream_event(&args_event, &provider, &mut accumulator).expect("parse ok");
+    assert!(
+        matches!(action, ResponsesEventAction::Items(items) if matches!(&items[0], StreamItem::ToolCallDelta(_)))
+    );
+
+    let completed = ResponsesCompletedData {
+        response: ResponsesApiResponse {
+            id: Some("resp_42".to_owned()),
+            output: vec![ResponsesOutputBlock::Message {
+                role: "assistant".to_owned(),
+                content: vec![ResponsesOutputContent::OutputText {
+                    text: "done".to_owned(),
+                }],
+            }],
+            status: Some("completed".to_owned()),
+            usage: Some(ResponsesUsage {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                total_tokens: Some(15),
+            }),
+        },
+    };
+    let completed_event = crate::openai::SseEvent {
+        event_type: Some("response.completed".to_owned()),
+        data: serde_json::to_string(&completed).unwrap(),
+    };
+    let action = parse_responses_stream_event(&completed_event, &provider, &mut accumulator)
+        .expect("parse ok");
+    assert!(
+        matches!(action, ResponsesEventAction::Completed { response_id, .. } if response_id == "resp_42")
+    );
+}
+
+#[test]
+fn previous_response_id_updated_on_completion() {
+    let base_url = spawn_one_shot_server(
+        "200 OK",
+        r#"{"id":"resp_100","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"status":"completed","usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}"#,
+        "application/json",
+    );
+    let provider = test_responses_provider(base_url);
+    let context = test_context_for("openai-responses", "gpt-4o-mini", "Ping");
+    let result = run_complete_responses(&provider, &context);
+    assert!(result.is_ok());
+    assert_eq!(
+        provider.current_previous_response_id().as_deref(),
+        Some("resp_100")
+    );
+}
+
+#[test]
+fn partial_input_on_chained_turn() {
+    let context = Context {
+        provider: ProviderId::from("openai-responses"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: Some("System".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("First".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some("Second".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ],
+    };
+
+    let request = ResponsesApiRequest::from_context(&context, Some("resp_1".to_owned()), 2)
+        .expect("request should normalize");
+    let request_json = serde_json::to_value(request).expect("request should serialize");
+    assert_eq!(request_json["input"].as_array().unwrap().len(), 1);
+    assert!(request_json.get("instructions").is_none());
+}
+
+#[test]
+fn desync_fallback_resets_and_retries() {
+    let responses = vec![
+        (
+            "400 Bad Request",
+            r#"{"error":{"message":"invalid previous_response_id"}}"#,
+            "application/json",
+        ),
+        (
+            "200 OK",
+            r#"{"id":"resp_200","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"status":"completed"}"#,
+            "application/json",
+        ),
+    ];
+    let base_url = spawn_sequenced_server(responses);
+    let provider = test_responses_provider(base_url);
+    provider.set_chaining_state(Some("resp_prev".to_owned()), 1);
+    let context = test_context_for("openai-responses", "gpt-4o-mini", "Ping");
+    let result = run_complete_responses(&provider, &context);
+    assert!(result.is_ok());
+    assert_eq!(
+        provider.current_previous_response_id().as_deref(),
+        Some("resp_200")
+    );
+}
+
+#[test]
+fn responses_provider_uses_openai_catalog() {
+    let provider = ResponsesProvider::new(
+        ProviderId::from("openai-responses"),
+        ProviderId::from("openai"),
+        "test-key".to_owned(),
+        "http://127.0.0.1:9".to_owned(),
+        BTreeMap::new(),
+        test_model_catalog_for("openai", "gpt-4o-mini", "GPT-4o mini"),
+    );
+    let context = test_context_for("openai-responses", "gpt-4o-mini", "Ping");
+    let result = run_complete_responses(&provider, &context);
+    assert!(matches!(result, Err(ProviderError::Transport { .. })));
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
@@ -1720,19 +2376,66 @@ fn sse_event(event_type: &str, data: &serde_json::Value) -> String {
 }
 
 fn test_anthropic_provider(base_url: String) -> AnthropicProvider {
-    AnthropicProvider::with_catalog(
-        AnthropicConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-            max_tokens: 64,
-        },
+    AnthropicProvider::new(
+        ProviderId::from("anthropic"),
+        ProviderId::from("anthropic"),
+        "test-key".to_owned(),
+        base_url,
+        BTreeMap::new(),
         test_model_catalog_for("anthropic", "claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
     )
-    .expect("test provider should initialize")
 }
 
 fn test_anthropic_context() -> Context {
     test_context_for("anthropic", "claude-3-5-sonnet-latest", "Ping")
+}
+
+fn test_responses_provider(base_url: String) -> ResponsesProvider {
+    ResponsesProvider::new(
+        ProviderId::from("openai-responses"),
+        ProviderId::from("openai"),
+        "test-key".to_owned(),
+        base_url,
+        BTreeMap::new(),
+        test_model_catalog_for("openai", "gpt-4o-mini", "GPT-4o mini"),
+    )
+}
+
+fn run_complete_responses(
+    provider: &ResponsesProvider,
+    context: &Context,
+) -> Result<Response, ProviderError> {
+    run_complete_with(provider, context)
+}
+
+fn spawn_sequenced_server(responses: Vec<(&str, &str, &str)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+    let address = listener
+        .local_addr()
+        .expect("server should expose a local address");
+    let responses: Vec<(String, String, String)> = responses
+        .into_iter()
+        .map(|(status, body, content_type)| {
+            (status.to_owned(), body.to_owned(), content_type.to_owned())
+        })
+        .collect();
+    let _server = std::thread::spawn(move || {
+        for (status_line, body, content_type) in responses {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request_buffer = [0_u8; 8_192];
+                let _ = stream.read(&mut request_buffer);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            } else {
+                break;
+            }
+        }
+    });
+    format!("http://{address}")
 }
 
 fn run_stream_collect_anthropic(

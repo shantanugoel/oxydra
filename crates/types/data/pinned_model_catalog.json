@@ -1,124 +1,232 @@
 {
-  "models": [
-    {
-      "provider": "anthropic",
-      "model": "claude-3-5-haiku-latest",
-      "display_name": "Claude 3.5 Haiku",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": false,
-        "supports_reasoning_traces": false,
-        "max_input_tokens": 200000,
-        "max_output_tokens": 8192,
-        "max_context_tokens": 200000
+  "anthropic": {
+    "id": "anthropic",
+    "name": "Anthropic",
+    "env": [
+      "ANTHROPIC_API_KEY"
+    ],
+    "api": "https://api.anthropic.com",
+    "doc": "https://docs.anthropic.com",
+    "models": {
+      "claude-3-5-haiku-latest": {
+        "id": "claude-3-5-haiku-latest",
+        "name": "Claude 3.5 Haiku",
+        "family": "claude",
+        "tool_call": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 1.0,
+          "output": 5.0,
+          "cache_read": 0.1,
+          "cache_write": 1.25
+        },
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        }
       },
-      "deprecated": false
-    },
-    {
-      "provider": "anthropic",
-      "model": "claude-3-5-sonnet-latest",
-      "display_name": "Claude 3.5 Sonnet",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": false,
-        "supports_reasoning_traces": false,
-        "max_input_tokens": 200000,
-        "max_output_tokens": 8192,
-        "max_context_tokens": 200000
-      },
-      "deprecated": false
-    },
-    {
-      "provider": "openai",
-      "model": "gpt-4.1",
-      "display_name": "GPT-4.1",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": true,
-        "supports_reasoning_traces": true,
-        "max_input_tokens": 1047576,
-        "max_output_tokens": 32768,
-        "max_context_tokens": 1048576
-      },
-      "deprecated": false
-    },
-    {
-      "provider": "openai",
-      "model": "gpt-4.1-mini",
-      "display_name": "GPT-4.1 mini",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": true,
-        "supports_reasoning_traces": false,
-        "max_input_tokens": 1048576,
-        "max_output_tokens": 32768,
-        "max_context_tokens": 1048576
-      },
-      "deprecated": false
-    },
-    {
-      "provider": "openai",
-      "model": "gpt-4.1-nano",
-      "display_name": "GPT-4.1 nano",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": true,
-        "supports_reasoning_traces": false,
-        "max_input_tokens": 1048576,
-        "max_output_tokens": 32768,
-        "max_context_tokens": 1048576
-      },
-      "deprecated": false
-    },
-    {
-      "provider": "openai",
-      "model": "gpt-4o",
-      "display_name": "GPT-4o",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": true,
-        "supports_reasoning_traces": false,
-        "max_input_tokens": 128000,
-        "max_output_tokens": 16384,
-        "max_context_tokens": 128000
-      },
-      "deprecated": false
-    },
-    {
-      "provider": "openai",
-      "model": "gpt-4o-mini",
-      "display_name": "GPT-4o mini",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": true,
-        "supports_reasoning_traces": false,
-        "max_input_tokens": 128000,
-        "max_output_tokens": 16384,
-        "max_context_tokens": 128000
-      },
-      "deprecated": false
-    },
-    {
-      "provider": "openai",
-      "model": "o3-mini",
-      "display_name": "OpenAI o3-mini",
-      "caps": {
-        "supports_streaming": true,
-        "supports_tools": true,
-        "supports_json_mode": true,
-        "supports_reasoning_traces": true,
-        "max_input_tokens": 200000,
-        "max_output_tokens": 100000,
-        "max_context_tokens": 200000
-      },
-      "deprecated": false
+      "claude-3-5-sonnet-latest": {
+        "id": "claude-3-5-sonnet-latest",
+        "name": "Claude 3.5 Sonnet",
+        "family": "claude",
+        "attachment": true,
+        "tool_call": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 3.0,
+          "output": 15.0,
+          "cache_read": 0.3,
+          "cache_write": 3.75
+        },
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        }
+      }
     }
-  ]
+  },
+  "openai": {
+    "id": "openai",
+    "name": "OpenAI",
+    "env": [
+      "OPENAI_API_KEY"
+    ],
+    "api": "https://api.openai.com/v1",
+    "doc": "https://platform.openai.com/docs",
+    "models": {
+      "gpt-4.1": {
+        "id": "gpt-4.1",
+        "name": "GPT-4.1",
+        "family": "gpt-4.1",
+        "attachment": true,
+        "reasoning": true,
+        "tool_call": true,
+        "structured_output": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 2.0,
+          "output": 8.0
+        },
+        "limit": {
+          "context": 1048576,
+          "output": 32768
+        }
+      },
+      "gpt-4.1-mini": {
+        "id": "gpt-4.1-mini",
+        "name": "GPT-4.1 mini",
+        "family": "gpt-4.1",
+        "attachment": true,
+        "tool_call": true,
+        "structured_output": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 0.4,
+          "output": 1.6
+        },
+        "limit": {
+          "context": 1048576,
+          "output": 32768
+        }
+      },
+      "gpt-4.1-nano": {
+        "id": "gpt-4.1-nano",
+        "name": "GPT-4.1 nano",
+        "family": "gpt-4.1",
+        "tool_call": true,
+        "structured_output": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.4
+        },
+        "limit": {
+          "context": 1048576,
+          "output": 32768
+        }
+      },
+      "gpt-4o": {
+        "id": "gpt-4o",
+        "name": "GPT-4o",
+        "family": "gpt-4o",
+        "attachment": true,
+        "tool_call": true,
+        "structured_output": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 2.5,
+          "output": 10.0
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        }
+      },
+      "gpt-4o-mini": {
+        "id": "gpt-4o-mini",
+        "name": "GPT-4o mini",
+        "family": "gpt-4o",
+        "attachment": true,
+        "tool_call": true,
+        "structured_output": true,
+        "temperature": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 0.15,
+          "output": 0.6
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        }
+      },
+      "o3-mini": {
+        "id": "o3-mini",
+        "name": "OpenAI o3-mini",
+        "family": "o3",
+        "reasoning": true,
+        "tool_call": true,
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "structured_output": true,
+        "modalities": {
+          "input": [
+            "text"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 1.1,
+          "output": 4.4
+        },
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        }
+      }
+    }
+  }
 }

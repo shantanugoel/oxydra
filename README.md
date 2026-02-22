@@ -4,7 +4,7 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 
 ## Features
 
-- **Provider-agnostic LLM integration** — OpenAI and Anthropic with SSE streaming, automatic retries, and a pinned model catalog
+- **Provider-agnostic LLM integration** — OpenAI, Anthropic, Google Gemini, and OpenAI Responses API with SSE streaming, automatic retries, and a pinned model catalog
 - **Tool system** — `#[tool]` proc-macro for defining tools with automatic JSON Schema generation and safety tiers
 - **Agent runtime** — Turn-loop state machine with tool dispatch, self-correction, context budget management, and cost limits
 - **Persistent memory** — Hybrid retrieval (vector + FTS5) over libSQL with conversation summarization
@@ -29,6 +29,8 @@ Set your provider API key:
 export OPENAI_API_KEY=your-key
 # or
 export ANTHROPIC_API_KEY=your-key
+# or
+export GEMINI_API_KEY=your-key
 ```
 
 ### 2. Build
@@ -77,7 +79,7 @@ OXYDRA__RUNTIME__MAX_TURNS=12
 OXYDRA__MEMORY__ENABLED=true
 ```
 
-API key resolution order: explicit config value > provider-specific env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) > fallback `API_KEY`.
+API key resolution order: explicit config value > custom `api_key_env` > provider-specific env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) > fallback `API_KEY`.
 
 ### Runner configuration
 
@@ -97,13 +99,13 @@ See `examples/config/` for complete annotated configuration files:
 ```
 crates/
   types/          Core type definitions, config, model catalog
-  provider/       LLM provider implementations (OpenAI, Anthropic)
+  provider/       LLM provider implementations (OpenAI, Anthropic, Gemini, OpenAI Responses)
   tools/          Tool trait and core tool implementations
   tools-macros/   #[tool] procedural macro
   runtime/        Agent turn-loop runtime
   memory/         Persistent memory with hybrid retrieval
   sandbox/        WASM sandbox and security policies
-  runner/         Runner lifecycle and guest orchestration
+  runner/         Runner lifecycle, guest orchestration, catalog commands
   shell-daemon/   Shell daemon protocol for guest environments
   channels/       Channel trait and registry
   gateway/        WebSocket gateway server

@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -15,14 +15,14 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use types::{
-    Context, FunctionDecl, JsonSchema, JsonSchemaType, Memory, MemoryChunkUpsertRequest,
-    MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
-    MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord, MemoryRetrieval,
-    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
-    MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
-    Provider, ProviderCaps, ProviderError, ProviderId, Response, RunnerBootstrapEnvelope,
-    SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall,
-    ToolCallDelta, ToolError, UsageUpdate,
+    CatalogProvider, Context, FunctionDecl, JsonSchema, JsonSchemaType, Memory,
+    MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest,
+    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord,
+    MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
+    MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
+    ModelDescriptor, ModelId, ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId,
+    Response, RunnerBootstrapEnvelope, SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport,
+    StreamItem, Tool, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
 };
 
 use super::{AgentRuntime, RuntimeLimits};
@@ -33,7 +33,9 @@ mock! {
     #[async_trait]
     impl Provider for ProviderContract {
         fn provider_id(&self) -> &ProviderId;
+        fn catalog_provider_id(&self) -> &ProviderId;
         fn model_catalog(&self) -> &ModelCatalog;
+        fn capabilities(&self, model: &ModelId) -> Result<ProviderCaps, ProviderError>;
         async fn complete(&self, context: &Context) -> Result<Response, ProviderError>;
         async fn stream(
             &self,
@@ -65,16 +67,29 @@ enum ProviderStep {
 struct FakeProvider {
     provider_id: ProviderId,
     model_catalog: ModelCatalog,
+    caps: ProviderCaps,
     steps: Mutex<VecDeque<ProviderStep>>,
 }
 
 impl FakeProvider {
     fn new(provider_id: ProviderId, model_catalog: ModelCatalog, steps: Vec<ProviderStep>) -> Self {
+        // Derive caps from the first model in the catalog
+        let caps = model_catalog
+            .all_models()
+            .next()
+            .map(|(_, _, descriptor)| descriptor.to_provider_caps())
+            .unwrap_or_default();
         Self {
             provider_id,
             model_catalog,
+            caps,
             steps: Mutex::new(steps.into()),
         }
+    }
+
+    fn with_caps(mut self, caps: ProviderCaps) -> Self {
+        self.caps = caps;
+        self
     }
 
     fn next_step(&self) -> ProviderStep {
@@ -94,6 +109,12 @@ impl Provider for FakeProvider {
 
     fn model_catalog(&self) -> &ModelCatalog {
         &self.model_catalog
+    }
+
+    fn capabilities(&self, model: &ModelId) -> Result<ProviderCaps, ProviderError> {
+        // Validate the model exists, then return the stored caps
+        self.model_catalog.validate(self.provider_id(), model)?;
+        Ok(self.caps.clone())
     }
 
     async fn complete(&self, _context: &Context) -> Result<Response, ProviderError> {
@@ -433,6 +454,14 @@ fn mock_provider(
         model_id,
         supports_streaming,
     ));
+    let caps = ProviderCaps {
+        supports_streaming,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    };
+    provider
+        .expect_capabilities()
+        .returning(move |_| Ok(caps.clone()));
     provider
 }
 
@@ -447,7 +476,12 @@ async fn run_session_uses_complete_path_when_streaming_is_disabled() {
             "final answer",
             vec![],
         ))],
-    );
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    });
     let runtime = AgentRuntime::new(
         Box::new(provider),
         ToolRegistry::default(),
@@ -999,7 +1033,12 @@ async fn run_session_for_session_persists_initial_context_and_new_turns() {
             "final answer",
             vec![],
         ))],
-    );
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    });
     let memory = Arc::new(RecordingMemory::default());
     let runtime = AgentRuntime::new(
         Box::new(provider),
@@ -1099,7 +1138,12 @@ async fn run_session_for_session_keeps_existing_behavior_without_memory_backend(
             "no memory configured",
             vec![],
         ))],
-    );
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    });
     let runtime = AgentRuntime::new(
         Box::new(provider),
         ToolRegistry::default(),
@@ -1427,7 +1471,12 @@ async fn run_session_cancels_during_provider_call() {
             response: assistant_response("late response", vec![]),
             delay: Duration::from_millis(250),
         }],
-    );
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    });
     let runtime = AgentRuntime::new(
         Box::new(provider),
         ToolRegistry::default(),
@@ -1464,7 +1513,12 @@ async fn run_session_errors_when_provider_stage_times_out() {
             response: assistant_response("late response", vec![]),
             delay: Duration::from_millis(100),
         }],
-    );
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    });
     let runtime = AgentRuntime::new(
         Box::new(provider),
         ToolRegistry::default(),
@@ -1613,6 +1667,14 @@ async fn run_session_trims_provider_context_to_max_context_budget() {
             false,
             Some(96),
         ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            max_context_tokens: Some(96),
+            ..ProviderCaps::default()
+        })
+    });
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -1705,6 +1767,13 @@ async fn run_session_uses_fallback_context_limit_when_model_cap_is_missing() {
             false,
             None,
         ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            ..ProviderCaps::default()
+        })
+    });
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -1768,6 +1837,14 @@ async fn run_session_for_session_enforces_budget_with_retrieval_injection() {
             false,
             Some(96),
         ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            max_context_tokens: Some(96),
+            ..ProviderCaps::default()
+        })
+    });
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -1876,6 +1953,14 @@ async fn run_session_for_session_injects_retrieved_memory_snippets() {
             false,
             Some(256),
         ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            max_context_tokens: Some(256),
+            ..ProviderCaps::default()
+        })
+    });
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -1960,6 +2045,14 @@ async fn run_session_for_session_triggers_rolling_summary_when_threshold_exceede
             false,
             Some(256),
         ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            max_context_tokens: Some(256),
+            ..ProviderCaps::default()
+        })
+    });
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -2061,6 +2154,14 @@ async fn run_session_for_session_discards_stale_rolling_summary_writes() {
             false,
             Some(256),
         ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            max_context_tokens: Some(256),
+            ..ProviderCaps::default()
+        })
+    });
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -2153,24 +2254,51 @@ fn test_catalog(
 fn test_catalog_with_max_context(
     provider_id: ProviderId,
     model_id: ModelId,
-    supports_streaming: bool,
+    _supports_streaming: bool,
     max_context_tokens: Option<u32>,
 ) -> ModelCatalog {
-    ModelCatalog::new(vec![ModelDescriptor {
-        provider: provider_id,
-        model: model_id,
-        display_name: None,
-        caps: ProviderCaps {
-            supports_streaming,
-            supports_tools: true,
-            supports_json_mode: false,
-            supports_reasoning_traces: false,
-            max_input_tokens: None,
-            max_output_tokens: None,
-            max_context_tokens,
+    let limit = ModelLimits {
+        context: max_context_tokens.unwrap_or(0),
+        output: 0,
+    };
+
+    let mut models = BTreeMap::new();
+    models.insert(
+        model_id.0.clone(),
+        ModelDescriptor {
+            id: model_id.0.clone(),
+            name: model_id.0.clone(),
+            family: None,
+            attachment: false,
+            reasoning: false,
+            tool_call: true,
+            interleaved: None,
+            structured_output: false,
+            temperature: false,
+            knowledge: None,
+            release_date: None,
+            last_updated: None,
+            modalities: Default::default(),
+            open_weights: false,
+            cost: Default::default(),
+            limit,
         },
-        deprecated: false,
-    }])
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        provider_id.0.clone(),
+        CatalogProvider {
+            id: provider_id.0.clone(),
+            name: provider_id.0.clone(),
+            env: vec![],
+            api: None,
+            doc: None,
+            models,
+        },
+    );
+
+    ModelCatalog::new(providers)
 }
 
 fn test_context(provider_id: ProviderId, model_id: ModelId) -> Context {

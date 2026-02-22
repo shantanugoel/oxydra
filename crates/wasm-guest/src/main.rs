@@ -125,12 +125,11 @@ fn file_write(args: &Value) -> GuestResult {
         Err(e) => return e,
     };
     // Create parent directories if needed
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                return GuestResult::err(format!("failed to create directories for `{path}`: {e}"));
-            }
-        }
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        return GuestResult::err(format!("failed to create directories for `{path}`: {e}"));
     }
     match fs::write(path, content.as_bytes()) {
         Ok(()) => GuestResult::ok(format!("wrote {} bytes to {path}", content.len())),

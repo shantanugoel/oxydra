@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -9,63 +11,42 @@ use types::{
 };
 
 use crate::{
-    ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_PROVIDER_ID, ANTHROPIC_VERSION,
+    ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_VERSION,
     DEFAULT_ANTHROPIC_MAX_TOKENS, DEFAULT_STREAM_BUFFER_SIZE, extract_http_error_message,
-    non_empty, normalize_base_url_or_default, openai::SseDataParser, resolve_anthropic_api_key,
+    non_empty, normalize_base_url_or_default, openai::SseDataParser,
 };
-
-#[derive(Debug, Clone)]
-pub struct AnthropicConfig {
-    pub api_key: Option<String>,
-    pub base_url: String,
-    pub max_tokens: u32,
-}
-
-impl Default for AnthropicConfig {
-    fn default() -> Self {
-        Self {
-            api_key: None,
-            base_url: ANTHROPIC_DEFAULT_BASE_URL.to_owned(),
-            max_tokens: DEFAULT_ANTHROPIC_MAX_TOKENS,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct AnthropicProvider {
     client: Client,
     provider_id: ProviderId,
+    catalog_provider_id: ProviderId,
     model_catalog: ModelCatalog,
     base_url: String,
     api_key: String,
     max_tokens: u32,
+    extra_headers: BTreeMap<String, String>,
 }
 
 impl AnthropicProvider {
-    pub fn new(config: AnthropicConfig) -> Result<Self, ProviderError> {
-        let model_catalog = ModelCatalog::from_pinned_snapshot()?;
-        Self::with_catalog(config, model_catalog)
-    }
-
-    pub fn with_catalog(
-        config: AnthropicConfig,
+    pub fn new(
+        provider_id: ProviderId,
+        catalog_provider_id: ProviderId,
+        api_key: String,
+        base_url: String,
+        extra_headers: BTreeMap<String, String>,
         model_catalog: ModelCatalog,
-    ) -> Result<Self, ProviderError> {
-        let provider_id = ProviderId::from(ANTHROPIC_PROVIDER_ID);
-        let api_key = resolve_anthropic_api_key(config.api_key).ok_or_else(|| {
-            ProviderError::MissingApiKey {
-                provider: provider_id.clone(),
-            }
-        })?;
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             client: Client::new(),
             provider_id,
+            catalog_provider_id,
             model_catalog,
-            base_url: normalize_base_url_or_default(&config.base_url, ANTHROPIC_DEFAULT_BASE_URL),
+            base_url: normalize_base_url_or_default(&base_url, ANTHROPIC_DEFAULT_BASE_URL),
             api_key,
-            max_tokens: config.max_tokens.max(1),
-        })
+            max_tokens: DEFAULT_ANTHROPIC_MAX_TOKENS,
+            extra_headers,
+        }
     }
 
     fn validate_context(&self, context: &Context) -> Result<(), ProviderError> {
@@ -79,12 +60,24 @@ impl AnthropicProvider {
             });
         }
         self.model_catalog
-            .validate(&self.provider_id, &context.model)?;
+            .validate(&self.catalog_provider_id, &context.model)?;
         Ok(())
     }
 
     fn messages_url(&self) -> String {
         format!("{}{}", self.base_url, ANTHROPIC_MESSAGES_PATH)
+    }
+
+    fn authenticated_request(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut builder = self
+            .client
+            .post(url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        for (key, value) in &self.extra_headers {
+            builder = builder.header(key, value);
+        }
+        builder
     }
 }
 
@@ -92,6 +85,10 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     fn provider_id(&self) -> &ProviderId {
         &self.provider_id
+    }
+
+    fn catalog_provider_id(&self) -> &ProviderId {
+        &self.catalog_provider_id
     }
 
     fn model_catalog(&self) -> &ModelCatalog {
@@ -108,10 +105,7 @@ impl Provider for AnthropicProvider {
 
         let request = AnthropicMessagesRequest::from_context(context, self.max_tokens)?;
         let http_response = self
-            .client
-            .post(self.messages_url())
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
+            .authenticated_request(&self.messages_url())
             .json(&request)
             .send()
             .await
@@ -159,10 +153,7 @@ impl Provider for AnthropicProvider {
         let request =
             AnthropicMessagesRequest::from_context_with_stream(context, self.max_tokens, true)?;
         let mut http_response = self
-            .client
-            .post(self.messages_url())
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
+            .authenticated_request(&self.messages_url())
             .json(&request)
             .send()
             .await

@@ -1,14 +1,26 @@
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use provider::{OpenAIConfig, OpenAIProvider};
-use types::{Context, Message, MessageRole, ModelId, Provider as _, ProviderId, StreamItem};
+use provider::OpenAIProvider;
+use types::{
+    Context, Message, MessageRole, ModelCatalog, ModelId, Provider as _, ProviderId, StreamItem,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prompt = std::env::args().nth(1).unwrap_or_else(|| {
         "Say hello and name one benefit of Rust async in one sentence.".to_owned()
     });
 
-    let provider = OpenAIProvider::new(OpenAIConfig::default())?;
+    let api_key = std::env::var("OPENAI_API_KEY").expect("set OPENAI_API_KEY to run this example");
+    let catalog = ModelCatalog::from_pinned_snapshot().expect("pinned model catalog should parse");
+    let provider = OpenAIProvider::new(
+        ProviderId::from("openai"),
+        ProviderId::from("openai"),
+        api_key,
+        String::new(),
+        BTreeMap::new(),
+        catalog,
+    );
     let context = Context {
         provider: ProviderId::from("openai"),
         model: ModelId::from("gpt-4o-mini"),

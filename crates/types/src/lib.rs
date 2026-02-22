@@ -16,9 +16,8 @@ pub use channel::{
     GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus,
 };
 pub use config::{
-    ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_PROVIDER_ID, AgentConfig, AnthropicProviderConfig,
-    ConfigError, ContextBudgetConfig, MemoryConfig, OPENAI_DEFAULT_BASE_URL, OPENAI_PROVIDER_ID,
-    OpenAIProviderConfig, ProviderConfigs, ProviderSelection, ReliabilityConfig, RetrievalConfig,
+    AgentConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
+    ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig,
     RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SummarizationConfig, validate_config_version,
 };
 pub use error::{ChannelError, MemoryError, ProviderError, RuntimeError, ToolError};
@@ -29,8 +28,10 @@ pub use memory::{
     MemorySummaryState, MemorySummaryWriteRequest, MemorySummaryWriteResult,
 };
 pub use model::{
-    Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps,
-    ProviderId, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
+    CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, InterleavedSpec, Message,
+    MessageRole, Modalities, ModelCatalog, ModelCost, ModelDescriptor, ModelId, ModelLimits,
+    ProviderCaps, ProviderId, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
+    derive_caps,
 };
 pub use provider::{Provider, ProviderStream};
 pub use runner::{

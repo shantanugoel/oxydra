@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -12,55 +12,38 @@ use types::{
 
 use crate::{
     DEFAULT_STREAM_BUFFER_SIZE, OPENAI_CHAT_COMPLETIONS_PATH, OPENAI_DEFAULT_BASE_URL,
-    OPENAI_PROVIDER_ID, extract_http_error_message, normalize_base_url, resolve_api_key,
+    extract_http_error_message, normalize_base_url_or_default,
 };
-
-#[derive(Debug, Clone)]
-pub struct OpenAIConfig {
-    pub api_key: Option<String>,
-    pub base_url: String,
-}
-
-impl Default for OpenAIConfig {
-    fn default() -> Self {
-        Self {
-            api_key: None,
-            base_url: OPENAI_DEFAULT_BASE_URL.to_owned(),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct OpenAIProvider {
     client: Client,
     provider_id: ProviderId,
+    catalog_provider_id: ProviderId,
     model_catalog: ModelCatalog,
     base_url: String,
     api_key: String,
+    extra_headers: BTreeMap<String, String>,
 }
 
 impl OpenAIProvider {
-    pub fn new(config: OpenAIConfig) -> Result<Self, ProviderError> {
-        let model_catalog = ModelCatalog::from_pinned_snapshot()?;
-        Self::with_catalog(config, model_catalog)
-    }
-
-    pub fn with_catalog(
-        config: OpenAIConfig,
+    pub fn new(
+        provider_id: ProviderId,
+        catalog_provider_id: ProviderId,
+        api_key: String,
+        base_url: String,
+        extra_headers: BTreeMap<String, String>,
         model_catalog: ModelCatalog,
-    ) -> Result<Self, ProviderError> {
-        let provider_id = ProviderId::from(OPENAI_PROVIDER_ID);
-        let api_key =
-            resolve_api_key(config.api_key).ok_or_else(|| ProviderError::MissingApiKey {
-                provider: provider_id.clone(),
-            })?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             client: Client::new(),
             provider_id,
+            catalog_provider_id,
             model_catalog,
-            base_url: normalize_base_url(&config.base_url),
+            base_url: normalize_base_url_or_default(&base_url, OPENAI_DEFAULT_BASE_URL),
             api_key,
-        })
+            extra_headers,
+        }
     }
 
     fn validate_context(&self, context: &Context) -> Result<(), ProviderError> {
@@ -74,12 +57,20 @@ impl OpenAIProvider {
             });
         }
         self.model_catalog
-            .validate(&self.provider_id, &context.model)?;
+            .validate(&self.catalog_provider_id, &context.model)?;
         Ok(())
     }
 
     fn chat_completions_url(&self) -> String {
         format!("{}{}", self.base_url, OPENAI_CHAT_COMPLETIONS_PATH)
+    }
+
+    fn authenticated_request(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut builder = self.client.post(url).bearer_auth(&self.api_key);
+        for (key, value) in &self.extra_headers {
+            builder = builder.header(key, value);
+        }
+        builder
     }
 }
 
@@ -87,6 +78,10 @@ impl OpenAIProvider {
 impl Provider for OpenAIProvider {
     fn provider_id(&self) -> &ProviderId {
         &self.provider_id
+    }
+
+    fn catalog_provider_id(&self) -> &ProviderId {
+        &self.catalog_provider_id
     }
 
     fn model_catalog(&self) -> &ModelCatalog {
@@ -103,9 +98,7 @@ impl Provider for OpenAIProvider {
 
         let request = OpenAIChatCompletionRequest::from_context(context)?;
         let http_response = self
-            .client
-            .post(self.chat_completions_url())
-            .bearer_auth(&self.api_key)
+            .authenticated_request(&self.chat_completions_url())
             .json(&request)
             .send()
             .await
@@ -152,9 +145,7 @@ impl Provider for OpenAIProvider {
 
         let request = OpenAIChatCompletionRequest::from_stream_context(context)?;
         let mut http_response = self
-            .client
-            .post(self.chat_completions_url())
-            .bearer_auth(&self.api_key)
+            .authenticated_request(&self.chat_completions_url())
             .json(&request)
             .send()
             .await
@@ -797,6 +788,106 @@ impl SseDataParser {
         if !self.data_lines.is_empty() {
             payloads.push(self.data_lines.join("\n"));
             self.data_lines.clear();
+        }
+    }
+}
+
+/// An SSE event with an optional event type.
+///
+/// The Responses API uses `event:` lines to distinguish between different
+/// event types (e.g. `response.output_text.delta`, `response.completed`).
+/// The standard [`SseDataParser`] discards these lines. [`SseEventParser`]
+/// captures both the `event:` type and `data:` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SseEvent {
+    pub(crate) event_type: Option<String>,
+    pub(crate) data: String,
+}
+
+/// SSE parser that captures both `event:` and `data:` lines.
+///
+/// This extends the behavior of [`SseDataParser`] to also track event types.
+/// Used by the Responses API provider where event types determine how to
+/// interpret the data payload.
+#[derive(Debug, Default)]
+pub(crate) struct SseEventParser {
+    line_buffer: Vec<u8>,
+    event_type: Option<String>,
+    data_lines: Vec<String>,
+}
+
+impl SseEventParser {
+    pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, String> {
+        let mut events = Vec::new();
+        for byte in chunk {
+            if *byte == b'\n' {
+                let line = std::mem::take(&mut self.line_buffer);
+                self.process_line(&line, &mut events)?;
+            } else {
+                self.line_buffer.push(*byte);
+            }
+        }
+        Ok(events)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<Vec<SseEvent>, String> {
+        let mut events = Vec::new();
+        if !self.line_buffer.is_empty() {
+            let line = std::mem::take(&mut self.line_buffer);
+            self.process_line(&line, &mut events)?;
+        }
+        self.flush_event(&mut events);
+        Ok(events)
+    }
+
+    fn process_line(&mut self, line: &[u8], events: &mut Vec<SseEvent>) -> Result<(), String> {
+        let line = if line.ends_with(b"\r") {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+
+        if line.is_empty() {
+            self.flush_event(events);
+            return Ok(());
+        }
+
+        if line.starts_with(b":") {
+            return Ok(());
+        }
+
+        if let Some(mut value) = line.strip_prefix(b"event:") {
+            if value.starts_with(b" ") {
+                value = &value[1..];
+            }
+            let value = std::str::from_utf8(value)
+                .map_err(|error| format!("invalid UTF-8 in SSE event line: {error}"))?;
+            self.event_type = Some(value.to_owned());
+            return Ok(());
+        }
+
+        if let Some(mut data) = line.strip_prefix(b"data:") {
+            if data.starts_with(b" ") {
+                data = &data[1..];
+            }
+            let data = std::str::from_utf8(data)
+                .map_err(|error| format!("invalid UTF-8 in SSE data line: {error}"))?;
+            self.data_lines.push(data.to_owned());
+        }
+
+        Ok(())
+    }
+
+    fn flush_event(&mut self, events: &mut Vec<SseEvent>) {
+        if !self.data_lines.is_empty() {
+            events.push(SseEvent {
+                event_type: self.event_type.take(),
+                data: self.data_lines.join("\n"),
+            });
+            self.data_lines.clear();
+        } else {
+            // Discard event type without data.
+            self.event_type = None;
         }
     }
 }

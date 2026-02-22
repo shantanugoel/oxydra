@@ -1,0 +1,14 @@
+{
+  "overrides": {},
+  "provider_defaults": {
+    "openai": {
+      "supports_streaming": true
+    },
+    "anthropic": {
+      "supports_streaming": true
+    },
+    "google": {
+      "supports_streaming": true
+    }
+  }
+}

@@ -1,13 +1,11 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ModelId, ProviderId};
+use crate::{ModelCatalog, ModelId, ProviderId};
 
 pub const SUPPORTED_CONFIG_MAJOR_VERSION: u64 = 1;
-pub const OPENAI_PROVIDER_ID: &str = "openai";
-pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
-pub const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
-pub const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -42,19 +40,12 @@ impl AgentConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_config_version(&self.config_version)?;
 
-        let provider = self.selection.provider.0.as_str();
-        match provider {
-            OPENAI_PROVIDER_ID | ANTHROPIC_PROVIDER_ID => {}
-            _ => {
-                return Err(ConfigError::UnsupportedProvider {
-                    provider: provider.to_owned(),
-                });
-            }
-        }
+        // Resolve provider via registry — replaces the old hardcoded match.
+        self.providers.resolve(&self.selection.provider.0)?;
 
         if self.selection.model.0.trim().is_empty() {
             return Err(ConfigError::EmptyModelForProvider {
-                provider: provider.to_owned(),
+                provider: self.selection.provider.0.clone(),
             });
         }
 
@@ -76,6 +67,24 @@ impl AgentConfig {
 
         self.memory.validate()?;
 
+        Ok(())
+    }
+
+    /// Validates that the selected model exists in the catalog under the
+    /// resolved registry entry's catalog provider namespace.
+    pub fn validate_model_in_catalog(&self, catalog: &ModelCatalog) -> Result<(), ConfigError> {
+        let entry = self.providers.resolve(&self.selection.provider.0)?;
+        let catalog_provider_id = entry.effective_catalog_provider();
+        let catalog_provider = ProviderId::from(catalog_provider_id.as_str());
+        if catalog
+            .get(&catalog_provider, &self.selection.model)
+            .is_none()
+        {
+            return Err(ConfigError::UnknownModelForCatalogProvider {
+                model: self.selection.model.0.clone(),
+                catalog_provider: catalog_provider_id,
+            });
+        }
         Ok(())
     }
 }
@@ -324,45 +333,91 @@ impl Default for ProviderSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProviderConfigs {
-    #[serde(default)]
-    pub openai: OpenAIProviderConfig,
-    #[serde(default)]
-    pub anthropic: AnthropicProviderConfig,
+// ---------------------------------------------------------------------------
+// Provider registry types
+// ---------------------------------------------------------------------------
+
+/// Discriminant for the underlying provider implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderType {
+    Openai,
+    Anthropic,
+    Gemini,
+    OpenaiResponses,
 }
 
+/// A single entry in the named provider registry.
+///
+/// Each entry maps a user-chosen name (e.g. `"openai"`, `"my-proxy"`) to a
+/// concrete provider type with connection details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenAIProviderConfig {
+pub struct ProviderRegistryEntry {
+    pub provider_type: ProviderType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    #[serde(default = "default_openai_base_url")]
-    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<BTreeMap<String, String>>,
+    /// Which catalog provider namespace to validate models against.
+    /// Defaults by `provider_type`: `Openai` → `"openai"`,
+    /// `Anthropic` → `"anthropic"`, `Gemini` → `"google"`,
+    /// `OpenaiResponses` → `"openai"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_provider: Option<String>,
 }
 
-impl Default for OpenAIProviderConfig {
-    fn default() -> Self {
-        Self {
-            api_key: None,
-            base_url: default_openai_base_url(),
+impl ProviderRegistryEntry {
+    /// Returns the catalog provider ID for model validation.
+    ///
+    /// Uses the explicit `catalog_provider` if set, otherwise defaults
+    /// based on `provider_type`.
+    pub fn effective_catalog_provider(&self) -> String {
+        if let Some(ref cp) = self.catalog_provider {
+            cp.clone()
+        } else {
+            match self.provider_type {
+                ProviderType::Openai => "openai".to_owned(),
+                ProviderType::Anthropic => "anthropic".to_owned(),
+                ProviderType::Gemini => "google".to_owned(),
+                ProviderType::OpenaiResponses => "openai".to_owned(),
+            }
         }
     }
 }
 
+/// Provider configuration expressed as a named registry.
+///
+/// Each key in `registry` is a provider instance name (referenced by
+/// `ProviderSelection.provider`) that maps to a [`ProviderRegistryEntry`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicProviderConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    #[serde(default = "default_anthropic_base_url")]
-    pub base_url: String,
+pub struct ProviderConfigs {
+    #[serde(default = "default_provider_registry")]
+    pub registry: BTreeMap<String, ProviderRegistryEntry>,
 }
 
-impl Default for AnthropicProviderConfig {
+impl Default for ProviderConfigs {
     fn default() -> Self {
         Self {
-            api_key: None,
-            base_url: default_anthropic_base_url(),
+            registry: default_provider_registry(),
         }
+    }
+}
+
+impl ProviderConfigs {
+    /// Resolves a provider name to its registry entry.
+    ///
+    /// Returns `ConfigError::UnsupportedProvider` if the name is not present
+    /// in the registry.
+    pub fn resolve(&self, provider_name: &str) -> Result<&ProviderRegistryEntry, ConfigError> {
+        self.registry
+            .get(provider_name)
+            .ok_or_else(|| ConfigError::UnsupportedProvider {
+                provider: provider_name.to_owned(),
+            })
     }
 }
 
@@ -402,6 +457,11 @@ pub enum ConfigError {
     UnsupportedProvider { provider: String },
     #[error("selected model is empty for provider `{provider}`")]
     EmptyModelForProvider { provider: String },
+    #[error("unknown model `{model}` for catalog provider `{catalog_provider}`")]
+    UnknownModelForCatalogProvider {
+        model: String,
+        catalog_provider: String,
+    },
     #[error("runtime limit `{field}` must be greater than zero; got {value}")]
     InvalidRuntimeLimit { field: &'static str, value: u64 },
     #[error("runtime context budget trigger_ratio must be within [0.0, 1.0]; got {value}")]
@@ -487,19 +547,38 @@ fn default_config_version() -> String {
 }
 
 fn default_provider_id() -> ProviderId {
-    ProviderId::from(OPENAI_PROVIDER_ID)
+    ProviderId::from("openai")
 }
 
 fn default_model_id() -> ModelId {
     ModelId::from("gpt-4o-mini")
 }
 
-fn default_openai_base_url() -> String {
-    OPENAI_DEFAULT_BASE_URL.to_owned()
-}
-
-fn default_anthropic_base_url() -> String {
-    ANTHROPIC_DEFAULT_BASE_URL.to_owned()
+fn default_provider_registry() -> BTreeMap<String, ProviderRegistryEntry> {
+    let mut registry = BTreeMap::new();
+    registry.insert(
+        "openai".to_owned(),
+        ProviderRegistryEntry {
+            provider_type: ProviderType::Openai,
+            base_url: None,
+            api_key: None,
+            api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            extra_headers: None,
+            catalog_provider: None,
+        },
+    );
+    registry.insert(
+        "anthropic".to_owned(),
+        ProviderRegistryEntry {
+            provider_type: ProviderType::Anthropic,
+            base_url: None,
+            api_key: None,
+            api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
+            extra_headers: None,
+            catalog_provider: None,
+        },
+    );
+    registry
 }
 
 fn default_turn_timeout_secs() -> u64 {
@@ -560,4 +639,216 @@ fn default_backoff_max_ms() -> u64 {
 
 fn is_ratio(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CatalogProvider, ModelDescriptor};
+
+    use super::*;
+
+    #[test]
+    fn default_config_has_openai_and_anthropic_registry_entries() {
+        let config = ProviderConfigs::default();
+        let openai = config.resolve("openai").expect("openai entry should exist");
+        assert_eq!(openai.provider_type, ProviderType::Openai);
+        assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+
+        let anthropic = config
+            .resolve("anthropic")
+            .expect("anthropic entry should exist");
+        assert_eq!(anthropic.provider_type, ProviderType::Anthropic);
+        assert_eq!(anthropic.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn custom_provider_resolves_from_registry() {
+        let mut config = ProviderConfigs::default();
+        config.registry.insert(
+            "my-proxy".to_owned(),
+            ProviderRegistryEntry {
+                provider_type: ProviderType::Openai,
+                base_url: Some("https://my-proxy.corp.internal/v1".to_owned()),
+                api_key: None,
+                api_key_env: Some("CORP_OPENAI_KEY".to_owned()),
+                extra_headers: None,
+                catalog_provider: None,
+            },
+        );
+        let entry = config
+            .resolve("my-proxy")
+            .expect("custom entry should resolve");
+        assert_eq!(entry.provider_type, ProviderType::Openai);
+        assert_eq!(
+            entry.base_url.as_deref(),
+            Some("https://my-proxy.corp.internal/v1")
+        );
+        assert_eq!(entry.effective_catalog_provider(), "openai");
+    }
+
+    #[test]
+    fn unknown_provider_rejected() {
+        let config = ProviderConfigs::default();
+        let result = config.resolve("nonexistent");
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnsupportedProvider { provider }) if provider == "nonexistent"
+        ));
+    }
+
+    #[test]
+    fn effective_catalog_provider_defaults_by_type() {
+        let openai_entry = ProviderRegistryEntry {
+            provider_type: ProviderType::Openai,
+            base_url: None,
+            api_key: None,
+            api_key_env: None,
+            extra_headers: None,
+            catalog_provider: None,
+        };
+        assert_eq!(openai_entry.effective_catalog_provider(), "openai");
+
+        let anthropic_entry = ProviderRegistryEntry {
+            provider_type: ProviderType::Anthropic,
+            catalog_provider: None,
+            ..openai_entry.clone()
+        };
+        assert_eq!(anthropic_entry.effective_catalog_provider(), "anthropic");
+
+        let gemini_entry = ProviderRegistryEntry {
+            provider_type: ProviderType::Gemini,
+            catalog_provider: None,
+            ..openai_entry.clone()
+        };
+        assert_eq!(gemini_entry.effective_catalog_provider(), "google");
+
+        let responses_entry = ProviderRegistryEntry {
+            provider_type: ProviderType::OpenaiResponses,
+            catalog_provider: None,
+            ..openai_entry.clone()
+        };
+        assert_eq!(responses_entry.effective_catalog_provider(), "openai");
+
+        // Explicit override takes precedence.
+        let custom_entry = ProviderRegistryEntry {
+            provider_type: ProviderType::Openai,
+            catalog_provider: Some("custom-ns".to_owned()),
+            ..openai_entry
+        };
+        assert_eq!(custom_entry.effective_catalog_provider(), "custom-ns");
+    }
+
+    #[test]
+    fn model_validated_against_catalog_provider() {
+        let catalog = test_catalog_with("openai", "gpt-4o-mini");
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai");
+        config.selection.model = ModelId::from("gpt-4o-mini");
+
+        config
+            .validate_model_in_catalog(&catalog)
+            .expect("known model should pass catalog validation");
+
+        config.selection.model = ModelId::from("nonexistent-model");
+        let result = config.validate_model_in_catalog(&catalog);
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnknownModelForCatalogProvider {
+                model,
+                catalog_provider,
+            }) if model == "nonexistent-model" && catalog_provider == "openai"
+        ));
+    }
+
+    #[test]
+    fn default_agent_config_validates_successfully() {
+        AgentConfig::default()
+            .validate()
+            .expect("default config should validate");
+    }
+
+    #[test]
+    fn validation_rejects_unknown_provider() {
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("nonexistent");
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::UnsupportedProvider { provider }) if provider == "nonexistent"
+        ));
+    }
+
+    #[test]
+    fn provider_type_serde_round_trips() {
+        let types = [
+            (ProviderType::Openai, "\"openai\""),
+            (ProviderType::Anthropic, "\"anthropic\""),
+            (ProviderType::Gemini, "\"gemini\""),
+            (ProviderType::OpenaiResponses, "\"openai_responses\""),
+        ];
+        for (variant, expected_json) in types {
+            let serialized = serde_json::to_string(&variant).expect("should serialize");
+            assert_eq!(serialized, expected_json);
+            let deserialized: ProviderType =
+                serde_json::from_str(&serialized).expect("should deserialize");
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn registry_entry_serialization_round_trip() {
+        let entry = ProviderRegistryEntry {
+            provider_type: ProviderType::Openai,
+            base_url: Some("https://custom.example.com".to_owned()),
+            api_key: None,
+            api_key_env: Some("MY_KEY".to_owned()),
+            extra_headers: Some(BTreeMap::from([(
+                "X-Custom".to_owned(),
+                "value".to_owned(),
+            )])),
+            catalog_provider: Some("openai".to_owned()),
+        };
+        let json = serde_json::to_string(&entry).expect("should serialize");
+        let deserialized: ProviderRegistryEntry =
+            serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(entry, deserialized);
+    }
+
+    fn test_catalog_with(provider: &str, model: &str) -> ModelCatalog {
+        let mut models = BTreeMap::new();
+        models.insert(
+            model.to_owned(),
+            ModelDescriptor {
+                id: model.to_owned(),
+                name: model.to_owned(),
+                family: None,
+                attachment: false,
+                reasoning: false,
+                tool_call: false,
+                interleaved: None,
+                structured_output: false,
+                temperature: false,
+                knowledge: None,
+                release_date: None,
+                last_updated: None,
+                modalities: Default::default(),
+                open_weights: false,
+                cost: Default::default(),
+                limit: Default::default(),
+            },
+        );
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            provider.to_owned(),
+            CatalogProvider {
+                id: provider.to_owned(),
+                name: provider.to_owned(),
+                env: vec![],
+                api: None,
+                doc: None,
+                models,
+            },
+        );
+        ModelCatalog::new(providers)
+    }
 }

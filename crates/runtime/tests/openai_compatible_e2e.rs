@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{Read, Write},
     net::TcpListener,
@@ -6,13 +7,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use provider::{OpenAIConfig, OpenAIProvider};
+use provider::OpenAIProvider;
 use runtime::{AgentRuntime, RuntimeLimits};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tools::{ReadTool, ToolRegistry};
 use types::{
-    Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId, ProviderCaps, ProviderId,
+    CatalogProvider, Context, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
+    ProviderId,
 };
 
 #[tokio::test]
@@ -21,53 +23,73 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
     fs::write(&temp_path, "tokio = \"1\"\nserde = \"1\"\n").expect("test file should be writable");
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
-    let first_response = json!({
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": null,
-                "tool_calls": [{
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "file_read",
-                        "arguments": format!(r#"{{"path":"{}"}}"#, temp_path_str)
-                    }
-                }]
-            },
-            "finish_reason": "tool_calls"
-        }]
-    })
-    .to_string();
-    let second_response = json!({
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "Summary complete",
-                "tool_calls": []
-            },
-            "finish_reason": "stop"
-        }]
-    })
-    .to_string();
+    let first_response = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "file_read",
+                            "arguments": format!(r#"{{"path":"{}"}}"#, temp_path_str)
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    );
+    let second_response = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "Summary complete"
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }),
+    );
 
     let captured_requests = Arc::new(Mutex::new(Vec::<String>::new()));
     let base_url = spawn_scripted_server(
         vec![
-            ("200 OK", first_response, "application/json"),
-            ("200 OK", second_response, "application/json"),
+            ("200 OK", first_response, "text/event-stream"),
+            ("200 OK", second_response, "text/event-stream"),
         ],
         Arc::clone(&captured_requests),
     );
 
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url,
-        },
-        test_catalog(ModelId::from("gpt-4o-mini"), false),
-    )
-    .expect("provider should initialize");
+    let provider = OpenAIProvider::new(
+        ProviderId::from("openai"),
+        ProviderId::from("openai"),
+        "test-key".to_owned(),
+        base_url,
+        BTreeMap::new(),
+        test_catalog(ModelId::from("gpt-4o-mini")),
+    );
 
     let mut tools = ToolRegistry::default();
     tools.register("file_read", ReadTool::default());
@@ -162,14 +184,14 @@ async fn live_openrouter_tool_call_smoke() {
     let temp_path = temp_file_path("runtime-live");
     fs::write(&temp_path, "RUNTIME_LIVE_SMOKE_MARKER\n").expect("test file should be writable");
 
-    let provider = OpenAIProvider::with_catalog(
-        OpenAIConfig {
-            api_key: Some(api_key),
-            base_url: "https://openrouter.ai/api".to_owned(),
-        },
+    let provider = OpenAIProvider::new(
+        ProviderId::from("openai"),
+        ProviderId::from("openai"),
+        api_key,
+        "https://openrouter.ai/api".to_owned(),
+        BTreeMap::new(),
         catalog,
-    )
-    .expect("provider should initialize");
+    );
 
     let mut tools = ToolRegistry::default();
     tools.register("file_read", ReadTool::default());
@@ -251,22 +273,44 @@ async fn live_openrouter_tool_call_smoke() {
     let _ = fs::remove_file(&temp_path);
 }
 
-fn test_catalog(model: ModelId, supports_streaming: bool) -> ModelCatalog {
-    ModelCatalog::new(vec![ModelDescriptor {
-        provider: ProviderId::from("openai"),
-        model,
-        display_name: Some("E2E model".to_owned()),
-        caps: ProviderCaps {
-            supports_streaming,
-            supports_tools: true,
-            supports_json_mode: false,
-            supports_reasoning_traces: false,
-            max_input_tokens: None,
-            max_output_tokens: None,
-            max_context_tokens: None,
+fn test_catalog(model: ModelId) -> ModelCatalog {
+    let mut models = BTreeMap::new();
+    models.insert(
+        model.0.clone(),
+        ModelDescriptor {
+            id: model.0.clone(),
+            name: "E2E model".to_owned(),
+            family: None,
+            attachment: false,
+            reasoning: false,
+            tool_call: true,
+            interleaved: None,
+            structured_output: false,
+            temperature: false,
+            knowledge: None,
+            release_date: None,
+            last_updated: None,
+            modalities: Default::default(),
+            open_weights: false,
+            cost: Default::default(),
+            limit: Default::default(),
         },
-        deprecated: false,
-    }])
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "openai".to_owned(),
+        CatalogProvider {
+            id: "openai".to_owned(),
+            name: "OpenAI".to_owned(),
+            env: vec![],
+            api: None,
+            doc: None,
+            models,
+        },
+    );
+
+    ModelCatalog::new(providers)
 }
 
 fn temp_file_path(label: &str) -> std::path::PathBuf {

@@ -10,7 +10,7 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 |---|---------|-------------|
 | 1 | [Architecture Overview](01-architecture-overview.md) | Core philosophy, workspace layout, dependency hierarchy, key design decisions |
 | 2 | [Configuration System](02-configuration-system.md) | Layered config with figment, credential resolution, runner config, validation |
-| 3 | [Provider Layer](03-provider-layer.md) | Provider trait, OpenAI/Anthropic implementations, SSE streaming, model catalog, reliability wrapper |
+| 3 | [Provider Layer](03-provider-layer.md) | Provider trait, OpenAI/Anthropic/Gemini/Responses implementations, SSE streaming, model catalog, capability overrides, reliability wrapper |
 | 4 | [Tool System](04-tool-system.md) | Tool trait, `#[tool]` procedural macro, core tools, validation, safety tiers |
 | 5 | [Agent Runtime](05-agent-runtime.md) | Turn loop, state machine, tool dispatch, self-correction, budget enforcement |
 | 6 | [Memory and Retrieval](06-memory-and-retrieval.md) | libSQL persistence, schema, hybrid retrieval (vector + FTS5), embeddings, summarization |

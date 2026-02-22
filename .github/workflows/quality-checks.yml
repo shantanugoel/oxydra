@@ -54,5 +54,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run phase 5 tests
         run: cargo test -p types -p provider -p tools -p tools-macros -p runtime -- --skip live_openai_smoke_normalizes_response
+      - name: Run runner tests
+        run: cargo test -p runner
       - name: Run provider snapshot test
         run: cargo test -p provider snapshot

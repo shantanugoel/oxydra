@@ -117,6 +117,10 @@ impl Provider for ReliableProvider {
         self.inner.provider_id()
     }
 
+    fn catalog_provider_id(&self) -> &ProviderId {
+        self.inner.catalog_provider_id()
+    }
+
     fn model_catalog(&self) -> &ModelCatalog {
         self.inner.model_catalog()
     }

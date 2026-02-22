@@ -56,7 +56,7 @@ The workspace enforces a strict three-layer dependency graph. Lower layers never
 | Layer | Crate | Responsibility |
 |-------|-------|---------------|
 | Foundation | `types` | Universal structs (`Message`, `ToolCall`, `Context`, `Response`), all trait definitions (`Provider`, `Tool`, `Memory`, `Channel`), error hierarchy, config schemas, runner protocol types |
-| Core | `provider` | Provider implementations (OpenAI, Anthropic), SSE parsing, reliability wrapper, credential resolution |
+| Core | `provider` | Provider implementations (OpenAI, Anthropic, Gemini, OpenAI Responses), SSE parsing, reliability wrapper, credential resolution |
 | Core | `tools` | Core tool implementations (file ops, shell, web, vault), tool registry with policy enforcement |
 | Core | `tools-macros` | `#[tool]` attribute macro for automatic schema generation from Rust function signatures |
 | Core | `runtime` | Agent turn loop, state machine, tool dispatch, self-correction, token budgeting, credential scrubbing |

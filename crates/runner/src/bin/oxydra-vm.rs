@@ -9,11 +9,11 @@ use std::{
 
 use clap::Parser;
 use gateway::{GatewayServer, RuntimeGatewayTurnRunner};
+use runner::{BootstrapError, CliOverrides, bootstrap_vm_runtime};
 use runtime::AgentRuntime;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
-use tui::{CliError as BootstrapError, CliOverrides, bootstrap_vm_runtime};
 use types::init_tracing;
 
 const DEFAULT_GATEWAY_BIND_ADDRESS: &str = "127.0.0.1:0";

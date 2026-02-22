@@ -38,7 +38,7 @@ pub struct ConfigSearchPaths {
 }
 
 impl ConfigSearchPaths {
-    pub fn discover() -> Result<Self, CliError> {
+    pub fn discover() -> Result<Self, BootstrapError> {
         let workspace_dir = env::current_dir()?.join(WORKSPACE_CONFIG_DIR);
         let user_dir = env::var_os("HOME")
             .map(PathBuf::from)
@@ -181,7 +181,7 @@ pub struct CatalogOverrides {
 }
 
 #[derive(Debug, Error)]
-pub enum CliError {
+pub enum BootstrapError {
     #[error("failed to resolve configuration path: {0}")]
     Io(#[from] io::Error),
     #[error("failed to load configuration: {0}")]
@@ -198,7 +198,7 @@ pub enum CliError {
     UnsupportedProvider { provider: String },
 }
 
-impl From<figment::Error> for CliError {
+impl From<figment::Error> for BootstrapError {
     fn from(value: figment::Error) -> Self {
         Self::ConfigExtract(Box::new(value))
     }
@@ -207,7 +207,7 @@ impl From<figment::Error> for CliError {
 pub fn load_agent_config(
     profile: Option<&str>,
     cli_overrides: CliOverrides,
-) -> Result<AgentConfig, CliError> {
+) -> Result<AgentConfig, BootstrapError> {
     let paths = ConfigSearchPaths::discover()?;
     load_agent_config_with_paths(&paths, profile, cli_overrides)
 }
@@ -216,7 +216,7 @@ pub fn load_agent_config_with_paths(
     paths: &ConfigSearchPaths,
     profile: Option<&str>,
     cli_overrides: CliOverrides,
-) -> Result<AgentConfig, CliError> {
+) -> Result<AgentConfig, BootstrapError> {
     let selected_profile = profile
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -242,7 +242,7 @@ pub fn load_agent_config_with_paths(
 ///    then workspace `.oxydra/model_catalog.json`)
 /// 2. Auto-fetch from `https://models.dev/api.json` (writes to user cache on success)
 /// 3. Compiled-in pinned snapshot as final fallback
-pub fn resolve_model_catalog(provider_id: &ProviderId) -> Result<ModelCatalog, CliError> {
+pub fn resolve_model_catalog(provider_id: &ProviderId) -> Result<ModelCatalog, BootstrapError> {
     // Try cached catalogs first
     if let Some(catalog) = ModelCatalog::load_from_cache() {
         tracing::debug!("loaded model catalog from cache");
@@ -251,12 +251,11 @@ pub fn resolve_model_catalog(provider_id: &ProviderId) -> Result<ModelCatalog, C
 
     // Auto-fetch from models.dev
     const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-    let fetch_result = std::thread::spawn(|| {
-        reqwest::blocking::get(MODELS_DEV_URL).and_then(|r| r.text())
-    })
-    .join()
-    .map_err(|_| "fetch thread panicked".to_owned())
-    .and_then(|r| r.map_err(|e| e.to_string()));
+    let fetch_result =
+        std::thread::spawn(|| reqwest::blocking::get(MODELS_DEV_URL).and_then(|r| r.text()))
+            .join()
+            .map_err(|_| "fetch thread panicked".to_owned())
+            .and_then(|r| r.map_err(|e| e.to_string()));
     match fetch_result {
         Ok(body) => match ModelCatalog::from_snapshot_str(&body) {
             Ok(catalog) => {
@@ -310,7 +309,7 @@ pub fn resolve_model_catalog(provider_id: &ProviderId) -> Result<ModelCatalog, C
     })
 }
 
-pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, CliError> {
+pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, BootstrapError> {
     config.validate()?;
 
     let provider_id = config.selection.provider.clone();
@@ -391,13 +390,13 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
     ))
 }
 
-pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, CliError> {
+pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, BootstrapError> {
     Ok(Box::new(build_reliable_provider(config)?))
 }
 
 pub async fn build_memory_backend(
     config: &AgentConfig,
-) -> Result<Option<Arc<dyn Memory>>, CliError> {
+) -> Result<Option<Arc<dyn Memory>>, BootstrapError> {
     config.validate()?;
     let backend = LibsqlMemory::from_config(&config.memory).await?;
     Ok(backend.map(|memory| Arc::new(memory) as Arc<dyn Memory>))
@@ -429,7 +428,7 @@ pub async fn bootstrap_vm_runtime(
     bootstrap_frame: Option<&[u8]>,
     profile: Option<&str>,
     cli_overrides: CliOverrides,
-) -> Result<VmBootstrapRuntime, CliError> {
+) -> Result<VmBootstrapRuntime, BootstrapError> {
     let paths = ConfigSearchPaths::discover()?;
     bootstrap_vm_runtime_with_paths(&paths, bootstrap_frame, profile, cli_overrides).await
 }
@@ -439,7 +438,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
     bootstrap_frame: Option<&[u8]>,
     profile: Option<&str>,
     cli_overrides: CliOverrides,
-) -> Result<VmBootstrapRuntime, CliError> {
+) -> Result<VmBootstrapRuntime, BootstrapError> {
     let bootstrap = bootstrap_frame
         .map(RunnerBootstrapEnvelope::from_length_prefixed_json)
         .transpose()?;
@@ -722,7 +721,7 @@ model = "gpt-4o-mini"
             .expect_err("unsupported version should fail");
         assert!(matches!(
             error,
-            CliError::ConfigValidation(ConfigError::UnsupportedConfigVersion { .. })
+            BootstrapError::ConfigValidation(ConfigError::UnsupportedConfigVersion { .. })
         ));
 
         let _ = fs::remove_dir_all(root);
@@ -753,7 +752,7 @@ remote_url = "libsql://example-org.turso.io"
             .expect_err("remote memory mode without auth token should fail validation");
         assert!(matches!(
             error,
-            CliError::ConfigValidation(ConfigError::MissingMemoryAuthToken { .. })
+            BootstrapError::ConfigValidation(ConfigError::MissingMemoryAuthToken { .. })
         ));
 
         let _ = fs::remove_dir_all(root);
@@ -991,7 +990,7 @@ remote_url = "libsql://example-org.turso.io"
             .expect("clock should be monotonic")
             .as_nanos();
         path.push(format!(
-            "oxydra-tui-{label}-{}-{unique}",
+            "oxydra-bootstrap-{label}-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("temp dir should be creatable");
@@ -1087,7 +1086,9 @@ api_key = "test-openai-key"
         assert!(
             matches!(
                 error,
-                CliError::ConfigValidation(ConfigError::UnknownModelForCatalogProvider { .. })
+                BootstrapError::ConfigValidation(
+                    ConfigError::UnknownModelForCatalogProvider { .. }
+                )
             ),
             "expected UnknownModelForCatalogProvider but got: {error:?}"
         );

@@ -42,7 +42,14 @@ use types::{
 };
 
 mod backend;
+pub mod bootstrap;
 pub mod catalog;
+
+pub use bootstrap::{
+    BootstrapError, CliOverrides, VmBootstrapRuntime, bootstrap_vm_runtime,
+    bootstrap_vm_runtime_with_paths, build_memory_backend, build_provider, build_reliable_provider,
+    load_agent_config, load_agent_config_with_paths, resolve_model_catalog, runtime_limits,
+};
 
 #[cfg(test)]
 mod tests;

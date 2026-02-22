@@ -51,7 +51,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use types::{Channel, GatewayClientFrame, GatewayHealthCheck, GatewayServerFrame};
 
-use crate::bootstrap::CliError;
+use crate::TuiError;
 use crate::channel_adapter::{TuiChannelAdapter, TuiCtrlCOutcome, encode_gateway_client_frame};
 use crate::event_loop::{AppAction, EventReader};
 use crate::ui_model::{ConnectionState, TuiViewModel};
@@ -100,7 +100,7 @@ struct TerminalGuard;
 impl TerminalGuard {
     /// Set up raw mode, alternate screen, hidden cursor, and mouse capture.
     /// Returns the guard whose `Drop` undoes everything.
-    fn setup() -> Result<Self, CliError> {
+    fn setup() -> Result<Self, TuiError> {
         enable_raw_mode().map_err(io::Error::other)?;
         let mut stdout = io::stdout();
         execute!(
@@ -151,10 +151,10 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, WsMessage>;
 
 /// Connect to the gateway endpoint and return the raw WebSocket stream.
-async fn ws_connect(endpoint: &str) -> Result<WsStream, CliError> {
+async fn ws_connect(endpoint: &str) -> Result<WsStream, TuiError> {
     let (socket, _) = connect_async(endpoint)
         .await
-        .map_err(|e| CliError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e)))?;
+        .map_err(|e| TuiError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e)))?;
     Ok(socket)
 }
 
@@ -310,7 +310,7 @@ impl TuiApp {
     /// This takes ownership of the terminal (raw mode, alternate screen) via
     /// [`TerminalGuard`], connects to the gateway, and enters the main
     /// `tokio::select!` loop. Returns when the user quits.
-    pub async fn run(&mut self) -> Result<(), CliError> {
+    pub async fn run(&mut self) -> Result<(), TuiError> {
         // 1. Terminal setup.
         let _guard = TerminalGuard::setup()?;
         let backend = CrosstermBackend::new(io::stdout());
@@ -328,7 +328,7 @@ impl TuiApp {
             .adapter
             .listen(ADAPTER_LISTEN_BUFFER)
             .await
-            .map_err(|e| CliError::Io(io::Error::other(e)))?;
+            .map_err(|e| TuiError::Io(io::Error::other(e)))?;
 
         // 5. Tick timer.
         let mut tick = time::interval(TICK_INTERVAL);
@@ -391,7 +391,7 @@ impl TuiApp {
                                 .listen(ADAPTER_LISTEN_BUFFER)
                                 .await
                                 .map_err(|e| {
-                                    CliError::Io(io::Error::other(e))
+                                    TuiError::Io(io::Error::other(e))
                                 })?;
 
                             needs_draw = true;
@@ -489,7 +489,7 @@ impl TuiApp {
             JoinHandle<()>,
             JoinHandle<()>,
         ),
-        CliError,
+        TuiError,
     > {
         let socket = ws_connect(&self.gateway_endpoint).await?;
         let (write_half, read_half) = socket.split();
@@ -505,14 +505,14 @@ impl TuiApp {
         ws_tx
             .send(hello)
             .await
-            .map_err(|_| CliError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "ws_tx closed")))?;
+            .map_err(|_| TuiError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "ws_tx closed")))?;
 
         // Wait for HelloAck.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(CliError::Io(io::Error::new(
+                return Err(TuiError::Io(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "timeout waiting for HelloAck from gateway",
                 )));
@@ -532,13 +532,13 @@ impl TuiApp {
                     self.view_model.apply_server_frame(&other);
                 }
                 Ok(None) => {
-                    return Err(CliError::Io(io::Error::new(
+                    return Err(TuiError::Io(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
                         "gateway connection closed before HelloAck",
                     )));
                 }
                 Err(_) => {
-                    return Err(CliError::Io(io::Error::new(
+                    return Err(TuiError::Io(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "timeout waiting for HelloAck from gateway",
                     )));
@@ -564,7 +564,7 @@ impl TuiApp {
             JoinHandle<()>,
             JoinHandle<()>,
         ),
-        CliError,
+        TuiError,
     > {
         let mut attempt: u32 = 0;
 
@@ -611,7 +611,7 @@ impl TuiApp {
             JoinHandle<()>,
             JoinHandle<()>,
         ),
-        CliError,
+        TuiError,
     > {
         let socket = ws_connect(&self.gateway_endpoint).await?;
         let (write_half, read_half) = socket.split();
@@ -627,7 +627,7 @@ impl TuiApp {
         if ws_tx.send(hello).await.is_err() {
             reader_handle.abort();
             writer_handle.abort();
-            return Err(CliError::Io(io::Error::new(
+            return Err(TuiError::Io(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "ws_tx closed during reconnect",
             )));
@@ -640,7 +640,7 @@ impl TuiApp {
             if remaining.is_zero() {
                 reader_handle.abort();
                 writer_handle.abort();
-                return Err(CliError::Io(io::Error::new(
+                return Err(TuiError::Io(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "timeout waiting for HelloAck on reconnect",
                 )));
@@ -660,7 +660,7 @@ impl TuiApp {
                 Ok(None) | Err(_) => {
                     reader_handle.abort();
                     writer_handle.abort();
-                    return Err(CliError::Io(io::Error::new(
+                    return Err(TuiError::Io(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
                         "connection lost before HelloAck on reconnect",
                     )));
@@ -677,7 +677,7 @@ impl TuiApp {
         &mut self,
         action: AppAction,
         ws_tx: &mut mpsc::Sender<GatewayClientFrame>,
-    ) -> Result<bool, CliError> {
+    ) -> Result<bool, TuiError> {
         match action {
             AppAction::Submit => {
                 let input = self.view_model.input_buffer.trim().to_owned();

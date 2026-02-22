@@ -72,7 +72,7 @@ pub struct RunnerBootstrapEnvelope {
 
 ### Consumption
 
-The `oxydra-vm` binary reads the envelope from stdin (when `--bootstrap-stdin` is set) and passes it to `tui::bootstrap_vm_runtime`:
+The `oxydra-vm` binary reads the envelope from stdin (when `--bootstrap-stdin` is set) and passes it to `runner::bootstrap_vm_runtime`:
 
 1. Loads `AgentConfig` from config files
 2. Initializes the LLM provider based on `selection.provider`

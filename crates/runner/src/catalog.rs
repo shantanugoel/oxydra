@@ -55,10 +55,7 @@ pub fn filter_catalog(raw_json: &str, providers: &[&str]) -> Result<ModelCatalog
 /// Operates on `serde_json::Value` so no fields are normalized or lost
 /// during round-tripping through Rust structs. The output is a valid
 /// subset of models.dev JSON that parses identically to the upstream.
-pub fn filter_catalog_raw(
-    raw_json: &str,
-    providers: &[&str],
-) -> Result<String, CatalogError> {
+pub fn filter_catalog_raw(raw_json: &str, providers: &[&str]) -> Result<String, CatalogError> {
     let mut full: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw_json)?;
     full.retain(|id, _| providers.contains(&id.as_str()));
     let json = serde_json::to_string_pretty(&full)?;
@@ -123,10 +120,7 @@ pub fn write_overrides(overrides: &CapsOverrides, path: &Path) -> Result<(), Cat
 /// With `--pinned`: fetch from the pinned snapshot URL, write to user cache.
 pub fn run_fetch(pinned: bool, pinned_url: Option<&str>) -> Result<(), CatalogError> {
     let (url, label) = if pinned {
-        (
-            pinned_url.unwrap_or(DEFAULT_PINNED_URL),
-            "pinned snapshot",
-        )
+        (pinned_url.unwrap_or(DEFAULT_PINNED_URL), "pinned snapshot")
     } else {
         (MODELS_DEV_API_URL, "models.dev")
     };
@@ -169,9 +163,7 @@ pub fn run_verify() -> Result<bool, CatalogError> {
         let source = ModelCatalog::user_cache_path()
             .filter(|p| p.is_file())
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| {
-                ModelCatalog::workspace_cache_path().display().to_string()
-            });
+            .unwrap_or_else(|| ModelCatalog::workspace_cache_path().display().to_string());
         (source, catalog)
     } else {
         match ModelCatalog::from_pinned_snapshot() {

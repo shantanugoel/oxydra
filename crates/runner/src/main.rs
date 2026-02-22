@@ -194,8 +194,7 @@ fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {
                 Ok(())
             } else {
                 Err(CliError::Arguments(
-                    "catalog verification failed: schema is invalid or catalog is empty"
-                        .to_owned(),
+                    "catalog verification failed: schema is invalid or catalog is empty".to_owned(),
                 ))
             }
         }
@@ -436,5 +435,4 @@ mod tests {
         let args = CliArgs::try_parse_from(["runner"]).expect("no subcommand should parse");
         assert_eq!(args.command, None);
     }
-
 }

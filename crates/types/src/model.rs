@@ -540,20 +540,19 @@ impl ModelCatalog {
     /// cache paths. Returns `None` if no cache file exists.
     pub fn load_from_cache() -> Option<Self> {
         // Try user cache first
-        if let Some(user_path) = Self::user_cache_path() {
-            if user_path.is_file() {
-                if let Ok(catalog) = Self::from_file(&user_path) {
-                    return Some(catalog);
-                }
-            }
+        if let Some(user_path) = Self::user_cache_path()
+            && user_path.is_file()
+            && let Ok(catalog) = Self::from_file(&user_path)
+        {
+            return Some(catalog);
         }
 
         // Try workspace cache
         let workspace_path = Self::workspace_cache_path();
-        if workspace_path.is_file() {
-            if let Ok(catalog) = Self::from_file(&workspace_path) {
-                return Some(catalog);
-            }
+        if workspace_path.is_file()
+            && let Ok(catalog) = Self::from_file(&workspace_path)
+        {
+            return Some(catalog);
         }
 
         None

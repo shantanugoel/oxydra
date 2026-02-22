@@ -468,7 +468,7 @@ impl Default for ReliabilityConfig {
 }
 
 /// Catalog resolution and validation configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogConfig {
     /// When `true`, unknown models (not found in the catalog) are allowed
     /// through with synthetic default capabilities instead of being rejected.
@@ -477,15 +477,6 @@ pub struct CatalogConfig {
     /// Optional URL for fetching the pinned catalog snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_url: Option<String>,
-}
-
-impl Default for CatalogConfig {
-    fn default() -> Self {
-        Self {
-            skip_catalog_validation: false,
-            pinned_url: None,
-        }
-    }
 }
 
 /// Capability overrides specified on a per-registry-entry basis.

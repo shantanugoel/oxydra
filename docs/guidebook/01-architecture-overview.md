@@ -27,7 +27,7 @@ crates/
   shell-daemon/   # Application — guest shell/browser RPC
   channels/       # Application — channel adapters
   gateway/        # Application — routing daemon
-  tui/            # Application — terminal channel + VM bootstrap
+  tui/            # Application — terminal channel UI
 ```
 
 ## Dependency Hierarchy
@@ -43,7 +43,10 @@ The workspace enforces a strict three-layer dependency graph. Lower layers never
 │                      Core Layer                      │
 │  provider, tools, tools-macros, runtime, memory,     │
 │  sandbox                                             │
-│  (depends strictly on Foundation)                    │
+│  (depends strictly on Foundation; intentional         │
+│   sub-layering: runtime → tools → sandbox)           │
+│  (dev-dependencies may cross layer boundaries        │
+│   for integration testing, e.g. shell-daemon)        │
 ├─────────────────────────────────────────────────────┤
 │                   Foundation Layer                   │
 │  types                                               │
@@ -62,11 +65,11 @@ The workspace enforces a strict three-layer dependency graph. Lower layers never
 | Core | `runtime` | Agent turn loop, state machine, tool dispatch, self-correction, token budgeting, credential scrubbing |
 | Core | `memory` | libSQL persistence, SQL migrations, hybrid retrieval (vector + FTS5), embedding pipeline, rolling summarization |
 | Core | `sandbox` | WASM tool isolation, security policy enforcement, shell/browser session management, SSRF protection |
-| Application | `runner` | Host entry point, per-user VM/container provisioning, bootstrap envelope, workspace directory creation |
+| Application | `runner` | Host entry point, per-user VM/container provisioning, bootstrap envelope, workspace directory creation, VM bootstrap logic (config loading via `figment`, provider/memory/tools initialization) |
 | Application | `shell-daemon` | Guest-side RPC server for shell command execution and browser session management |
 | Application | `channels` | Channel registry, concrete channel adapter implementations (feature-flagged) |
 | Application | `gateway` | Axum WebSocket server, session management, turn routing to `AgentRuntime` |
-| Application | `tui` | `TuiChannelAdapter` (Channel impl), gateway WebSocket client, VM bootstrap logic, config loading via `figment` |
+| Application | `tui` | `TuiChannelAdapter` (Channel impl), gateway WebSocket client, terminal UI rendering |
 
 ## Key Design Decisions
 

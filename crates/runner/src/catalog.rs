@@ -1,15 +1,15 @@
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{collections::BTreeMap, fs, io, path::Path};
 
 use thiserror::Error;
 use types::{CapsOverrideEntry, CapsOverrides, CatalogProvider, ModelCatalog};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
-/// Default pinned snapshot URL.
+/// Default pinned snapshot URL — our own hosted copy in models.dev format,
+/// used as a stable fallback in case the upstream schema changes.
+/// Can be overridden via `catalog.pinned_url` in agent config.
 pub const DEFAULT_PINNED_URL: &str = "https://raw.githubusercontent.com/shantanugoel/oxydra/refs/heads/main/crates/types/data/pinned_model_catalog.json";
 
 /// Default set of providers to include when filtering the models.dev catalog.
@@ -48,6 +48,21 @@ pub fn filter_catalog(raw_json: &str, providers: &[&str]) -> Result<ModelCatalog
         .filter(|(id, _)| providers.contains(&id.as_str()))
         .collect();
     Ok(ModelCatalog::new(filtered))
+}
+
+/// Filter raw models.dev JSON keeping the exact upstream format.
+///
+/// Operates on `serde_json::Value` so no fields are normalized or lost
+/// during round-tripping through Rust structs. The output is a valid
+/// subset of models.dev JSON that parses identically to the upstream.
+pub fn filter_catalog_raw(
+    raw_json: &str,
+    providers: &[&str],
+) -> Result<String, CatalogError> {
+    let mut full: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw_json)?;
+    full.retain(|id, _| providers.contains(&id.as_str()));
+    let json = serde_json::to_string_pretty(&full)?;
+    Ok(format!("{json}\n"))
 }
 
 /// Produce a deterministic, pretty-printed JSON string for a catalog.
@@ -104,87 +119,42 @@ pub fn write_overrides(overrides: &CapsOverrides, path: &Path) -> Result<(), Cat
 
 /// Run the catalog fetch pipeline.
 ///
-/// Default (no flags): fetch unfiltered from models.dev, write to user cache.
+/// Default: fetch from `https://models.dev/api.json`, write to user cache.
 /// With `--pinned`: fetch from the pinned snapshot URL, write to user cache.
-/// With `--providers`: fetch from models.dev, filter + merge overrides, write
-/// to the in-repo pinned snapshot (dev workflow for updating committed snapshot).
-pub fn run_fetch(
-    providers: &[&str],
-    pinned: bool,
-    pinned_url: Option<&str>,
-) -> Result<(), CatalogError> {
-    if pinned {
-        // Fetch from pinned URL and write to user cache
-        let url = pinned_url.unwrap_or(DEFAULT_PINNED_URL);
-        eprintln!("Fetching pinned catalog from {url}...");
-        let body = reqwest::blocking::get(url)?.text()?;
-
-        let cache_path = ModelCatalog::user_cache_path()
-            .ok_or_else(|| CatalogError::Io(io::Error::new(
-                io::ErrorKind::NotFound,
-                "could not determine user cache path (HOME not set)",
-            )))?;
-        if let Some(parent) = cache_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Validate it parses
-        let catalog = ModelCatalog::from_snapshot_str(&body)
-            .map_err(|e| CatalogError::Fetch(format!("pinned catalog parse error: {e}")))?;
-
-        fs::write(&cache_path, &body)?;
-        eprintln!("Wrote pinned catalog to cache: {}", cache_path.display());
-        show_catalog_summary(&catalog);
-        return Ok(());
-    }
-
-    // Check if --providers was specified (non-default list or explicit flag)
-    let has_providers_filter = !providers.is_empty();
-
-    if has_providers_filter {
-        // Dev workflow: fetch, filter, merge overrides, write to in-repo snapshot
-        let catalog_path = PathBuf::from(ModelCatalog::pinned_snapshot_path());
-        let overrides_path = PathBuf::from(ModelCatalog::pinned_overrides_path());
-
-        eprintln!("Fetching models.dev catalog...");
-        let raw = fetch_models_dev_json()?;
-
-        eprintln!("Filtering to providers: {}", providers.join(", "));
-        let catalog = filter_catalog(&raw, providers)?;
-
-        let canonical = canonicalize_json(&catalog)?;
-        write_canonical_catalog(&canonical, &catalog_path)?;
-        eprintln!("Wrote pinned catalog: {}", catalog_path.display());
-
-        let existing_overrides = load_overrides(&overrides_path)?;
-        let merged_overrides = merge_overrides(&existing_overrides, providers);
-        write_overrides(&merged_overrides, &overrides_path)?;
-        eprintln!("Wrote caps overrides: {}", overrides_path.display());
-
-        show_catalog_summary(&catalog);
+pub fn run_fetch(pinned: bool, pinned_url: Option<&str>) -> Result<(), CatalogError> {
+    let (url, label) = if pinned {
+        (
+            pinned_url.unwrap_or(DEFAULT_PINNED_URL),
+            "pinned snapshot",
+        )
     } else {
-        // Default: fetch unfiltered, write to user cache
-        eprintln!("Fetching models.dev catalog...");
-        let raw = fetch_models_dev_json()?;
+        (MODELS_DEV_API_URL, "models.dev")
+    };
 
-        let cache_path = ModelCatalog::user_cache_path()
-            .ok_or_else(|| CatalogError::Io(io::Error::new(
-                io::ErrorKind::NotFound,
-                "could not determine user cache path (HOME not set)",
-            )))?;
-        if let Some(parent) = cache_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    eprintln!("Fetching catalog from {label} ({url})...");
+    let body = reqwest::blocking::get(url)?.text()?;
 
-        // Validate it parses
-        let catalog: ModelCatalog = serde_json::from_str(&raw)?;
-
-        let canonical = canonicalize_json(&catalog)?;
-        fs::write(&cache_path, &canonical)?;
-        eprintln!("Wrote catalog cache: {}", cache_path.display());
-        show_catalog_summary(&catalog);
+    let cache_path = ModelCatalog::user_cache_path().ok_or_else(|| {
+        CatalogError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not determine user cache path (HOME not set)",
+        ))
+    })?;
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
     }
 
+    // Validate the fetched JSON parses as a valid catalog
+    let catalog = ModelCatalog::from_snapshot_str(&body).map_err(|e| {
+        CatalogError::Fetch(format!(
+            "catalog from {url} uses an unsupported schema: {e}"
+        ))
+    })?;
+
+    // Write raw JSON to cache (preserves upstream format exactly)
+    fs::write(&cache_path, &body)?;
+    eprintln!("Wrote catalog cache: {}", cache_path.display());
+    show_catalog_summary(&catalog);
     Ok(())
 }
 

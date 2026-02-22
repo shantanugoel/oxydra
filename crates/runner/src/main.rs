@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand};
 use runner::{
     Runner, RunnerControlTransportError, RunnerError, RunnerStartRequest, RunnerTuiConnectRequest,
-    catalog::{CatalogError, DEFAULT_FILTER_PROVIDERS},
+    catalog::CatalogError,
 };
 use thiserror::Error;
 use types::init_tracing;
@@ -22,15 +22,9 @@ enum CliCommand {
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 enum CatalogAction {
-    /// Fetch models.dev catalog and write to cache or pinned snapshot
+    /// Fetch model catalog and write to user cache
     Fetch {
-        /// Comma-separated provider IDs to include. When specified, fetches
-        /// from models.dev, filters, and writes to the in-repo pinned snapshot
-        /// (dev workflow). Without this flag, writes unfiltered to user cache.
-        #[arg(long, value_delimiter = ',')]
-        providers: Option<Vec<String>>,
-        /// Fetch from the pinned snapshot URL instead of models.dev and write
-        /// to user cache. When used, --providers is ignored.
+        /// Fetch from the pinned snapshot URL instead of models.dev
         #[arg(long)]
         pinned: bool,
     },
@@ -190,10 +184,8 @@ fn handle_command(command: CliCommand) -> Result<(), CliError> {
 
 fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {
     match action {
-        CatalogAction::Fetch { providers, pinned } => {
-            let providers = resolve_catalog_providers(providers);
-            let provider_refs: Vec<&str> = providers.iter().map(String::as_str).collect();
-            runner::catalog::run_fetch(&provider_refs, pinned, None)?;
+        CatalogAction::Fetch { pinned } => {
+            runner::catalog::run_fetch(pinned, None)?;
             Ok(())
         }
         CatalogAction::Verify => {
@@ -212,15 +204,6 @@ fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {
             Ok(())
         }
     }
-}
-
-fn resolve_catalog_providers(providers: Option<Vec<String>>) -> Vec<String> {
-    providers.unwrap_or_else(|| {
-        DEFAULT_FILTER_PROVIDERS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect()
-    })
 }
 
 fn resolve_user_id(user_id: Option<String>, runner: &Runner) -> Result<String, CliError> {
@@ -419,23 +402,19 @@ mod tests {
         assert_eq!(
             args.command,
             Some(CliCommand::Catalog {
-                action: CatalogAction::Fetch { providers: None, pinned: false }
+                action: CatalogAction::Fetch { pinned: false }
             })
         );
     }
 
     #[test]
-    fn parse_cli_args_accepts_catalog_fetch_with_providers() {
-        let args =
-            CliArgs::try_parse_from(["runner", "catalog", "fetch", "--providers", "openai,google"])
-                .expect("catalog fetch with providers should parse");
+    fn parse_cli_args_accepts_catalog_fetch_with_pinned() {
+        let args = CliArgs::try_parse_from(["runner", "catalog", "fetch", "--pinned"])
+            .expect("catalog fetch --pinned should parse");
         assert_eq!(
             args.command,
             Some(CliCommand::Catalog {
-                action: CatalogAction::Fetch {
-                    providers: Some(vec!["openai".to_owned(), "google".to_owned()]),
-                    pinned: false,
-                }
+                action: CatalogAction::Fetch { pinned: true }
             })
         );
     }
@@ -458,24 +437,4 @@ mod tests {
         assert_eq!(args.command, None);
     }
 
-    #[test]
-    fn resolve_catalog_providers_uses_defaults_when_none() {
-        let providers = resolve_catalog_providers(None);
-        assert_eq!(
-            providers,
-            vec!["openai", "anthropic", "google"],
-            "should default to the three configured providers"
-        );
-    }
-
-    #[test]
-    fn resolve_catalog_providers_uses_explicit_values() {
-        let providers =
-            resolve_catalog_providers(Some(vec!["openai".to_owned(), "mistral".to_owned()]));
-        assert_eq!(
-            providers,
-            vec!["openai", "mistral"],
-            "should use the explicitly provided provider list"
-        );
-    }
 }

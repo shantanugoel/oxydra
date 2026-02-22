@@ -58,21 +58,12 @@ jitter          = false # Add randomized jitter to backoff
 # API keys can also be set via environment variables:
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or fallback API_KEY
 #
-# The base_url can point to any OpenAI-compatible endpoint (e.g. OpenRouter,
+# The base_url can point to any compatible endpoint (e.g. OpenRouter,
 # Azure OpenAI, or a local proxy).
-[providers.registry.openai]
-provider_type = "openai"
-base_url = "https://api.openai.com"
-# api_key = "sk-..."
-
-[providers.registry.anthropic]
-provider_type = "anthropic"
-base_url = "https://api.anthropic.com"
-# api_key = "sk-ant-..."
 
 # --- Example: Google Gemini ---
 # [providers.registry.gemini]
-# provider_type = "gemini"
+# provider_type = "gemini" # Configures the `type` of API to communicate upstream
 # api_key_env = "GEMINI_API_KEY"
 
 # --- Example: OpenAI Responses API (stateful session chaining) ---

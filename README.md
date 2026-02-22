@@ -71,8 +71,11 @@ export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 **Process tier** (no Docker required, isolation is degraded):
 
 ```bash
-cargo run -p runner -- --config .oxydra/runner.toml --user alice --insecure
+cargo run -p runner -- --config .oxydra/runner.toml --user alice --insecure --daemon
 ```
+
+The process-tier runner exits immediately unless you pass `--daemon`. Keep it running in one
+terminal, then connect the TUI in another.
 
 **Container tier** (requires guest images from step 3):
 
@@ -86,6 +89,15 @@ Connect the TUI to a running session:
 
 ```bash
 cargo run -p runner -- --tui --config .oxydra/runner.toml --user alice
+```
+
+If you see `oxydra-tui was not found in PATH`, build or install it:
+
+```bash
+cargo install --path crates/tui
+# or
+cargo build -p tui
+target/debug/oxydra-tui --gateway-endpoint ws://127.0.0.1:PORT/ws --user alice
 ```
 
 See `cargo run -p runner -- --help` for all CLI options.

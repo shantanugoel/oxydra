@@ -1653,6 +1653,12 @@ fn write_bootstrap_file(
     })?;
     let bootstrap_path = bootstrap_dir.join("runner_bootstrap.json");
     let payload = serde_json::to_vec_pretty(bootstrap).map_err(BootstrapEnvelopeError::from)?;
+    if fs::exists(&bootstrap_path).is_ok() {
+        fs::remove_file(&bootstrap_path).map_err(|source| RunnerError::ProvisionWorkspace {
+            path: bootstrap_path.clone(),
+            source,
+        })?;
+    }
     fs::write(&bootstrap_path, &payload).map_err(|source| RunnerError::ProvisionWorkspace {
         path: bootstrap_path.clone(),
         source,

@@ -9,12 +9,12 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | Phase | Focus | Status | Notes |
 |-------|-------|--------|-------|
 | 1 | Types + error hierarchy + tracing | **Complete** | All types, traits, error enums, tracing spans |
-| 2 | Provider trait + OpenAI (non-streaming) | **Complete** | Provider trait, OpenAI impl, model catalog. **Gap: ResponsesProvider not implemented** |
+| 2 | Provider trait + OpenAI (non-streaming) | **Complete** | Provider trait, OpenAI impl, model catalog. |
 | 3 | Streaming support + SSE parsing | **Complete** | OpenAI SSE streaming, StreamItem enum, bounded channels |
 | 4 | Tool trait + `#[tool]` macro + core tools | **Complete** | Tool trait, proc macro, file/shell/web/vault tools |
 | 5 | Agent loop + cancellation + testing | **Complete** | Turn loop, CancellationToken, MockProvider, budget guards |
 | 6 | Self-correction + parallel tool execution | **Complete** | Validation error feedback, join_all for ReadOnly tools |
-| 7 | Anthropic provider + config + switching | **Complete** | Anthropic impl, figment config, ReliableProvider. **Gap: streaming is a shim** |
+| 7 | Anthropic provider + config + switching | **Complete** | Anthropic impl, figment config, ReliableProvider. |
 | 8 | Memory trait + libSQL persistence | **Complete** | Memory trait, libSQL, SQL migrations, session management |
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
@@ -34,25 +34,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 
 Three gaps were identified during the initial code review of phases 1-12, and two additional gaps were identified in a subsequent review. All five are documented here and incorporated into the forward plan.
 
-### Gap 1: Anthropic SSE Streaming (Phase 7)
-
-**What was planned:** Real SSE streaming from Anthropic's event stream API, parsing `content_block_delta`, `message_delta`, and other Anthropic-specific SSE event types.
-
-**What was built:** The Anthropic provider's `stream()` method calls `complete()` internally and wraps the full response as synthetic stream items. It produces correct output but does not actually stream — the user sees the full response arrive at once rather than token-by-token.
-
-**Impact:** Functional correctness is unaffected. User experience degrades for long responses (no progressive display). Token budget enforcement cannot react mid-stream.
-
-**Fix scope:** Implement a real SSE parser for Anthropic's `/v1/messages` streaming endpoint, handling `message_start`, `content_block_start`, `content_block_delta`, `message_delta`, and `message_stop` event types. The existing `StreamItem` enum already supports all needed variants.
-
-### ~~Gap 2: TUI Visual Rendering (Phase 12)~~ — Resolved
-
-**What was planned:** A `ratatui` + `crossterm` terminal rendering loop providing a full visual terminal interface.
-
-**What was built:** The TUI crate now contains the complete interactive client: `TuiViewModel` (rendering state with message history, scroll, input buffer, connection state), `MessagePane`/`InputBar`/`StatusBar` widgets, `EventReader` (blocking crossterm input thread), and `TuiApp` (main `tokio::select!` loop with WebSocket split transport, Hello handshake, reconnection with exponential backoff, and single-point-of-draw rendering). A standalone `oxydra-tui` binary provides a CLI entry point, and `runner --tui` execs it.
-
-**Resolution:** Gap fully closed. The rendering loop, input handling, reconnection strategy, and binary entry point are all implemented and tested.
-
-### Gap 3: MemoryRetrieval::upsert_chunks (Phase 9)
+### Gap 1: MemoryRetrieval::upsert_chunks (Phase 9)
 
 **What was planned:** A `upsert_chunks` method on the `MemoryRetrieval` trait for batch-indexing document chunks into the vector/FTS stores.
 
@@ -61,36 +43,6 @@ Three gaps were identified during the initial code review of phases 1-12, and tw
 **Impact:** The hybrid retrieval pipeline works for conversation-based content. External document ingestion through `upsert_chunks` is not available. This blocks future use cases like codebase indexing or document upload.
 
 **Fix scope:** Implement the method body — embed chunk text via the existing embedding pipeline, insert into `chunks` + `chunks_vec` tables, and update the FTS5 index. All the infrastructure (embedding backends, table schema, SQL migrations) already exists.
-
-### ~~Gap 4: WASM Tool Isolation is Simulated (Phase 11)~~ — Resolved
-
-**What was planned:** Tools execute inside `wasmtime` WASM sandboxes with strict WASI capability grants. File tools get preopened directory mounts, web tools get no filesystem access, and the guest physically cannot access unmounted paths.
-
-**What was built (original):** The `HostWasmToolRunner` enforced capability-scoped mount policies via host-side `std::fs` calls — logical isolation rather than hardware-enforced WASM sandboxing.
-
-**Resolution:** `WasmWasiToolRunner` now executes all file tool operations inside a `wasmtime` sandbox with WASI preopened directories as the hard security boundary. Key details:
-
-- `crates/wasm-guest/` — a new `wasm32-wasip1` binary implementing all eight file operations (`file_read`, `file_write`, `file_edit`, `file_delete`, `file_list`, `file_search`, `vault_copyto_read`, `vault_copyto_write`) using only WASI `std::fs`, compiled and embedded at build time via `crates/sandbox/build.rs` + `include_bytes!`
-- Per-profile WASI preopened directories enforce the mount boundary: the guest physically cannot open paths outside its preopened FDs regardless of path construction
-- Epoch-based interruption (~10 s timeout) and `StoreLimitsBuilder` (64 MB memory cap) bound runaway guests
-- Host-side capability profile checks are retained as defense-in-depth (fast path before WASM instantiation cost)
-- Web tools (`web_fetch`, `web_search`) continue to execute host-side via `reqwest` — they have no filesystem access by design
-- `WasmWasiToolRunner` is feature-gated behind `wasm-isolation` (default on); `HostWasmToolRunner` remains as the fallback when the feature is disabled
-- **TOCTOU eliminated**: the WASI boundary makes symlink-escape and check-to-use races structurally impossible for file tools
-
-### ~~Gap 5: OpenAI Responses API Provider (Phase 2)~~ — Resolved
-
-**What was planned:** A `ResponsesProvider` implementation targeting OpenAI's `/v1/responses` endpoint with stateful session chaining via `previous_response_id`. This API persists conversation state server-side, reducing token transmission overhead for long multi-turn sessions. The project brief described `input` array format, typed `output` items, built-in tool declarations, and distinct SSE event types.
-
-**What was built:** Only the `OpenAIProvider` existed, targeting the stateless `/v1/chat/completions` endpoint.
-
-**Resolution:** `ResponsesProvider` implemented in `crates/provider/src/responses.rs` as part of Phase 13. Key details:
-- Targets `/v1/responses` with session chaining via `previous_response_id` stored in `Arc<Mutex<Option<String>>>`
-- Typed `input` array format (`message`, `function_call_output`) and typed `output` items (`message`, `function_call`)
-- Real SSE streaming with Responses API event types (`response.output_item.added`, `response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`)
-- `ResponsesToolCallAccumulator` for fragmented tool call argument merging
-- Fallback to full context on chaining errors
-- Overrides `catalog_provider_id()` to return `"openai"` for shared model catalog namespace
 
 ## Completed Phases: Detail
 
@@ -118,9 +70,6 @@ Built the foundation layer with zero internal dependencies:
 - `ModelCatalog` loaded from embedded JSON snapshot, organized by catalog provider namespace
 - `ModelDescriptor` fully aligned with models.dev schema (capability flags, pricing, limits, modalities)
 - Model selection validated against catalog at startup
-- ~~**Gap:** `ResponsesProvider` for OpenAI's stateful `/v1/responses` API was planned but not implemented~~ **Resolved** — see Phase 13
-
-**Gaps / follow-ups:** None remaining (ResponsesProvider resolved in Phase 13).
 
 ### Phase 3: Streaming + SSE Parsing
 
@@ -172,10 +121,6 @@ Built the foundation layer with zero internal dependencies:
 - `ReliableProvider` wrapper: exponential backoff, retry with jitter, fallback chains
 - Provider switching via config without code changes
 - Credential resolution: 4-tier (explicit config → custom env var → provider-type env var → generic `API_KEY` fallback)
-- **Gap:** `stream()` is a shim wrapping `complete()`
-
-**Gaps / follow-ups to complete Phase 7:**
-- **Anthropic streaming:** implement true SSE streaming for `/v1/messages` with `content_block_delta` and related event types.
 
 ### Phase 8: Memory Trait + libSQL Persistence
 
@@ -218,14 +163,6 @@ Built the foundation layer with zero internal dependencies:
 - `ShellSession` / `BrowserSession` traits with `VsockShellSession` and `LocalProcessShellSession`
 - `--insecure` mode: Process tier, no VM/container, shell/browser tools disabled, warning emitted
 
-**Phase 10 gaps — resolved:**
-- ~~**Container/microvm bootstrapping:**~~ Bootstrap envelope is now written to a file (`workspace.tmp/bootstrap/runner_bootstrap.json`) before launch and bind-mounted into containers at `/run/oxydra/bootstrap` with `OXYDRA_BOOTSTRAP_FILE` env var. MicroVM guests receive it via base64-encoded `boot_args` injection into Firecracker config. macOS microvm inherits the container path via Docker.
-- ~~**Runner control plane:**~~ `--daemon` flag added; daemon loop binds a Unix control socket, serves health/shutdown RPCs via `serve_control_unix_listener`, captures logs from stdout/stderr via log pump threads, and cleans up the socket on shutdown.
-- ~~**Linux microvm config:**~~ `RunnerGuestImages` now has dedicated `firecracker_oxydra_vm_config` and `firecracker_shell_vm_config` fields (separate from OCI image tags). `launch_microvm_linux` validates their presence and uses `generate_firecracker_config()` to produce runtime-specific configs with bootstrap injection.
-
-**Minor remaining gap:**
-- **Docker container log capture:** Log pumps capture stdout/stderr for process-spawned guests but Docker containers (launched via bollard in detached mode) do not have log streaming wired. Use bollard's `logs()` streaming API to pump container output to log files, matching the existing process-tier log capture pattern.
-
 ### Phase 11: Security Policy + WASM Tool Isolation
 
 **Crates:** `sandbox`, `tools`, `runtime`
@@ -238,8 +175,6 @@ Built the foundation layer with zero internal dependencies:
 - `SecurityPolicy`: command allowlist, path traversal blocking, HITL gates
 - `RegexSet` output scrubbing for credentials (api_key, token, password, bearer patterns)
 - Entropy-based secret detection (Shannon entropy >= 3.8)
-**Phase 11 gaps — resolved:**
-- ~~**WASM isolation simulated:**~~ `WasmWasiToolRunner` now executes file operations inside a `wasmtime` WASM sandbox with WASI preopened directories as the hard boundary. A `wasm32-wasip1` guest binary (`crates/wasm-guest/`) is compiled and embedded via `crates/sandbox/build.rs`. The `WasmToolRunner` trait, capability profiles, and mount policy definitions are unchanged — only the execution backend changed. `HostWasmToolRunner` is retained as a fallback when the `wasm-isolation` feature is disabled.
 
 ### Phase 12: Channel Trait + TUI + Gateway Daemon
 
@@ -264,8 +199,6 @@ Built the foundation layer with zero internal dependencies:
 - `oxydra-tui`: standalone binary entry point (clap CLI, UUID connection ID, multi-threaded tokio runtime)
 - `runner --tui` execs `oxydra-tui` binary; `--probe` flag preserves the old print-and-exit behavior
 
-**Gaps / follow-ups to complete Phase 12:**
-- ~~**Interactive TUI client:**~~ **Resolved** — ratatui rendering loop, widgets, event handling, app loop, standalone binary, and runner exec wiring all implemented and tested.
 
 ### Phase 13: Model Catalog Governance + Provider Flexibility
 
@@ -285,7 +218,6 @@ Built the foundation layer with zero internal dependencies:
 - **Catalog snapshot commands:** `runner catalog fetch` (fetch from models.dev, filter, write snapshot + overrides), `runner catalog verify` (re-fetch and compare), `runner catalog show` (pretty-print summary)
 - **Config validation:** `AgentConfig::validate()` resolves provider via registry; `validate_model_in_catalog()` uses `effective_catalog_provider()`; `ConfigError::UnknownModelForCatalogProvider` replaces old model validation errors
 
-**Gaps / follow-ups:** None. All Phase 13 scope items implemented.
 
 ## Forward Plan: Phases 14-21
 
@@ -403,14 +335,7 @@ The five identified gaps are incorporated as additional work items:
 
 | Gap | Affected Phase | Resolution Target | Priority |
 |-----|---------------|-------------------|----------|
-| Anthropic SSE streaming | Phase 7 | Before Phase 14 (external channels need reliable streaming) | High |
-| ~~TUI ratatui rendering + interactive client~~ | Phase 12 | ~~Before Phase 14~~ **Resolved** — ratatui rendering loop, crossterm input, `TuiViewModel`, widgets, `TuiApp` select loop, standalone `oxydra-tui` binary, runner exec wiring | ~~High~~ |
-| ~~WASM tool isolation (simulated → real)~~ | Phase 11 | ~~Before Phase 15~~ **Resolved** — `WasmWasiToolRunner` with wasmtime + WASI preopened directories; `wasm32-wasip1` guest binary embedded via `build.rs`; TOCTOU eliminated | ~~High~~ |
-| OpenAI ResponsesProvider | Phase 2 | ~~Phase 13~~ **Resolved** — `ResponsesProvider` with `/v1/responses`, `previous_response_id` session chaining, typed input/output, SSE streaming | ~~Medium~~ |
 | upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
-| ~~Runner control plane + persistent daemon + VM log capture~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — daemon flag, Unix control socket, log pump threads | ~~High~~ |
-| ~~Container/microvm bootstrap wiring (args + bootstrap-stdin + envelope)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — bootstrap file written pre-launch, bind-mounted into containers, injected into FC boot_args | ~~Critical~~ |
-| ~~Linux microvm config input mismatch (Firecracker vs OCI tags)~~ | Phase 10 | ~~Before Phase 12~~ **Resolved** — dedicated firecracker config fields in RunnerGuestImages, generate_firecracker_config() | ~~High~~ |
 | Docker container log capture | Phase 10 | Non-blocking; wire bollard `logs()` streaming to log files for container-tier guests | Low |
 
 These gaps do not block any currently completed phase's functionality but should be resolved before the phases that depend on them.

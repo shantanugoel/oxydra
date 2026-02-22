@@ -204,14 +204,29 @@ impl CrateSandboxBackend {
         &self,
         request: &SandboxLaunchRequest,
     ) -> Result<SandboxLaunch, RunnerError> {
-        let vm_name = format!(
+        let agent_name = format!(
             "oxydra-microvm-{}",
             sanitize_container_component(&request.user_id)
         );
         let sandbox_socket_path = docker_sandboxd_socket_path()?;
-        let vm_info = create_docker_sandbox_vm_sync(sandbox_socket_path.clone(), vm_name.clone())?;
-        let docker_endpoint =
-            DockerEndpoint::UnixSocket(vm_info.docker_socket_path.to_string_lossy().into_owned());
+        let vm_info = create_docker_sandbox_vm_sync(
+            sandbox_socket_path.clone(),
+            agent_name,
+            request.workspace.root.clone(),
+        )?;
+        let vm_socket_str = vm_info.docker_socket_path.to_string_lossy().into_owned();
+        let docker_endpoint = DockerEndpoint::UnixSocket(vm_socket_str.clone());
+
+        let cleanup_delete = |socket: PathBuf, name: String| {
+            let _ = delete_docker_sandbox_vm_sync(socket, name);
+        };
+
+        if let Err(error) =
+            load_image_into_sandbox_vm(&request.guest_images.oxydra_vm, &vm_socket_str)
+        {
+            cleanup_delete(sandbox_socket_path, vm_info.vm_name);
+            return Err(error);
+        }
 
         let runtime = match self.launch_docker_guest(
             &docker_endpoint,
@@ -222,7 +237,7 @@ impl CrateSandboxBackend {
         ) {
             Ok(runtime) => runtime,
             Err(error) => {
-                let _ = delete_docker_sandbox_vm_sync(sandbox_socket_path, vm_name);
+                cleanup_delete(sandbox_socket_path, vm_info.vm_name);
                 return Err(error);
             }
         };
@@ -231,21 +246,32 @@ impl CrateSandboxBackend {
         let mut degraded_reasons = Vec::new();
         let mut sidecar = None;
         if request.sidecar_requested() {
-            match self.launch_docker_guest(
-                &docker_endpoint,
-                request,
-                "micro_vm",
-                RunnerGuestRole::ShellVm,
-                &request.guest_images.shell_vm,
-            ) {
-                Ok(handle) => sidecar = Some(handle),
-                Err(error) => {
-                    let detail = format!("macOS microvm sidecar launch failed: {error}");
-                    warnings.push(detail.clone());
-                    degraded_reasons.push(StartupDegradedReason::new(
-                        StartupDegradedReasonCode::SidecarUnavailable,
-                        detail,
-                    ));
+            if let Err(error) =
+                load_image_into_sandbox_vm(&request.guest_images.shell_vm, &vm_socket_str)
+            {
+                let detail = format!("macOS microvm sidecar image load failed: {error}");
+                warnings.push(detail.clone());
+                degraded_reasons.push(StartupDegradedReason::new(
+                    StartupDegradedReasonCode::SidecarUnavailable,
+                    detail,
+                ));
+            } else {
+                match self.launch_docker_guest(
+                    &docker_endpoint,
+                    request,
+                    "micro_vm",
+                    RunnerGuestRole::ShellVm,
+                    &request.guest_images.shell_vm,
+                ) {
+                    Ok(handle) => sidecar = Some(handle),
+                    Err(error) => {
+                        let detail = format!("macOS microvm sidecar launch failed: {error}");
+                        warnings.push(detail.clone());
+                        degraded_reasons.push(StartupDegradedReason::new(
+                            StartupDegradedReasonCode::SidecarUnavailable,
+                            detail,
+                        ));
+                    }
                 }
             }
         }

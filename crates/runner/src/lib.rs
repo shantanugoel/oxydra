@@ -331,17 +331,26 @@ pub fn provision_user_workspace(
 ) -> Result<UserWorkspace, RunnerError> {
     let user_id = validate_user_id(user_id)?;
     let root = workspace_root.as_ref().join(user_id);
+
+    // Create directories first so canonicalize can resolve the path.
+    for dir_name in [SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME, LOGS_DIR_NAME] {
+        let path = root.join(dir_name);
+        fs::create_dir_all(&path).map_err(|source| RunnerError::ProvisionWorkspace {
+            path,
+            source,
+        })?;
+    }
+
+    // Canonicalize the root to an absolute path so that Docker sandbox VM
+    // file sharing directories and container bind mounts receive real paths.
+    let root = fs::canonicalize(&root).map_err(|source| RunnerError::ProvisionWorkspace {
+        path: root,
+        source,
+    })?;
     let shared = root.join(SHARED_DIR_NAME);
     let tmp = root.join(TMP_DIR_NAME);
     let vault = root.join(VAULT_DIR_NAME);
     let logs = root.join(LOGS_DIR_NAME);
-
-    for path in [&root, &shared, &tmp, &vault, &logs] {
-        fs::create_dir_all(path).map_err(|source| RunnerError::ProvisionWorkspace {
-            path: path.clone(),
-            source,
-        })?;
-    }
 
     Ok(UserWorkspace {
         root,
@@ -1059,6 +1068,8 @@ pub enum RunnerError {
     InvalidGatewayEndpoint { path: PathBuf },
     #[error("failed to probe gateway endpoint `{endpoint}`: {message}")]
     GatewayProbeFailed { endpoint: String, message: String },
+    #[error("failed to transfer image `{image}` into sandbox VM: {message}")]
+    ImageTransfer { image: String, message: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1263,6 +1274,12 @@ async fn launch_docker_container_async(
     .collect();
 
     let mut env = Vec::new();
+    if matches!(params.endpoint, DockerEndpoint::UnixSocket(_)) {
+        env.push("HTTP_PROXY=http://host.docker.internal:3128".to_owned());
+        env.push("HTTPS_PROXY=http://host.docker.internal:3128".to_owned());
+        env.push("http_proxy=http://host.docker.internal:3128".to_owned());
+        env.push("https_proxy=http://host.docker.internal:3128".to_owned());
+    }
     if let Some(ref bootstrap_path) = params.bootstrap_file {
         binds.push(format!(
             "{}:{}:ro",
@@ -1433,11 +1450,18 @@ fn docker_sandboxd_socket_path() -> Result<PathBuf, RunnerError> {
 
 fn create_docker_sandbox_vm_sync(
     sandbox_socket_path: PathBuf,
-    vm_name: String,
+    agent_name: String,
+    workspace_dir: PathBuf,
 ) -> Result<DockerSandboxVmInfo, RunnerError> {
     run_async(async move {
-        let _ = delete_docker_sandbox_vm_async(sandbox_socket_path.clone(), vm_name.clone()).await;
-        let payload = json!({ "name": vm_name });
+        let vm_resource_name = docker_sandbox_vm_resource_name(&agent_name);
+        let _ =
+            delete_docker_sandbox_vm_async(sandbox_socket_path.clone(), vm_resource_name.clone())
+                .await;
+        let payload = json!({
+            "agent_name": agent_name,
+            "workspace_dir": workspace_dir.to_string_lossy(),
+        });
         let response = send_unix_json_request(
             &sandbox_socket_path,
             Method::POST,
@@ -1456,15 +1480,76 @@ fn create_docker_sandbox_vm_sync(
 
         let docker_socket_path = extract_socket_path(&response.body).ok_or(
             RunnerError::SandboxVmMissingDockerSocket {
-                vm_name: vm_name.clone(),
+                vm_name: vm_resource_name.clone(),
             },
         )?;
 
         Ok(DockerSandboxVmInfo {
-            vm_name,
+            vm_name: vm_resource_name,
             docker_socket_path,
         })
     })
+}
+
+fn docker_sandbox_vm_resource_name(agent_name: &str) -> String {
+    format!("{agent_name}-vm")
+}
+
+fn load_image_into_sandbox_vm(image: &str, vm_socket_path: &str) -> Result<(), RunnerError> {
+    let mut save_child = Command::new("docker")
+        .args(["save", image])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| RunnerError::ImageTransfer {
+            image: image.to_owned(),
+            message: format!("failed to start 'docker save': {source}"),
+        })?;
+
+    let save_stdout = save_child
+        .stdout
+        .take()
+        .ok_or_else(|| RunnerError::ImageTransfer {
+            image: image.to_owned(),
+            message: "failed to capture 'docker save' stdout".to_owned(),
+        })?;
+
+    let load_output = Command::new("docker")
+        .args(["--host", &format!("unix://{vm_socket_path}"), "load"])
+        .stdin(save_stdout)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|source| RunnerError::ImageTransfer {
+            image: image.to_owned(),
+            message: format!("failed to run 'docker load': {source}"),
+        })?;
+
+    let save_status = save_child
+        .wait()
+        .map_err(|source| RunnerError::ImageTransfer {
+            image: image.to_owned(),
+            message: format!("failed to wait for 'docker save': {source}"),
+        })?;
+
+    if !save_status.success() {
+        return Err(RunnerError::ImageTransfer {
+            image: image.to_owned(),
+            message: format!("'docker save' exited with status {save_status}"),
+        });
+    }
+    if !load_output.status.success() {
+        let stderr = String::from_utf8_lossy(&load_output.stderr);
+        return Err(RunnerError::ImageTransfer {
+            image: image.to_owned(),
+            message: format!(
+                "'docker load' exited with status {}: {stderr}",
+                load_output.status
+            ),
+        });
+    }
+    info!(image = %image, vm_socket = %vm_socket_path, "loaded image into sandbox VM");
+    Ok(())
 }
 
 fn delete_docker_sandbox_vm_sync(
@@ -1653,7 +1738,7 @@ fn write_bootstrap_file(
     })?;
     let bootstrap_path = bootstrap_dir.join("runner_bootstrap.json");
     let payload = serde_json::to_vec_pretty(bootstrap).map_err(BootstrapEnvelopeError::from)?;
-    if fs::exists(&bootstrap_path).is_ok() {
+    if fs::exists(&bootstrap_path).unwrap_or(false) {
         fs::remove_file(&bootstrap_path).map_err(|source| RunnerError::ProvisionWorkspace {
             path: bootstrap_path.clone(),
             source,

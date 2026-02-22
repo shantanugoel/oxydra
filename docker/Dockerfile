@@ -3,7 +3,7 @@
 #   docker build --target oxydra-vm -t oxydra-vm:latest -f docker/Dockerfile .
 #   docker build --target shell-vm  -t shell-vm:latest  -f docker/Dockerfile .
 
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 WORKDIR /build
 COPY . .
@@ -21,6 +21,6 @@ ENTRYPOINT ["/usr/local/bin/oxydra-vm"]
 # --- shell-vm (shell-daemon sidecar) image ---
 FROM debian:trixie-slim AS shell-vm
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/shell-daemon /usr/local/bin/shell-daemon
 ENTRYPOINT ["/usr/local/bin/shell-daemon"]

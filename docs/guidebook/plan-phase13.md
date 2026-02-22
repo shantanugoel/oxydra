@@ -186,9 +186,9 @@ A separate file `crates/types/data/oxydra_caps_overrides.json` holds per-(provid
 
 ---
 
-## Step 3 — Provider registry config types + backward-compatible evolution
+## Step 3 — Provider registry config types
 
-**Goal:** Transition from hardcoded `providers.openai` / `providers.anthropic` blocks to a named provider registry. Existing configs continue to work unchanged.
+**Goal:** Replace the hardcoded `providers.openai` / `providers.anthropic` config blocks with a named provider registry. Remove the old per-provider config structs entirely.
 
 ### New config types in `crates/types/src/config.rs`
 
@@ -220,27 +220,26 @@ pub struct ProviderRegistryEntry {
 }
 ```
 
-**Extend `ProviderConfigs`:**
+**Replace `ProviderConfigs` entirely:**
+
+Remove `OpenAIProviderConfig`, `AnthropicProviderConfig`, and the old `ProviderConfigs` struct. Replace with:
 
 ```rust
 pub struct ProviderConfigs {
-    #[serde(default)]
-    pub openai: OpenAIProviderConfig,        // legacy — kept for backward compat
-    #[serde(default)]
-    pub anthropic: AnthropicProviderConfig,   // legacy — kept for backward compat
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub registry: BTreeMap<String, ProviderRegistryEntry>,
 }
 ```
 
-### Resolution rules
+### `ProviderSelection` update
 
-Add `ProviderConfigs::resolve(provider_name: &str) -> Result<ResolvedProvider, ConfigError>`:
+`ProviderSelection.provider` now references a key in the registry (e.g. `"openai"`, `"my-proxy"`, `"gemini"`).
 
-1. If `registry` contains `provider_name` → return it directly
-2. If `provider_name == "openai"` → synthesize `ProviderRegistryEntry` from legacy `openai` block (provider_type=Openai, base_url from legacy, api_key from legacy, api_key_env="OPENAI_API_KEY", catalog_provider="openai")
-3. If `provider_name == "anthropic"` → same synthesis from `anthropic` block
-4. Otherwise → `ConfigError::UnsupportedProvider`
+### Resolution
+
+`ProviderConfigs::resolve(provider_name: &str) -> Result<&ProviderRegistryEntry, ConfigError>`:
+
+1. If `registry` contains `provider_name` → return it
+2. Otherwise → `ConfigError::UnsupportedProvider`
 
 `catalog_provider` defaults per type: `Openai`→`"openai"`, `Anthropic`→`"anthropic"`, `Gemini`→`"google"`, `OpenaiResponses`→`"openai"`.
 
@@ -251,28 +250,40 @@ Update `AgentConfig::validate()`:
 - Instead: call `self.providers.resolve(&self.selection.provider.0)?` — success means valid provider
 - Validate that the selected model exists in the catalog under the resolved entry's `catalog_provider`
 
-### Example TOML (new-style)
+Remove the constants `OPENAI_PROVIDER_ID`, `ANTHROPIC_PROVIDER_ID`, `OPENAI_DEFAULT_BASE_URL`, `ANTHROPIC_DEFAULT_BASE_URL` from `config.rs` (these move to provider-type defaults in the factory/registry layer).
+
+### Example TOML (new config format)
 
 ```toml
 [selection]
-provider = "my-openai-proxy"
+provider = "openai"
 model = "gpt-4o"
+
+[providers.registry.openai]
+provider_type = "openai"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.registry.anthropic]
+provider_type = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.registry.gemini]
+provider_type = "gemini"
+api_key_env = "GEMINI_API_KEY"
 
 [providers.registry.my-openai-proxy]
 provider_type = "openai"
 base_url = "https://my-proxy.corp.internal/v1"
 api_key_env = "CORP_OPENAI_KEY"
-
-[providers.registry.gemini]
-provider_type = "gemini"
-api_key_env = "GEMINI_API_KEY"
 ```
+
+### Default config
+
+Update `AgentConfig::default()` / `ProviderConfigs::default()` to include sensible default registry entries for `openai` and `anthropic` so the system works out-of-the-box with just an env var set (same UX as before, just expressed through the registry).
 
 ### Verification gates
 
-- `legacy_openai_config_resolves` — default config with `provider = "openai"` still works
-- `legacy_anthropic_config_resolves` — same for anthropic
-- `registry_entry_overrides_legacy` — registry entry named "openai" takes precedence over legacy block
+- `default_config_has_openai_and_anthropic_registry_entries`
 - `custom_provider_resolves_from_registry` — a custom name like "my-proxy" resolves correctly
 - `unknown_provider_rejected` — error on unresolvable provider name
 - `model_validated_against_catalog_provider` — selection.model checked against resolved catalog_provider
@@ -322,30 +333,32 @@ All providers gain a generalized constructor that accepts:
 - `extra_headers: Option<BTreeMap<String, String>>`
 - `catalog: ModelCatalog`
 
-This replaces the current pattern where each provider loads `ModelCatalog::from_pinned_snapshot()` internally.
+This replaces the current pattern where each provider loads `ModelCatalog::from_pinned_snapshot()` internally and has its own config struct (`OpenAIConfig`, `AnthropicConfig`). Remove those per-provider config structs.
+
+### Remove old API key resolution functions
+
+Remove `resolve_api_key()`, `resolve_anthropic_api_key()`, and the provider-specific constants (`OPENAI_PROVIDER_ID`, `ANTHROPIC_PROVIDER_ID`, etc.) from `provider/src/lib.rs`. All resolution now flows through `resolve_api_key_for_entry()`.
 
 ### Update `tui/bootstrap.rs`
 
-Replace:
-```rust
-match config.selection.provider.0.as_str() {
-    OPENAI_PROVIDER_ID => Box::new(OpenAIProvider::new(...)?),
-    ANTHROPIC_PROVIDER_ID => Box::new(AnthropicProvider::new(...)?),
-    ...
-}
-```
-
-With:
+Replace the hardcoded match with:
 ```rust
 let entry = config.providers.resolve(&config.selection.provider.0)?;
 let catalog = ModelCatalog::from_pinned_snapshot()?;
 let inner = build_provider(config.selection.provider.clone(), &entry, catalog)?;
 ```
 
+Remove imports of `OpenAIConfig`, `AnthropicConfig`, `OPENAI_PROVIDER_ID`, `ANTHROPIC_PROVIDER_ID`.
+
+### Update bootstrap CLI overrides
+
+Replace `ProviderOverrides` (which had per-provider `openai`/`anthropic` sub-structs) with overrides that target registry entries directly, or simplify to just `selection` overrides since provider config now lives in the registry.
+
 ### Verification gates
 
 - `factory_constructs_openai_from_registry_entry` — round-trip with mock key
 - `factory_constructs_anthropic_from_registry_entry`
+- `factory_constructs_gemini_from_registry_entry`
 - `api_key_resolved_from_entry_env_var` — env var specified in entry is used
 - `api_key_falls_back_to_provider_type_default` — OPENAI_API_KEY used if entry.api_key_env is None
 - `extra_headers_passed_through` — headers from entry propagated to provider
@@ -636,10 +649,10 @@ The runtime **never** fetches models.dev at startup. It always uses the committe
 
 In `tui/bootstrap.rs`:
 1. Load config via figment (unchanged)
-2. Resolve provider via `config.providers.resolve(selection.provider)` → `ResolvedProvider`
+2. Resolve provider via `config.providers.resolve(selection.provider)` → `&ProviderRegistryEntry`
 3. Load catalog via `ModelCatalog::from_pinned_snapshot()`
 4. Validate model exists: `catalog.validate(resolved.catalog_provider, selection.model)`
-5. Check for deprecation: if model descriptor in models.dev data has indicators of being deprecated (e.g., `last_updated` is very old, or if we add a `deprecated` override in the overlay), emit a `tracing::warn!`
+5. Check for deprecation: if model has `deprecated = true` in the overlay, emit a `tracing::warn!`
 6. Build provider via factory: `build_provider(instance_id, entry, catalog)`
 7. Wrap in `ReliableProvider`
 
@@ -664,6 +677,60 @@ Since models.dev doesn't have a universal "deprecated" field, we handle deprecat
 
 ---
 
+## Step 9 — Documentation updates
+
+**Goal:** Update all documentation, example configs, guidebook chapters, and the README to reflect the new provider registry, model catalog schema, and added providers.
+
+### Guidebook chapters to update
+
+**`docs/guidebook/02-configuration-system.md`:**
+- Replace `ProviderSelection` documentation to show it references a registry key
+- Replace `ProviderConfigs` section — remove `openai`/`anthropic` flat blocks, document the `registry: BTreeMap<String, ProviderRegistryEntry>` structure
+- Document `ProviderRegistryEntry` fields: `provider_type`, `base_url`, `api_key`, `api_key_env`, `extra_headers`, `catalog_provider`
+- Document `ProviderType` enum values: `openai`, `anthropic`, `gemini`, `openai_responses`
+- Update the credential resolution section to describe the new 4-tier chain: explicit `api_key` → `api_key_env` env var → default env var by provider_type → `API_KEY` fallback
+- Update the example TOML configs throughout to use registry format
+- Update the config file locations table if providers.toml is no longer needed as a separate file
+- Update startup validation description
+
+**`docs/guidebook/03-provider-layer.md`:**
+- Update the Model Catalog section to describe the models.dev-sourced schema with `CatalogProvider` and new `ModelDescriptor` fields
+- Add documentation for `ProviderCaps` derivation from models.dev fields and the Oxydra overlay mechanism
+- Add a Gemini Provider section covering wire protocol, request/response mapping, SSE streaming, and tool call ID generation
+- Add an OpenAI Responses API Provider section covering the `/v1/responses` endpoint, `previous_response_id` chaining, input format, and SSE event types
+- Update the credential resolution section
+- Update the provider factory description (registry-based construction replaces hardcoded match)
+- Update the snapshot testing description to cover new providers
+
+**`docs/guidebook/15-progressive-build-plan.md`:**
+- Move Phase 13 from "Planned" to "Complete" in the status table
+- Fill in the Phase 13 detail section with what was built
+- Update Gap 5 (OpenAI ResponsesProvider) as resolved
+- Add any new gaps discovered during implementation
+
+**`docs/guidebook/01-architecture-overview.md`:**
+- If any crate responsibilities changed (they shouldn't materially), update the table
+
+### Project root files
+
+**`README.md`:**
+- Update the "Supported Providers" or "Getting Started" section (if present) to list OpenAI, Anthropic, Gemini, and OpenAI Responses
+- Update any example configuration shown in the README to use registry format
+- Mention the `oxydra catalog fetch` / `oxydra catalog verify` commands if the README covers CLI usage
+
+### Workspace config examples
+
+**`.oxydra/agent.toml`** (if a default/example exists in the repo):
+- Update to use registry-based provider config format
+
+### Verification gates
+
+- All example TOML snippets in documentation are valid and parse correctly (can be validated with a test that loads each snippet)
+- No references to the old `providers.openai` / `providers.anthropic` flat config format remain in documentation
+- Guidebook chapters are internally consistent — no chapter references removed types or old patterns
+
+---
+
 ## Dependency graph
 
 ```
@@ -675,6 +742,7 @@ Step 1 (ModelDescriptor schema)
               ├── Step 5 (Gemini provider)
               └── Step 6 (Responses provider)
 Step 8 depends on all of 1–7
+Step 9 depends on all of 1–8
 ```
 
 Steps 5 and 6 can be implemented in parallel once Step 4 is complete.
@@ -682,22 +750,30 @@ Step 7 can be implemented in parallel with Steps 3–6 once Step 1 is complete.
 
 ---
 
-## Migration notes
+## What gets removed
 
-### Breaking changes
+The following are deleted entirely (no backward compatibility shims):
 
-- `pinned_model_catalog.json` format changes from flat array to provider-keyed map. This is a build-time-only artifact; no runtime migration needed.
-- `ModelDescriptor` struct changes. All code that accesses `ModelDescriptor.caps` directly must switch to `derive_caps()` or use the provider's `capabilities()` method.
-- `AgentConfig::validate()` relaxes the provider check from hardcoded strings to registry resolution. This is backward-compatible (old configs still work).
+- `OpenAIProviderConfig` and `AnthropicProviderConfig` structs in `types/src/config.rs`
+- The old `ProviderConfigs` struct with `openai` / `anthropic` fields
+- `OPENAI_PROVIDER_ID`, `ANTHROPIC_PROVIDER_ID`, `OPENAI_DEFAULT_BASE_URL`, `ANTHROPIC_DEFAULT_BASE_URL` constants in `types/src/config.rs`
+- `OpenAIConfig` and `AnthropicConfig` structs in `provider/src/openai.rs` and `provider/src/anthropic.rs`
+- `resolve_api_key()` and `resolve_anthropic_api_key()` functions in `provider/src/lib.rs`
+- Provider-specific constants in `provider/src/lib.rs` (`OPENAI_PROVIDER_ID`, `ANTHROPIC_PROVIDER_ID`)
+- The old `ModelDescriptor` with its `provider`, `model`, `display_name`, `caps`, `deprecated` fields
+- The old flat-array `pinned_model_catalog.json` format
+- The hardcoded `match config.selection.provider.0.as_str()` in `tui/bootstrap.rs`
+- `ProviderOverrides` / `OpenAIProviderOverrides` / `AnthropicProviderOverrides` structs in `tui/bootstrap.rs`
+- The old `providers.toml` separate config file pattern (provider config now lives in `agent.toml` under `[providers.registry.*]`)
 
-### What stays the same
+## What stays the same
 
 - `Provider` trait — unchanged
 - `StreamItem` enum — unchanged
 - `ReliableProvider` — unchanged
 - `ProviderStream` type alias — unchanged
 - Runtime agent loop — unchanged (it only uses `Provider` trait + `ProviderCaps`)
-- `SseDataParser` — extended (new event-aware mode), existing mode unchanged
+- `ProviderCaps` struct — unchanged (derivation source changes, but the struct itself is the same)
 
 ---
 
@@ -708,6 +784,5 @@ Step 7 can be implemented in parallel with Steps 3–6 once Step 1 is complete.
 | models.dev schema changes | Pin to a snapshot; runtime never fetches; regen is explicit operator action |
 | Responses API `previous_response_id` unreliable (known issue) | Implement desync detection + fallback to full history resend |
 | Gemini tool calling edge cases | Implement text-only streaming first; tool support second; set `supports_tools` via overlay |
-| Backward-compat config breakage | Legacy flat fields always synthesized as fallback; registry is purely additive |
 | Large catalog snapshot size | Filter to relevant providers only (openai, anthropic, google) at regen time |
 | SSE event-type parsing for Responses API | Extend `SseDataParser` to capture `event:` lines; test against recorded payloads |

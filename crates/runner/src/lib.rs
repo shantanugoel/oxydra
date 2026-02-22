@@ -336,18 +336,14 @@ pub fn provision_user_workspace(
     // Create directories first so canonicalize can resolve the path.
     for dir_name in [SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME, LOGS_DIR_NAME] {
         let path = root.join(dir_name);
-        fs::create_dir_all(&path).map_err(|source| RunnerError::ProvisionWorkspace {
-            path,
-            source,
-        })?;
+        fs::create_dir_all(&path)
+            .map_err(|source| RunnerError::ProvisionWorkspace { path, source })?;
     }
 
     // Canonicalize the root to an absolute path so that Docker sandbox VM
     // file sharing directories and container bind mounts receive real paths.
-    let root = fs::canonicalize(&root).map_err(|source| RunnerError::ProvisionWorkspace {
-        path: root,
-        source,
-    })?;
+    let root = fs::canonicalize(&root)
+        .map_err(|source| RunnerError::ProvisionWorkspace { path: root, source })?;
     let shared = root.join(SHARED_DIR_NAME);
     let tmp = root.join(TMP_DIR_NAME);
     let vault = root.join(VAULT_DIR_NAME);
@@ -1248,6 +1244,8 @@ struct DockerContainerLaunchParams {
     endpoint: DockerEndpoint,
     container_name: String,
     image: String,
+    role: RunnerGuestRole,
+    user_id: String,
     workspace: UserWorkspace,
     mounts: EffectiveMountPaths,
     resource_limits: RunnerResourceLimits,
@@ -1290,6 +1288,35 @@ async fn launch_docker_container_async(
             })?;
     }
 
+    // Compute entrypoint/cmd before binds consumes workspace paths.
+    let (entrypoint, cmd) = match params.role {
+        RunnerGuestRole::OxydraVm => {
+            let mut cmd_args = vec![
+                "--user-id".to_owned(),
+                params.user_id,
+                "--workspace-root".to_owned(),
+                params.workspace.root.to_string_lossy().into_owned(),
+            ];
+            if params.bootstrap_file.is_some() {
+                cmd_args.push("--bootstrap-file".to_owned());
+                cmd_args.push(CONTAINER_BOOTSTRAP_MOUNT_PATH.to_owned());
+            }
+            (vec!["/usr/local/bin/oxydra-vm".to_owned()], cmd_args)
+        }
+        RunnerGuestRole::ShellVm => {
+            let socket_path = params
+                .workspace
+                .tmp
+                .join("shell-daemon.sock")
+                .to_string_lossy()
+                .into_owned();
+            (
+                vec!["/usr/local/bin/shell-daemon".to_owned()],
+                vec!["--socket".to_owned(), socket_path],
+            )
+        }
+    };
+
     let mut binds: Vec<String> = [
         params.workspace.root,
         params.mounts.shared,
@@ -1324,9 +1351,12 @@ async fn launch_docker_container_async(
     let config = ContainerCreateBody {
         image: Some(params.image),
         labels: Some(params.labels),
+        entrypoint: Some(entrypoint),
+        cmd: Some(cmd),
         env: if env.is_empty() { None } else { Some(env) },
         host_config: Some(HostConfig {
             binds: Some(binds),
+            network_mode: Some("host".to_owned()),
             nano_cpus: params
                 .resource_limits
                 .max_vcpus

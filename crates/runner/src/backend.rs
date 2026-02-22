@@ -435,6 +435,8 @@ impl CrateSandboxBackend {
             endpoint: endpoint.clone(),
             container_name: container_name.clone(),
             image: image.to_owned(),
+            role,
+            user_id: request.user_id.clone(),
             workspace: request.workspace.clone(),
             mounts: request.mounts.clone(),
             resource_limits: request.resource_limits.clone(),

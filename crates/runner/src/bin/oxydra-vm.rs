@@ -28,6 +28,8 @@ struct OxydraVmArgs {
     workspace_root: PathBuf,
     #[arg(long = "bootstrap-stdin")]
     bootstrap_stdin: bool,
+    #[arg(long = "bootstrap-file", env = "OXYDRA_BOOTSTRAP_FILE")]
+    bootstrap_file: Option<PathBuf>,
     #[arg(long = "gateway-bind", default_value = DEFAULT_GATEWAY_BIND_ADDRESS)]
     gateway_bind: String,
 }
@@ -41,6 +43,12 @@ enum VmError {
     #[error("failed to read bootstrap frame from stdin {stage}: {source}")]
     ReadBootstrapFrame {
         stage: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read bootstrap file `{path}`: {source}")]
+    ReadBootstrapFile {
+        path: PathBuf,
         #[source]
         source: io::Error,
     },
@@ -80,6 +88,8 @@ async fn run() -> Result<(), VmError> {
 
     let bootstrap_frame = if args.bootstrap_stdin {
         Some(read_bootstrap_frame_from_stdin()?)
+    } else if let Some(ref path) = args.bootstrap_file {
+        Some(read_bootstrap_frame_from_file(path)?)
     } else {
         None
     };
@@ -171,6 +181,23 @@ fn gateway_endpoint(address: SocketAddr) -> String {
     format!("ws://{address}/ws")
 }
 
+fn read_bootstrap_frame_from_file(path: &Path) -> Result<Vec<u8>, VmError> {
+    let payload = fs::read(path).map_err(|source| VmError::ReadBootstrapFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    // Wrap raw JSON in a 4-byte big-endian length prefix to match the frame
+    // format that `bootstrap_vm_runtime` expects via `from_length_prefixed_json`.
+    let len = u32::try_from(payload.len()).map_err(|_| VmError::ReadBootstrapFile {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidData, "bootstrap file too large"),
+    })?;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
 fn read_bootstrap_frame_from_stdin() -> Result<Vec<u8>, VmError> {
     let mut stdin = io::stdin().lock();
     read_bootstrap_frame_from_reader(&mut stdin)
@@ -224,6 +251,51 @@ mod tests {
         assert_eq!(args.workspace_root, PathBuf::from("/tmp/workspace"));
         assert!(!args.bootstrap_stdin);
         assert_eq!(args.gateway_bind, DEFAULT_GATEWAY_BIND_ADDRESS);
+    }
+
+    #[test]
+    fn vm_args_accept_bootstrap_file_flag() {
+        let args = OxydraVmArgs::try_parse_from([
+            "oxydra-vm",
+            "--user-id",
+            "alice",
+            "--workspace-root",
+            "/tmp/workspace",
+            "--bootstrap-file",
+            "/run/oxydra/bootstrap",
+        ])
+        .expect("args should parse with bootstrap file flag");
+        assert_eq!(
+            args.bootstrap_file,
+            Some(PathBuf::from("/run/oxydra/bootstrap"))
+        );
+        assert!(!args.bootstrap_stdin);
+    }
+
+    #[test]
+    fn bootstrap_frame_from_file_wraps_with_length_prefix() {
+        let root = temp_dir("file-frame");
+        let bootstrap = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Container,
+            workspace_root: "/tmp/oxydra/alice".to_owned(),
+            sidecar_endpoint: None,
+            runtime_policy: None,
+            startup_status: None,
+        };
+        let json_bytes = serde_json::to_vec(&bootstrap).expect("should serialize");
+        let file_path = root.join("bootstrap.json");
+        fs::write(&file_path, &json_bytes).expect("should write test file");
+
+        let frame = read_bootstrap_frame_from_file(&file_path).expect("should read bootstrap file");
+
+        // First 4 bytes are big-endian length prefix.
+        assert!(frame.len() >= 4);
+        let len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+        assert_eq!(len, json_bytes.len());
+        assert_eq!(&frame[4..], &json_bytes);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

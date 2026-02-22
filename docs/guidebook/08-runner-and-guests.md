@@ -67,12 +67,14 @@ pub struct RunnerBootstrapEnvelope {
 
 ### Transport
 
-- **Process tier:** Written to the guest's `stdin` as a 4-byte length prefix (big-endian u32) followed by JSON bytes
-- **Container/MicroVM tier:** Similar mechanism via container stdin or socket
+- **Process tier:** Written to the guest's `stdin` as a 4-byte length prefix (big-endian u32) followed by JSON bytes. The guest reads with `--bootstrap-stdin`.
+- **Container/MicroVM tier:** The runner writes the bootstrap envelope as a plain JSON file to `<workspace>/tmp/bootstrap/runner_bootstrap.json`, which is bind-mounted into the container at `/run/oxydra/bootstrap`. The guest reads it with `--bootstrap-file /run/oxydra/bootstrap`. The file reader wraps the raw JSON in a 4-byte length prefix internally so `bootstrap_vm_runtime` receives the same frame format regardless of transport.
+
+The `--bootstrap-file` flag also accepts the `OXYDRA_BOOTSTRAP_FILE` environment variable as a fallback, which the container launcher sets automatically.
 
 ### Consumption
 
-The `oxydra-vm` binary reads the envelope from stdin (when `--bootstrap-stdin` is set) and passes it to `runner::bootstrap_vm_runtime`:
+The `oxydra-vm` binary reads the envelope from stdin (`--bootstrap-stdin`) or from a file (`--bootstrap-file <PATH>`) and passes it to `runner::bootstrap_vm_runtime`:
 
 1. Loads `AgentConfig` from config files
 2. Initializes the LLM provider based on `selection.provider`
@@ -112,11 +114,21 @@ When `--insecure` is passed:
 
 **File:** `runner/src/bin/oxydra-vm.rs`
 
-The `oxydra-vm` binary is the guest-side entry point:
+The `oxydra-vm` binary is the guest-side entry point. It accepts the following flags:
+
+| Flag | Description |
+|------|-------------|
+| `--user-id <ID>` | Required. User identifier. |
+| `--workspace-root <PATH>` | Required. Root of the user workspace. |
+| `--bootstrap-stdin` | Read bootstrap envelope from stdin (Process tier). |
+| `--bootstrap-file <PATH>` | Read bootstrap envelope from a JSON file (Container/MicroVM tier). Also settable via `OXYDRA_BOOTSTRAP_FILE` env var. |
+| `--gateway-bind <ADDR>` | Gateway listen address (default `127.0.0.1:0`). |
+
+Startup sequence:
 
 ```
 1. Initialize tracing subscriber
-2. Read bootstrap envelope from stdin
+2. Read bootstrap envelope (stdin via --bootstrap-stdin, or file via --bootstrap-file, or None)
 3. Load AgentConfig (figment layered config)
 4. Validate config (version, provider, limits)
 5. Build Provider (OpenAI or Anthropic + ReliableProvider wrapper)
@@ -130,9 +142,17 @@ The `oxydra-vm` binary is the guest-side entry point:
 
 ## Shell Daemon
 
-**File:** `shell-daemon/src/lib.rs`
+**Files:** `shell-daemon/src/lib.rs` (library), `shell-daemon/src/bin/shell-daemon.rs` (binary)
 
-The shell daemon runs inside `shell-vm` and provides an RPC interface for shell command and browser session execution.
+The shell daemon runs inside `shell-vm` and provides an RPC interface for shell command and browser session execution. The standalone `shell-daemon` binary is a thin wrapper that accepts a `--socket <PATH>` argument, removes any stale socket file, binds a `UnixListener`, and delegates to `ShellDaemonServer::serve_unix_listener()`.
+
+In container/MicroVM tiers, the runner launches the `shell-vm` container with:
+```
+ENTRYPOINT ["/usr/local/bin/shell-daemon"]
+CMD ["--socket", "<workspace>/tmp/shell-daemon.sock"]
+```
+
+The socket path lives inside the bind-mounted workspace `tmp` directory, so the `oxydra-vm` container can reach it without any network configuration.
 
 ### Protocol
 
@@ -170,17 +190,54 @@ Two backends implement the `ShellSession` trait:
 
 ## Platform-Specific Backends
 
+### Container and MicroVM Launch Mechanics
+
+Both the Container and macOS MicroVM tiers use the same `launch_docker_container_async()` path. For each container the runner:
+
+1. **Removes** any existing container with the same name (force-remove)
+2. **Pulls** the image if it isn't present locally
+3. **Computes entrypoint and cmd** based on the guest role:
+   - `OxydraVm` → `ENTRYPOINT ["/usr/local/bin/oxydra-vm"]` with `CMD ["--user-id", "<id>", "--workspace-root", "<path>", "--bootstrap-file", "/run/oxydra/bootstrap"]`
+   - `ShellVm` → `ENTRYPOINT ["/usr/local/bin/shell-daemon"]` with `CMD ["--socket", "<workspace>/tmp/shell-daemon.sock"]`
+4. **Creates** the container with:
+   - Host networking (`network_mode: "host"`) — the gateway binds `127.0.0.1:0` inside the container, reachable from the host; the shell-daemon socket is in a bind-mounted directory
+   - Workspace and mount bind-mounts (deduplicated)
+   - Bootstrap file bind-mounted read-only at `/run/oxydra/bootstrap`
+   - Resource limits (CPU, memory, PID)
+   - Proxy environment variables for sandboxd-managed VMs
+5. **Starts** the container
+
+Container names follow the pattern `oxydra-{tier}-{user}-{role}` (e.g. `oxydra-container-alice-oxydra-vm`).
+
+### Guest Docker Images
+
+Guest images are built from `docker/Dockerfile`, a multi-stage Dockerfile with a shared Rust builder and two targets:
+
+```bash
+# Build both images
+./scripts/build-guest-images.sh
+
+# Or individually
+docker build --target oxydra-vm -t oxydra-vm:latest -f docker/Dockerfile .
+docker build --target shell-vm  -t shell-vm:latest  -f docker/Dockerfile .
+```
+
+The builder stage compiles both `oxydra-vm` and `shell-daemon` binaries. The final images use `debian:trixie-slim` with only `ca-certificates` installed.
+
+Image names are configured in `runner.toml` under `[guest_images]`:
+```toml
+[guest_images]
+oxydra_vm = "oxydra-vm:latest"
+shell_vm  = "shell-vm:latest"
+```
+
 ### Linux (Container Tier)
 
-Uses `bollard` (Docker API) to:
-- Pull/build guest images
-- Create containers with workspace bind mounts
-- Configure networking and resource limits
-- Start container pairs (oxydra-vm + shell-vm)
+Uses `bollard` (Docker API) to connect to the local Docker daemon and launch container pairs directly.
 
-### macOS (Container Tier)
+### macOS (MicroVM Tier)
 
-Interacts with `docker-sandboxd` via a Unix socket to provision Docker-managed VMs, which host the guest containers. This adds an extra layer of indirection on macOS where native VM support differs from Linux.
+Interacts with `docker-sandboxd` via a Unix socket to provision Docker-managed VMs, which host the guest containers. This adds an extra layer of indirection on macOS where native VM support differs from Linux. Guest images are transferred into the sandboxd VM via `docker save | docker --host unix://vm-socket load`.
 
 ## Startup Status Reporting
 

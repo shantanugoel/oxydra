@@ -5282,6 +5282,7 @@ name = "shell-daemon"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "clap",
  "futures-util",
  "serde_json",
  "thiserror 2.0.18",

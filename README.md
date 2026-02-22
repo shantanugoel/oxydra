@@ -39,7 +39,25 @@ export GEMINI_API_KEY=your-key
 cargo build --workspace
 ```
 
-### 3. Docker socket (macOS)
+### 3. Build guest Docker images
+
+The container and MicroVM isolation tiers run `oxydra-vm` and `shell-daemon` inside Docker containers. You must build the guest images before using these tiers:
+
+```bash
+./scripts/build-guest-images.sh
+```
+
+This produces two images: `oxydra-vm:latest` (agent runtime) and `shell-vm:latest` (shell/browser sidecar). These names match the defaults in `examples/config/runner.toml`.
+
+To tag a specific version:
+
+```bash
+./scripts/build-guest-images.sh v0.2.0
+```
+
+Then update `[guest_images]` in your `runner.toml` to reference the tag.
+
+### 4. Docker socket (macOS)
 
 When using the container isolation tier, the runner connects to Docker via the default socket path. On macOS, if you use a Docker runtime other than Docker Desktop (e.g. Colima, Rancher Desktop, or Lima), you must set `DOCKER_HOST` to point at the correct socket:
 
@@ -48,13 +66,21 @@ When using the container isolation tier, the runner connects to Docker via the d
 export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 ```
 
-### 4. Run
+### 5. Run
 
-Start a runner for a user (process-tier isolation):
+**Process tier** (no Docker required, isolation is degraded):
 
 ```bash
 cargo run -p runner -- --config .oxydra/runner.toml --user alice --insecure
 ```
+
+**Container tier** (requires guest images from step 3):
+
+```bash
+cargo run -p runner -- --config .oxydra/runner.toml --user alice
+```
+
+The runner spawns two containers per user: one for the agent runtime (`oxydra-vm`) and one for the shell/browser sidecar (`shell-vm`). Both use host networking and bind-mount the user workspace.
 
 Connect the TUI to a running session:
 

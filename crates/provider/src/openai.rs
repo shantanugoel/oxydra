@@ -713,15 +713,16 @@ impl ToolCallAccumulator {
         if let Some(name) = function.name {
             entry.name = Some(name);
         }
-        if let Some(arguments) = function.arguments {
-            entry.arguments.push_str(&arguments);
+        let fragment = function.arguments;
+        if let Some(ref args) = fragment {
+            entry.arguments.push_str(args);
         }
 
         ToolCallDelta {
             index,
             id: entry.id.clone(),
             name: entry.name.clone(),
-            arguments: (!entry.arguments.is_empty()).then(|| entry.arguments.clone()),
+            arguments: fragment,
         }
     }
 }

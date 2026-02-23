@@ -735,7 +735,11 @@ mod tool_call_accumulator {
                 index: ordinal,
                 id: entry.id.clone(),
                 name: entry.name.clone(),
-                arguments: (!entry.arguments.is_empty()).then(|| entry.arguments.clone()),
+                arguments: if partial_json.is_empty() {
+                    None
+                } else {
+                    Some(partial_json.to_owned())
+                },
             }
         }
     }
@@ -1250,7 +1254,7 @@ mod tool_call_accumulator_tests {
 
         let delta2 = acc.append_json(1, r#"c":"NYC"}"#);
         assert_eq!(delta2.index, 0);
-        assert_eq!(delta2.arguments.as_deref(), Some(r#"{"loc":"NYC"}"#));
+        assert_eq!(delta2.arguments.as_deref(), Some(r#"c":"NYC"}"#));
         // id and name are preserved across appends.
         assert_eq!(delta2.id.as_deref(), Some("id_a"));
         assert_eq!(delta2.name.as_deref(), Some("func_a"));
@@ -1306,11 +1310,11 @@ mod tool_call_accumulator_tests {
 
         let a2 = acc.append_json(0, r#"ath":"/"}"#);
         assert_eq!(a2.index, 0);
-        assert_eq!(a2.arguments.as_deref(), Some(r#"{"path":"/"}"#));
+        assert_eq!(a2.arguments.as_deref(), Some(r#"ath":"/"}"#));
 
         let b2 = acc.append_json(2, r#"":"v"}"#);
         assert_eq!(b2.index, 1);
-        assert_eq!(b2.arguments.as_deref(), Some(r#"{"q":"v"}"#));
+        assert_eq!(b2.arguments.as_deref(), Some(r#"":"v"}"#));
     }
 
     #[test]

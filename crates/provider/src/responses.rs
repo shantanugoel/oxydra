@@ -725,10 +725,10 @@ impl ResponsesToolCallAccumulator {
             index: ordinal as usize,
             id: entry.id.clone(),
             name: entry.name.clone(),
-            arguments: if entry.arguments.is_empty() {
+            arguments: if delta.is_empty() {
                 None
             } else {
-                Some(entry.arguments.clone())
+                Some(delta.to_owned())
             },
         }))
     }

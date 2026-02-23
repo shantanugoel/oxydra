@@ -453,9 +453,8 @@ fn tool_call_deltas_reassemble_arguments_across_payloads() {
             .expect("reassembled arguments should be present"),
         _ => panic!("expected tool-call delta item"),
     };
-    let parsed: serde_json::Value =
-        serde_json::from_str(arguments).expect("reassembled arguments should be valid JSON");
-    assert_eq!(parsed, json!({"path": "Cargo.toml"}));
+    // After fix: emitted delta carries only the new fragment, not the full accumulated string.
+    assert_eq!(arguments, "go.toml\"}");
 }
 
 #[test]
@@ -506,9 +505,8 @@ fn tool_call_deltas_reassemble_split_unicode_escape_sequences() {
             .expect("reassembled arguments should be present"),
         _ => panic!("expected tool-call delta item"),
     };
-    let parsed: serde_json::Value =
-        serde_json::from_str(arguments).expect("reassembled arguments should be valid JSON");
-    assert_eq!(parsed, json!({"emoji": "😀"}));
+    // After fix: emitted delta carries only the new fragment.
+    assert_eq!(arguments, "\\uDE00\"}");
 }
 
 #[test]
@@ -1219,7 +1217,7 @@ fn anthropic_stream_tool_call_accumulation() {
         })]
     );
 
-    // Second argument fragment — arguments accumulate.
+    // Second argument fragment — emitted delta carries only the new fragment.
     let delta2 = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ation\":\"NYC\"}"}}"#;
     let items = expect_items(parse_anthropic_stream_payload(
         delta2,
@@ -1233,7 +1231,7 @@ fn anthropic_stream_tool_call_accumulation() {
             index: 0,
             id: Some("toolu_1".to_owned()),
             name: Some("get_weather".to_owned()),
-            arguments: Some(r#"{"location":"NYC"}"#.to_owned()),
+            arguments: Some(r#"ation":"NYC"}"#.to_owned()),
         })]
     );
 }

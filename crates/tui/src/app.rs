@@ -32,12 +32,17 @@
 //!
 //! ## Reconnection
 //!
-//! When the WebSocket connection drops, reconnection is handled inside the
-//! main `select!` loop so user input (including Ctrl+C) is always
-//! processed. A timer arm fires at the next retry deadline; on failure the
-//! deadline is rescheduled with exponential back-off. A dummy channel is
-//! substituted for `gateway_rx` while disconnected so that arm never
-//! spins.
+//! When the WebSocket connection drops (or was never established), the TUI
+//! **stays alive** and enters a reconnecting state. Reconnection is handled
+//! entirely inside the main `select!` loop so user input (including Ctrl+C)
+//! is always processed. A timer arm fires at the next retry deadline; on
+//! failure the deadline is rescheduled with exponential back-off. A dummy
+//! channel is substituted for `gateway_rx` while disconnected so that arm
+//! never spins.
+//!
+//! The TUI starts in a reconnecting state even before the first connection
+//! attempt, so launching the TUI before the server is ready works
+//! transparently — the user never sees an error exit.
 //!
 //! ## Force-Quit Safety Net
 //!
@@ -327,51 +332,70 @@ impl TuiApp {
     /// Run the interactive TUI loop.
     ///
     /// This takes ownership of the terminal (raw mode, alternate screen) via
-    /// [`TerminalGuard`], connects to the gateway, and enters the main
-    /// `tokio::select!` loop. Returns when the user quits.
+    /// [`TerminalGuard`], then immediately enters the main `tokio::select!`
+    /// loop in a reconnecting state. The first connection attempt fires at
+    /// once; subsequent attempts use exponential back-off.
+    ///
+    /// The loop **never exits due to a connection failure** — only an explicit
+    /// user quit (Ctrl+C twice, Ctrl+D, Ctrl+Q) causes it to return.
     pub async fn run(&mut self) -> Result<(), TuiError> {
         // 1. Terminal setup.
         let _guard = TerminalGuard::setup()?;
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend).map_err(io::Error::other)?;
 
-        // 2. Initial WebSocket connection + Hello handshake.
-        let (mut gateway_rx, mut ws_tx, mut reader_handle, mut writer_handle) =
-            self.connect_and_handshake().await?;
-
-        // 3. Event reader (blocking thread for crossterm input).
-        let mut event_reader = EventReader::spawn(EVENT_READER_BUFFER);
-
-        // 4. Adapter listen stream (client frames from adapter -> ws writer).
+        // 2. Adapter listen stream — wired up once; survives reconnections.
+        //    `listen()` only creates an mpsc channel + broadcast subscriber,
+        //    so the unwrap is safe.
         let mut adapter_rx = self
             .adapter
             .listen(ADAPTER_LISTEN_BUFFER)
             .await
-            .map_err(|e| TuiError::Io(io::Error::other(e)))?;
+            .unwrap_or_else(|_| mpsc::channel(1).1);
 
-        // 5. Tick timer.
+        // 3. Event reader (blocking thread for crossterm input).
+        let mut event_reader = EventReader::spawn(EVENT_READER_BUFFER);
+
+        // 4. Tick timer.
         let mut tick = time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut last_health_check = Instant::now();
 
-        // 6. Reconnection state.
-        //
-        // When disconnected, `gateway_rx` is replaced with a dummy channel
-        // (whose sender is kept alive in `_dummy_gw_tx`) so the select arm
-        // blocks instead of spinning with repeated `None`s.
-        // `reconnect_next_retry` drives a timer arm that attempts one
-        // reconnection and re-schedules itself with back-off on failure.
-        let mut reconnect_next_retry: Option<tokio::time::Instant> = None;
-        let mut reconnect_attempt: u32 = 0;
-        let mut _dummy_gw_tx: Option<mpsc::Sender<GatewayServerFrame>> = None;
+        // 5. Start in a disconnected/reconnecting state with dummy channels.
+        //    The reconnect arm fires immediately (deadline = now), so the
+        //    first connection attempt happens on the very first loop iteration.
+        //    This means the TUI never exits due to an initial connection
+        //    failure — it just keeps retrying until the user quits.
+        let (dummy_gw_tx, dummy_gw_rx) = mpsc::channel::<GatewayServerFrame>(1);
+        let mut gateway_rx: mpsc::Receiver<GatewayServerFrame> = dummy_gw_rx;
+        let mut _dummy_gw_tx: Option<mpsc::Sender<GatewayServerFrame>> = Some(dummy_gw_tx);
 
-        // 7. Initial draw.
+        let (dummy_ws_tx, _dummy_ws_rx) = mpsc::channel::<GatewayClientFrame>(1);
+        let mut ws_tx: mpsc::Sender<GatewayClientFrame> = dummy_ws_tx;
+        // _dummy_ws_rx lives until first successful reconnect; writes to
+        // dummy ws_tx while disconnected are silently dropped.
+        let mut _dummy_ws_rx: Option<mpsc::Receiver<GatewayClientFrame>> = Some(_dummy_ws_rx);
+
+        let mut reader_handle: JoinHandle<()> = tokio::spawn(async {});
+        let mut writer_handle: JoinHandle<()> = tokio::spawn(async {});
+
+        // Schedule the first connection attempt immediately.
+        let mut reconnect_next_retry: Option<tokio::time::Instant> =
+            Some(tokio::time::Instant::now());
+        let mut reconnect_attempt: u32 = 0;
+
+        self.view_model.connection_state = ConnectionState::Reconnecting {
+            attempt: 1,
+            next_retry: Instant::now(),
+        };
+
+        // 6. Initial draw (shows "connecting…" status).
         {
             let adapter_state = self.adapter.state_snapshot().await;
             terminal.draw(|frame| render_app(frame, &self.view_model, &adapter_state))?;
         }
 
-        // 8. Main select! loop.
+        // 7. Main select! loop.
         loop {
             let needs_draw;
 
@@ -406,10 +430,10 @@ impl TuiApp {
                             _dummy_gw_tx = Some(dummy_gw_tx);
                             gateway_rx = dummy_gw_rx;
 
-                            // Replace ws_tx with a dummy. Sends will fail
+                            // Replace ws_tx with a null sender. Sends fail
                             // silently; that is fine because health checks
                             // and submit are gated on ConnectionState::Connected.
-                            let (dummy_ws_tx, _dummy_ws_rx) = mpsc::channel(1);
+                            let (dummy_ws_tx, _) = mpsc::channel::<GatewayClientFrame>(1);
                             ws_tx = dummy_ws_tx;
 
                             // Schedule the first reconnection attempt.
@@ -455,16 +479,17 @@ impl TuiApp {
                             ws_tx = new_ws_tx;
                             reader_handle = new_rh;
                             writer_handle = new_wh;
-                            _dummy_gw_tx = None; // Drop dummy sender.
+                            _dummy_gw_tx = None; // Drop dummy sender → dummy gateway_rx closes.
+                            _dummy_ws_rx = None; // Drop initial dummy ws receiver.
                             reconnect_next_retry = None;
                             last_health_check = Instant::now();
 
-                            // Re-create adapter listen stream for new outbound frames.
-                            adapter_rx = self
-                                .adapter
-                                .listen(ADAPTER_LISTEN_BUFFER)
-                                .await
-                                .map_err(|e| TuiError::Io(io::Error::other(e)))?;
+                            // Re-subscribe the adapter listen stream so
+                            // outbound frames from new prompts are forwarded.
+                            // listen() is infallible in practice (mpsc + broadcast).
+                            if let Ok(new_rx) = self.adapter.listen(ADAPTER_LISTEN_BUFFER).await {
+                                adapter_rx = new_rx;
+                            }
                         }
                         Err(_) => {
                             // Schedule next retry with increased backoff.
@@ -556,7 +581,7 @@ impl TuiApp {
             }
         }
 
-        // 9. Cleanup: abort WS tasks. TerminalGuard::drop restores terminal.
+        // 8. Cleanup: abort WS tasks. TerminalGuard::drop restores terminal.
         reader_handle.abort();
         writer_handle.abort();
 
@@ -564,78 +589,6 @@ impl TuiApp {
     }
 
     // -- Connection helpers --------------------------------------------------
-
-    /// Connect WebSocket, split, spawn reader/writer, perform Hello handshake.
-    ///
-    /// Returns `(gateway_rx, ws_tx, reader_handle, writer_handle)`.
-    async fn connect_and_handshake(
-        &mut self,
-    ) -> Result<
-        (
-            mpsc::Receiver<GatewayServerFrame>,
-            mpsc::Sender<GatewayClientFrame>,
-            JoinHandle<()>,
-            JoinHandle<()>,
-        ),
-        TuiError,
-    > {
-        let socket = ws_connect(&self.gateway_endpoint).await?;
-        let (write_half, read_half) = socket.split();
-
-        let (gw_tx, mut gateway_rx) = mpsc::channel(GATEWAY_CHANNEL_CAPACITY);
-        let (ws_tx, ws_rx) = mpsc::channel(WS_WRITER_CHANNEL_CAPACITY);
-
-        let reader_handle = spawn_ws_reader(read_half, gw_tx);
-        let writer_handle = spawn_ws_writer(write_half, ws_rx);
-
-        // Send Hello frame.
-        let hello = self.adapter.build_hello_frame(next_request_id()).await;
-        ws_tx
-            .send(hello)
-            .await
-            .map_err(|_| TuiError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "ws_tx closed")))?;
-
-        // Wait for HelloAck.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(TuiError::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timeout waiting for HelloAck from gateway",
-                )));
-            }
-
-            let frame = tokio::time::timeout(remaining, gateway_rx.recv()).await;
-            match frame {
-                Ok(Some(f @ GatewayServerFrame::HelloAck(_))) => {
-                    self.adapter.apply_gateway_frame(&f).await;
-                    self.view_model.apply_server_frame(&f);
-                    self.view_model.connection_state = ConnectionState::Connected;
-                    break;
-                }
-                Ok(Some(other)) => {
-                    // Unexpected pre-handshake frame; process but keep waiting.
-                    self.adapter.apply_gateway_frame(&other).await;
-                    self.view_model.apply_server_frame(&other);
-                }
-                Ok(None) => {
-                    return Err(TuiError::Io(io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "gateway connection closed before HelloAck",
-                    )));
-                }
-                Err(_) => {
-                    return Err(TuiError::Io(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "timeout waiting for HelloAck from gateway",
-                    )));
-                }
-            }
-        }
-
-        Ok((gateway_rx, ws_tx, reader_handle, writer_handle))
-    }
 
     /// Single reconnection attempt: connect, split, handshake.
     async fn try_reconnect(

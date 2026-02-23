@@ -83,6 +83,22 @@ jitter          = false # Add randomized jitter to backoff
 # max_context_tokens = 200000   # Override default 128K context
 # max_output_tokens = 8192      # Override default 16K output
 
+# --- Tool-specific configuration ---
+# Structured alternative to OXYDRA_WEB_SEARCH_* environment variables.
+# Explicit env vars always take precedence over values set here.
+
+# [tools.web_search]
+# provider = "duckduckgo"                     # "duckduckgo" (default), "google", or "searxng"
+# base_url = "https://api.duckduckgo.com/"    # Override default base URL for the selected provider
+# base_urls = "https://url1,https://url2"     # Comma-separated fallback base URLs
+# api_key_env = "MY_GOOGLE_API_KEY"           # Env var name holding Google API key
+# engine_id_env = "MY_GOOGLE_CX"             # Env var name holding Google engine/CX ID
+# query_params = "key=value&key2=value2"      # Extra query parameters
+# # SearxNG-specific:
+# engines = "google,bing"                     # SearxNG search engines
+# categories = "general"                      # SearxNG categories
+# safesearch = 1                              # SearxNG safesearch level (0-2)
+
 # --- Catalog resolution and validation ---
 [catalog]
 skip_catalog_validation = false  # Set true to allow models not in the catalog

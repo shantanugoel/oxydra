@@ -23,6 +23,8 @@ pub struct AgentConfig {
     pub reliability: ReliabilityConfig,
     #[serde(default)]
     pub catalog: CatalogConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 impl Default for AgentConfig {
@@ -35,6 +37,7 @@ impl Default for AgentConfig {
             providers: ProviderConfigs::default(),
             reliability: ReliabilityConfig::default(),
             catalog: CatalogConfig::default(),
+            tools: ToolsConfig::default(),
         }
     }
 }
@@ -477,6 +480,52 @@ pub struct CatalogConfig {
     /// Optional URL for fetching the pinned catalog snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_url: Option<String>,
+}
+
+/// Tool-specific configuration.
+///
+/// Provides structured alternatives to `OXYDRA_WEB_SEARCH_*` environment
+/// variables. Values set here are applied as env vars at bootstrap time,
+/// but explicit env vars always take precedence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<WebSearchConfig>,
+}
+
+/// Web search provider configuration.
+///
+/// Maps to `OXYDRA_WEB_SEARCH_*` environment variables at bootstrap time.
+/// Explicit env vars take precedence over values set here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// Search provider: "duckduckgo" (default), "google", or "searxng".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Override the default base URL for the selected provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Comma-separated fallback base URLs for the selected provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_urls: Option<String>,
+    /// Name of the env var holding the Google API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Name of the env var holding the Google Custom Search engine ID (cx).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id_env: Option<String>,
+    /// Extra query parameters as `key=value&key2=value2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_params: Option<String>,
+    /// SearxNG search engines (comma-separated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engines: Option<String>,
+    /// SearxNG categories (comma-separated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<String>,
+    /// SearxNG safesearch level (0-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safesearch: Option<u8>,
 }
 
 /// Capability overrides specified on a per-registry-entry basis.

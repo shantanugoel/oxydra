@@ -147,8 +147,6 @@ struct DeleteArgs {
 #[derive(Debug, Deserialize)]
 struct WebFetchArgs {
     url: String,
-    output_format: Option<String>,
-    max_body_chars: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,7 +154,6 @@ struct WebSearchArgs {
     query: String,
     count: Option<u64>,
     freshness: Option<String>,
-    config: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,7 +318,7 @@ impl Tool for ReadTool {
 
         FunctionDecl::new(
             FILE_READ_TOOL_NAME,
-            Some("Read UTF-8 text from a file".to_owned()),
+            Some("Read the contents of a file and return its text. Path is relative to the working directory.".to_owned()),
             JsonSchema::object(properties, vec!["path".to_owned()]),
         )
     }
@@ -362,7 +359,7 @@ impl Tool for SearchTool {
 
         FunctionDecl::new(
             FILE_SEARCH_TOOL_NAME,
-            Some("Search recursively for lines containing the query text".to_owned()),
+            Some("Search recursively for lines matching a text query. Returns matching lines with file paths and line numbers. Use for finding code, configuration, or text patterns.".to_owned()),
             JsonSchema::object(properties, vec!["path".to_owned(), "query".to_owned()]),
         )
     }
@@ -400,7 +397,7 @@ impl Tool for ListTool {
 
         FunctionDecl::new(
             FILE_LIST_TOOL_NAME,
-            Some("List entries in a directory".to_owned()),
+            Some("List files and directories. Returns names with type indicators. Defaults to the current working directory if no path is given.".to_owned()),
             JsonSchema::object(properties, Vec::new()),
         )
     }
@@ -447,7 +444,7 @@ impl Tool for WriteTool {
 
         FunctionDecl::new(
             FILE_WRITE_TOOL_NAME,
-            Some("Write UTF-8 text to a file".to_owned()),
+            Some("Create or overwrite a file with the given content. Creates parent directories as needed. Path is relative to the working directory.".to_owned()),
             JsonSchema::object(properties, vec!["path".to_owned(), "content".to_owned()]),
         )
     }
@@ -493,7 +490,7 @@ impl Tool for EditTool {
 
         FunctionDecl::new(
             FILE_EDIT_TOOL_NAME,
-            Some("Edit a file by replacing one exact text occurrence".to_owned()),
+            Some("Edit a file by replacing an exact text snippet. old_text must match exactly one occurrence in the file. Use file_read first to see the current contents.".to_owned()),
             JsonSchema::object(
                 properties,
                 vec![
@@ -542,7 +539,7 @@ impl Tool for DeleteTool {
 
         FunctionDecl::new(
             FILE_DELETE_TOOL_NAME,
-            Some("Delete a file or directory".to_owned()),
+            Some("Delete a file or directory. Directories are removed recursively. Path is relative to the working directory.".to_owned()),
             JsonSchema::object(properties, vec!["path".to_owned()]),
         )
     }
@@ -576,20 +573,10 @@ impl Tool for WebFetchTool {
             "url".to_owned(),
             JsonSchema::new(JsonSchemaType::String).with_description("URL to fetch"),
         );
-        properties.insert(
-            "output_format".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Optional: auto (default), raw, text, metadata_only"),
-        );
-        properties.insert(
-            "max_body_chars".to_owned(),
-            JsonSchema::new(JsonSchemaType::Integer)
-                .with_description("Optional max number of body characters in output"),
-        );
 
         FunctionDecl::new(
             WEB_FETCH_TOOL_NAME,
-            Some("Fetch a URL and return structured, token-aware response content".to_owned()),
+            Some("Fetch a URL over HTTP and return its content. Returns status, content type, and body. HTML is automatically converted to readable text. Binary content returns metadata only.".to_owned()),
             JsonSchema::object(properties, vec!["url".to_owned()]),
         )
     }
@@ -600,11 +587,7 @@ impl Tool for WebFetchTool {
             &self.runner,
             WEB_FETCH_TOOL_NAME,
             WasmCapabilityProfile::Web,
-            &json!({
-                "url": request.url,
-                "output_format": request.output_format,
-                "max_body_chars": request.max_body_chars
-            }),
+            &json!({ "url": request.url }),
             None,
         )
         .await
@@ -637,16 +620,9 @@ impl Tool for WebSearchTool {
             JsonSchema::new(JsonSchemaType::String)
                 .with_description("Optional freshness filter: day, week, month, year"),
         );
-        properties.insert(
-            "config".to_owned(),
-            JsonSchema::new(JsonSchemaType::Object).with_description(
-                "Optional provider config: provider, base_url/base_urls, query_params, and provider-specific fields",
-            ),
-        );
-
         FunctionDecl::new(
             WEB_SEARCH_TOOL_NAME,
-            Some("Run a web search and return normalized provider results with optional provider config".to_owned()),
+            Some("Search the web and return a list of results with title, url, and snippet. Use web_fetch to retrieve full page content when needed.".to_owned()),
             JsonSchema::object(properties, vec!["query".to_owned()]),
         )
     }
@@ -660,8 +636,7 @@ impl Tool for WebSearchTool {
             &json!({
                 "query": request.query,
                 "count": request.count,
-                "freshness": request.freshness,
-                "config": request.config
+                "freshness": request.freshness
             }),
             None,
         )
@@ -694,7 +669,7 @@ impl Tool for VaultCopyToTool {
 
         FunctionDecl::new(
             VAULT_COPYTO_TOOL_NAME,
-            Some("Copy data from vault into shared/tmp via two-step WASM invocation".to_owned()),
+            Some("Copy a file from the vault into the shared workspace. source_path is within the vault; destination_path is within shared/tmp.".to_owned()),
             JsonSchema::object(
                 properties,
                 vec!["source_path".to_owned(), "destination_path".to_owned()],
@@ -749,7 +724,7 @@ impl Tool for BashTool {
 
         FunctionDecl::new(
             SHELL_EXEC_TOOL_NAME,
-            Some("Execute a shell command".to_owned()),
+            Some("Execute a shell command and return its output. Returns combined stdout and stderr.".to_owned()),
             JsonSchema::object(properties, vec!["command".to_owned()]),
         )
     }

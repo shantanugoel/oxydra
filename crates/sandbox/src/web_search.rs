@@ -82,7 +82,7 @@ pub(crate) async fn execute(http_client: &Client, arguments: &Value) -> Result<S
         ));
     }
 
-    let provider = search_provider_from_arguments(arguments)?;
+    let provider = search_provider_from_env()?;
     let (base_url, payload) = fetch_search_payload_with_fallbacks(
         http_client,
         &provider,
@@ -130,95 +130,6 @@ fn parse_optional_usize(
             .map_err(|_| format!("`{field_name}` is too large for this platform"));
     }
     Ok(default)
-}
-
-fn search_provider_from_arguments(arguments: &Value) -> Result<SearchProviderConfig, String> {
-    let mut config = search_provider_from_env()?;
-    let Some(overrides) = arguments.get("config") else {
-        return Ok(config);
-    };
-    let overrides = overrides
-        .as_object()
-        .ok_or_else(|| "`config` must be an object when provided".to_owned())?;
-    if overrides.contains_key("allow_private_base_urls") {
-        return Err(
-            "`config.allow_private_base_urls` is not supported; configure operator web egress policy via OXYDRA_WEB_EGRESS_* settings"
-                .to_owned(),
-        );
-    }
-
-    if let Some(provider) = overrides.get("provider").and_then(Value::as_str) {
-        config.kind = SearchProviderKind::parse(provider)?;
-        config.base_urls = provider_default_base_urls(config.kind);
-        config.query_params.clear();
-    }
-
-    let mut explicit_base_urls = Vec::new();
-    if let Some(base_url) = overrides.get("base_url").and_then(Value::as_str) {
-        let trimmed = base_url.trim();
-        if !trimmed.is_empty() {
-            explicit_base_urls.push(trimmed.to_owned());
-        }
-    }
-    if let Some(base_urls) = overrides.get("base_urls").and_then(Value::as_array) {
-        for entry in base_urls {
-            if let Some(url) = entry.as_str() {
-                let trimmed = url.trim();
-                if !trimmed.is_empty() {
-                    explicit_base_urls.push(trimmed.to_owned());
-                }
-            }
-        }
-    }
-    if !explicit_base_urls.is_empty() {
-        config.base_urls = dedupe_base_urls(explicit_base_urls);
-    }
-
-    if let Some(value) = overrides.get("api_key").and_then(Value::as_str) {
-        config.google_api_key = non_empty(Some(value.to_owned()));
-    }
-    if let Some(value) = overrides.get("engine_id").and_then(Value::as_str) {
-        config.google_engine_id = non_empty(Some(value.to_owned()));
-    }
-
-    if let Some(value) = overrides.get("engines").and_then(Value::as_str) {
-        config.searxng_engines = non_empty(Some(value.to_owned()));
-    }
-    if let Some(value) = overrides.get("categories").and_then(Value::as_str) {
-        config.searxng_categories = non_empty(Some(value.to_owned()));
-    }
-    if let Some(value) = overrides.get("safesearch") {
-        config.searxng_safesearch = value
-            .as_u64()
-            .and_then(|raw| u8::try_from(raw).ok())
-            .or_else(|| value.as_str().and_then(|raw| raw.parse::<u8>().ok()));
-    }
-    if let Some(query_params) = overrides.get("query_params").and_then(Value::as_object) {
-        for (key, value) in query_params {
-            if let Some(value) = query_param_value(value) {
-                config.query_params.insert(key.to_owned(), value);
-            }
-        }
-    }
-    if config.base_urls.is_empty() {
-        config.base_urls = provider_default_base_urls(config.kind);
-    }
-    if config.kind == SearchProviderKind::Searxng && config.base_urls.is_empty() {
-        return Err(
-            "searxng search provider requires a base_url/base_urls config or corresponding env values"
-                .to_owned(),
-        );
-    }
-    Ok(config)
-}
-
-fn query_param_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(raw) => non_empty(Some(raw.to_owned())),
-        Value::Number(raw) => Some(raw.to_string()),
-        Value::Bool(raw) => Some(raw.to_string()),
-        _ => None,
-    }
 }
 
 fn search_provider_from_env() -> Result<SearchProviderConfig, String> {
@@ -279,16 +190,6 @@ fn provider_base_urls_from_env(kind: SearchProviderKind) -> Vec<String> {
             "OXYDRA_WEB_SEARCH_SEARXNG_BASE_URLS",
             None,
         ),
-    }
-}
-
-fn provider_default_base_urls(kind: SearchProviderKind) -> Vec<String> {
-    match kind {
-        SearchProviderKind::DuckDuckGo => {
-            vec![DUCKDUCKGO_SEARCH_BASE_URL.trim_end_matches('/').to_owned()]
-        }
-        SearchProviderKind::Google => vec![GOOGLE_SEARCH_BASE_URL.trim_end_matches('/').to_owned()],
-        SearchProviderKind::Searxng => Vec::new(),
     }
 }
 
@@ -463,12 +364,10 @@ fn build_google_search_request(
     freshness: Option<&str>,
 ) -> Result<RequestBuilder, String> {
     let api_key = provider.google_api_key.as_ref().ok_or_else(|| {
-        "google search provider requires api_key in config or OXYDRA_WEB_SEARCH_GOOGLE_API_KEY"
-            .to_owned()
+        "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_API_KEY".to_owned()
     })?;
     let engine_id = provider.google_engine_id.as_ref().ok_or_else(|| {
-        "google search provider requires engine_id in config or OXYDRA_WEB_SEARCH_GOOGLE_CX"
-            .to_owned()
+        "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_CX".to_owned()
     })?;
     let mut params = vec![
         ("key".to_owned(), api_key.clone()),
@@ -864,47 +763,6 @@ fn truncate_text(value: &str, max_chars: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn arguments_config_can_override_provider_base_urls_and_query_params() {
-        let args = json!({
-            "query": "test",
-            "config": {
-                "provider": "searxng",
-                "base_urls": ["https://searx.one", "https://searx.two"],
-                "query_params": {
-                    "format": "json",
-                    "language": "en-US"
-                }
-            }
-        });
-        let config = search_provider_from_arguments(&args).expect("config overrides should parse");
-        assert_eq!(config.kind, SearchProviderKind::Searxng);
-        assert_eq!(
-            config.base_urls,
-            vec![
-                "https://searx.one".to_owned(),
-                "https://searx.two".to_owned()
-            ]
-        );
-        assert_eq!(
-            config.query_params.get("language").map(String::as_str),
-            Some("en-US")
-        );
-    }
-
-    #[test]
-    fn arguments_config_rejects_allow_private_override() {
-        let args = json!({
-            "query": "test",
-            "config": {
-                "allow_private_base_urls": true
-            }
-        });
-        let error = search_provider_from_arguments(&args)
-            .expect_err("allow_private_base_urls override should be rejected");
-        assert!(error.contains("allow_private_base_urls"));
-    }
 
     #[test]
     fn duckduckgo_parser_collects_abstract_and_related_topics() {

@@ -21,7 +21,7 @@ use types::{
 use super::*;
 
 #[tool]
-/// Read UTF-8 text from a file
+/// Read the contents of a file and return its text. Path is relative to the working directory.
 async fn file_read(path: String) -> String {
     path
 }

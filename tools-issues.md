@@ -302,7 +302,7 @@ runtime validation. Either:
 
 ---
 
-## Issue 3: Internal Configuration Leaked to LLM via Tool Schemas
+## Issue 3: Internal Configuration Leaked to LLM via Tool Schemas - RESOLVED
 
 ### Symptoms
 

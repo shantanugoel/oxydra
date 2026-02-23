@@ -19,7 +19,7 @@ use tools::{RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_run
 use types::{
     AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, Memory, MemoryError,
     ModelCatalog, ModelDescriptor, Provider, ProviderError, ProviderId, RunnerBootstrapEnvelope,
-    StartupStatusReport,
+    StartupStatusReport, WebSearchConfig,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -443,6 +443,9 @@ pub async fn bootstrap_vm_runtime_with_paths(
         .map(RunnerBootstrapEnvelope::from_length_prefixed_json)
         .transpose()?;
     let config = load_agent_config_with_paths(paths, profile, cli_overrides)?;
+    if let Some(ws_config) = config.tools.web_search.as_ref() {
+        apply_web_search_config(ws_config);
+    }
     let provider = build_provider(&config)?;
     let memory = build_memory_backend(&config).await?;
     let runtime_limits = runtime_limits(&config);
@@ -462,6 +465,81 @@ pub async fn bootstrap_vm_runtime_with_paths(
         tool_availability: availability,
         startup_status,
     })
+}
+
+/// Applies `[tools.web_search]` config values as `OXYDRA_WEB_SEARCH_*`
+/// environment variables. Only sets variables that are not already present,
+/// so explicit env vars always take precedence over config file values.
+fn apply_web_search_config(config: &WebSearchConfig) {
+    fn set_if_absent(key: &str, value: &str) {
+        if !value.is_empty() && env::var(key).is_err() {
+            // SAFETY: called during single-threaded bootstrap before tool execution begins.
+            unsafe { env::set_var(key, value) };
+        }
+    }
+
+    let provider = config
+        .provider
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    if !provider.is_empty() {
+        set_if_absent("OXYDRA_WEB_SEARCH_PROVIDER", &provider);
+    }
+
+    let provider_upper = provider.to_ascii_uppercase();
+
+    if let Some(base_url) = config.base_url.as_deref() {
+        if !provider_upper.is_empty() {
+            set_if_absent(
+                &format!("OXYDRA_WEB_SEARCH_{provider_upper}_BASE_URL"),
+                base_url,
+            );
+        }
+    }
+    if let Some(base_urls) = config.base_urls.as_deref() {
+        if !provider_upper.is_empty() {
+            set_if_absent(
+                &format!("OXYDRA_WEB_SEARCH_{provider_upper}_BASE_URLS"),
+                base_urls,
+            );
+        }
+    }
+
+    // api_key_env and engine_id_env are indirection: the config value names the
+    // env var holding the actual secret, and we copy it into the canonical var.
+    if provider == "google" {
+        if let Some(api_key_env) = config.api_key_env.as_deref() {
+            if let Ok(api_key) = env::var(api_key_env) {
+                set_if_absent("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY", &api_key);
+            }
+        }
+        if let Some(engine_id_env) = config.engine_id_env.as_deref() {
+            if let Ok(engine_id) = env::var(engine_id_env) {
+                set_if_absent("OXYDRA_WEB_SEARCH_GOOGLE_CX", &engine_id);
+            }
+        }
+    }
+
+    if let Some(query_params) = config.query_params.as_deref() {
+        set_if_absent("OXYDRA_WEB_SEARCH_QUERY_PARAMS", query_params);
+    }
+
+    // SearxNG-specific fields
+    if let Some(engines) = config.engines.as_deref() {
+        set_if_absent("OXYDRA_WEB_SEARCH_SEARXNG_ENGINES", engines);
+    }
+    if let Some(categories) = config.categories.as_deref() {
+        set_if_absent("OXYDRA_WEB_SEARCH_SEARXNG_CATEGORIES", categories);
+    }
+    if let Some(safesearch) = config.safesearch {
+        set_if_absent(
+            "OXYDRA_WEB_SEARCH_SEARXNG_SAFESEARCH",
+            &safesearch.to_string(),
+        );
+    }
 }
 
 fn merge_directory(mut figment: Figment, directory: &Path, selected_profile: &str) -> Figment {
@@ -1177,6 +1255,180 @@ catalog_provider = "openai"
         let provider = build_reliable_provider(&config)
             .expect("provider from custom registry entry should build");
         assert_eq!(provider.provider_id(), &ProviderId::from("my-proxy"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_web_search_config_sets_provider_and_base_url_env_vars() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _clear_provider = EnvGuard::remove("OXYDRA_WEB_SEARCH_PROVIDER");
+        let _clear_base_url = EnvGuard::remove("OXYDRA_WEB_SEARCH_GOOGLE_BASE_URL");
+        let _clear_query_params = EnvGuard::remove("OXYDRA_WEB_SEARCH_QUERY_PARAMS");
+
+        let config = WebSearchConfig {
+            provider: Some("google".to_owned()),
+            base_url: Some("https://custom-google.example/v1".to_owned()),
+            query_params: Some("lr=lang_en".to_owned()),
+            ..WebSearchConfig::default()
+        };
+        apply_web_search_config(&config);
+
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_PROVIDER").ok().as_deref(),
+            Some("google")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_GOOGLE_BASE_URL")
+                .ok()
+                .as_deref(),
+            Some("https://custom-google.example/v1")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_QUERY_PARAMS").ok().as_deref(),
+            Some("lr=lang_en")
+        );
+    }
+
+    #[test]
+    fn apply_web_search_config_does_not_override_existing_env_vars() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _existing_provider =
+            EnvGuard::set("OXYDRA_WEB_SEARCH_PROVIDER", "duckduckgo-explicit");
+
+        let config = WebSearchConfig {
+            provider: Some("google".to_owned()),
+            ..WebSearchConfig::default()
+        };
+        apply_web_search_config(&config);
+
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_PROVIDER").ok().as_deref(),
+            Some("duckduckgo-explicit"),
+            "explicit env var should take precedence over config"
+        );
+    }
+
+    #[test]
+    fn apply_web_search_config_resolves_google_api_key_via_indirection() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _clear_provider = EnvGuard::remove("OXYDRA_WEB_SEARCH_PROVIDER");
+        let _clear_api_key = EnvGuard::remove("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY");
+        let _clear_cx = EnvGuard::remove("OXYDRA_WEB_SEARCH_GOOGLE_CX");
+        let _set_indirect_key = EnvGuard::set("MY_GOOGLE_KEY", "secret-key-123");
+        let _set_indirect_cx = EnvGuard::set("MY_GOOGLE_CX", "engine-456");
+
+        let config = WebSearchConfig {
+            provider: Some("google".to_owned()),
+            api_key_env: Some("MY_GOOGLE_KEY".to_owned()),
+            engine_id_env: Some("MY_GOOGLE_CX".to_owned()),
+            ..WebSearchConfig::default()
+        };
+        apply_web_search_config(&config);
+
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY")
+                .ok()
+                .as_deref(),
+            Some("secret-key-123")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_GOOGLE_CX").ok().as_deref(),
+            Some("engine-456")
+        );
+    }
+
+    #[test]
+    fn apply_web_search_config_sets_searxng_specific_fields() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _clear_provider = EnvGuard::remove("OXYDRA_WEB_SEARCH_PROVIDER");
+        let _clear_base_url = EnvGuard::remove("OXYDRA_WEB_SEARCH_SEARXNG_BASE_URL");
+        let _clear_engines = EnvGuard::remove("OXYDRA_WEB_SEARCH_SEARXNG_ENGINES");
+        let _clear_categories = EnvGuard::remove("OXYDRA_WEB_SEARCH_SEARXNG_CATEGORIES");
+        let _clear_safesearch = EnvGuard::remove("OXYDRA_WEB_SEARCH_SEARXNG_SAFESEARCH");
+
+        let config = WebSearchConfig {
+            provider: Some("searxng".to_owned()),
+            base_url: Some("https://searx.example".to_owned()),
+            engines: Some("google,bing".to_owned()),
+            categories: Some("general".to_owned()),
+            safesearch: Some(1),
+            ..WebSearchConfig::default()
+        };
+        apply_web_search_config(&config);
+
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_PROVIDER").ok().as_deref(),
+            Some("searxng")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_SEARXNG_BASE_URL")
+                .ok()
+                .as_deref(),
+            Some("https://searx.example")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_SEARXNG_ENGINES")
+                .ok()
+                .as_deref(),
+            Some("google,bing")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_SEARXNG_CATEGORIES")
+                .ok()
+                .as_deref(),
+            Some("general")
+        );
+        assert_eq!(
+            env::var("OXYDRA_WEB_SEARCH_SEARXNG_SAFESEARCH")
+                .ok()
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn load_agent_config_parses_tools_web_search_section() {
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_dir("tools-web-search");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[tools.web_search]
+provider = "searxng"
+base_url = "https://searx.example"
+engines = "google,bing"
+safesearch = 2
+"#,
+        );
+
+        let config = load_agent_config_with_paths(&paths, None, CliOverrides::default())
+            .expect("config with tools.web_search should load");
+
+        let ws = config
+            .tools
+            .web_search
+            .expect("web_search config should be present");
+        assert_eq!(ws.provider.as_deref(), Some("searxng"));
+        assert_eq!(ws.base_url.as_deref(), Some("https://searx.example"));
+        assert_eq!(ws.engines.as_deref(), Some("google,bing"));
+        assert_eq!(ws.safesearch, Some(2));
 
         let _ = fs::remove_dir_all(root);
     }

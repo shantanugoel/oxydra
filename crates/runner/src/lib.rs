@@ -346,7 +346,13 @@ pub fn provision_user_workspace(
     let root = workspace_root.as_ref().join(user_id);
 
     // Create directories first so canonicalize can resolve the path.
-    for dir_name in [SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME, LOGS_DIR_NAME, IPC_DIR_NAME] {
+    for dir_name in [
+        SHARED_DIR_NAME,
+        TMP_DIR_NAME,
+        VAULT_DIR_NAME,
+        LOGS_DIR_NAME,
+        IPC_DIR_NAME,
+    ] {
         let path = root.join(dir_name);
         fs::create_dir_all(&path)
             .map_err(|source| RunnerError::ProvisionWorkspace { path, source })?;

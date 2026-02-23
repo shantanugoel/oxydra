@@ -14,8 +14,8 @@ use tokio::net::UnixListener;
 use tokio::time::sleep;
 use tools_macros::tool;
 use types::{
-    RunnerBootstrapEnvelope, RunnerResolvedMountPaths, RunnerResourceLimits,
-    RunnerRuntimePolicy, SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
+    RunnerBootstrapEnvelope, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
+    SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
 };
 
 use super::*;
@@ -315,7 +315,10 @@ fn macro_generated_schema_matches_read_tool_contract() {
     // Macro-generated schemas do not include descriptions; verify the top-level
     // structure (type, required, property types) matches the runtime schema.
     assert_eq!(generated.parameters["type"], "object");
-    assert_eq!(generated.parameters["required"], runtime.parameters["required"]);
+    assert_eq!(
+        generated.parameters["required"],
+        runtime.parameters["required"]
+    );
     assert_eq!(
         generated.parameters["properties"]["path"]["type"],
         runtime.parameters["properties"]["path"]["type"]

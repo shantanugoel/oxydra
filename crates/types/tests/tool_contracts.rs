@@ -56,7 +56,10 @@ fn function_decl_supports_full_json_schema_keywords() {
     );
 
     let encoded = serde_json::to_value(&schema).expect("schema should serialize");
-    assert_eq!(encoded["parameters"]["properties"]["freshness"]["enum"][0], "day");
+    assert_eq!(
+        encoded["parameters"]["properties"]["freshness"]["enum"][0],
+        "day"
+    );
     assert_eq!(encoded["parameters"]["properties"]["count"]["minimum"], 1);
     assert_eq!(encoded["parameters"]["properties"]["count"]["maximum"], 10);
     assert_eq!(encoded["parameters"]["properties"]["query"]["minLength"], 1);

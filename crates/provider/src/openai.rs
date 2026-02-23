@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, Message, MessageRole, ModelCatalog,
-    Provider, ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall,
-    ToolCallDelta, UsageUpdate,
+    Context, FunctionDecl, Message, MessageRole, ModelCatalog, Provider, ProviderError, ProviderId,
+    ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
 };
 
 use crate::{

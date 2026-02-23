@@ -705,8 +705,7 @@ impl TuiApp {
                 let now = Instant::now();
                 if let Some(last) = self.last_ctrl_c_at {
                     if now.duration_since(last) <= FORCE_QUIT_WINDOW {
-                        self.consecutive_ctrl_c =
-                            self.consecutive_ctrl_c.saturating_add(1);
+                        self.consecutive_ctrl_c = self.consecutive_ctrl_c.saturating_add(1);
                     } else {
                         self.consecutive_ctrl_c = 1;
                     }

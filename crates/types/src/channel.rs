@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::model::RuntimeProgressEvent;
 use crate::StartupStatusReport;
+use crate::model::RuntimeProgressEvent;
 use crate::{ChannelError, Response};
 
 pub const GATEWAY_PROTOCOL_VERSION: u16 = 1;

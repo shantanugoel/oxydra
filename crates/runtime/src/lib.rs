@@ -287,14 +287,16 @@ impl AgentRuntime {
 
             // Notify listeners about the upcoming tool execution batch.
             if let Some(ref sender) = stream_events {
-                let tool_names: Vec<String> =
-                    tool_calls.iter().map(|tc| tc.name.clone()).collect();
+                let tool_names: Vec<String> = tool_calls.iter().map(|tc| tc.name.clone()).collect();
                 let names_display = tool_names.join(", ");
                 let _ = sender.send(StreamItem::Progress(RuntimeProgressEvent {
                     kind: RuntimeProgressKind::ToolExecution {
                         tool_names: tool_names.clone(),
                     },
-                    message: format!("[{turn}/{}] Executing tools: {names_display}", self.limits.max_turns),
+                    message: format!(
+                        "[{turn}/{}] Executing tools: {names_display}",
+                        self.limits.max_turns
+                    ),
                     turn,
                     max_turns: self.limits.max_turns,
                 }));

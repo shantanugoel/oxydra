@@ -319,7 +319,10 @@ fn which_tui_binary() -> Result<PathBuf, CliError> {
 /// `oxydra-vm` after it binds the WebSocket listener. Returns the endpoint URL
 /// once the marker is readable and non-empty, or an error if the timeout
 /// elapses first.
-fn wait_for_gateway_endpoint(ipc_dir: &std::path::Path, timeout: Duration) -> Result<String, CliError> {
+fn wait_for_gateway_endpoint(
+    ipc_dir: &std::path::Path,
+    timeout: Duration,
+) -> Result<String, CliError> {
     use std::time::Instant;
     let marker = ipc_dir.join(GATEWAY_ENDPOINT_MARKER_FILE);
     let started = Instant::now();

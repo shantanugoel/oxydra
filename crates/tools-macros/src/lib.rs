@@ -148,8 +148,7 @@ fn map_parameter_type_to_type_str(parameter_type: &Type) -> syn::Result<&'static
     if matches_path_type(
         parameter_type,
         &[
-            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
-            "usize",
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
         ],
     ) {
         return Ok("integer");

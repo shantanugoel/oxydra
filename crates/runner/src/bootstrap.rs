@@ -1297,8 +1297,7 @@ catalog_provider = "openai"
         let _lock = test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _existing_provider =
-            EnvGuard::set("OXYDRA_WEB_SEARCH_PROVIDER", "duckduckgo-explicit");
+        let _existing_provider = EnvGuard::set("OXYDRA_WEB_SEARCH_PROVIDER", "duckduckgo-explicit");
 
         let config = WebSearchConfig {
             provider: Some("google".to_owned()),
@@ -1333,9 +1332,7 @@ catalog_provider = "openai"
         apply_web_search_config(&config);
 
         assert_eq!(
-            env::var("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY")
-                .ok()
-                .as_deref(),
+            env::var("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY").ok().as_deref(),
             Some("secret-key-123")
         );
         assert_eq!(

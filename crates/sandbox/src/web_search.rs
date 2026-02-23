@@ -369,9 +369,10 @@ fn build_google_search_request(
     let api_key = provider.google_api_key.as_ref().ok_or_else(|| {
         "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_API_KEY".to_owned()
     })?;
-    let engine_id = provider.google_engine_id.as_ref().ok_or_else(|| {
-        "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_CX".to_owned()
-    })?;
+    let engine_id = provider
+        .google_engine_id
+        .as_ref()
+        .ok_or_else(|| "google search provider requires OXYDRA_WEB_SEARCH_GOOGLE_CX".to_owned())?;
     let mut params = vec![
         ("key".to_owned(), api_key.clone()),
         ("cx".to_owned(), engine_id.clone()),

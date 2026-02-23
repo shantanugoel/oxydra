@@ -40,10 +40,7 @@ impl ToolRegistry {
     }
 
     pub fn schemas(&self) -> Vec<FunctionDecl> {
-        self.tools
-            .values()
-            .map(|tool| tool.schema())
-            .collect()
+        self.tools.values().map(|tool| tool.schema()).collect()
     }
 
     pub fn set_security_policy(&mut self, policy: Arc<dyn SecurityPolicy>) {

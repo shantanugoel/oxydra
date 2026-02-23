@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, Message, MessageRole, ModelCatalog,
-    Provider, ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall,
-    ToolCallDelta, UsageUpdate,
+    Context, FunctionDecl, Message, MessageRole, ModelCatalog, Provider, ProviderError, ProviderId,
+    ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
 };
 
 use crate::{
@@ -441,7 +440,11 @@ pub(crate) struct GeminiPart {
     /// Opaque token included by Gemini 2.5 thinking models at the Part level.
     /// Must be echoed back verbatim when replaying the conversation history or
     /// Gemini returns HTTP 400 "missing thought_signature".
-    #[serde(rename = "thoughtSignature", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "thoughtSignature",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) thought_signature: Option<String>,
 }
 
@@ -623,9 +626,10 @@ pub(crate) fn normalize_gemini_response(
                 text_chunks.push(text.clone());
             }
             if let Some(fc) = &part.function_call {
-                let metadata = part.thought_signature.as_deref().map(|sig| {
-                    serde_json::json!({ "thought_signature": sig })
-                });
+                let metadata = part
+                    .thought_signature
+                    .as_deref()
+                    .map(|sig| serde_json::json!({ "thought_signature": sig }));
                 tool_calls.push(ToolCall {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: fc.name.clone(),
@@ -707,9 +711,10 @@ pub(crate) fn normalize_gemini_stream_chunk(
                 }
                 if let Some(fc) = &part.function_call {
                     let id = uuid::Uuid::new_v4().to_string();
-                    let metadata = part.thought_signature.as_deref().map(|sig| {
-                        serde_json::json!({ "thought_signature": sig })
-                    });
+                    let metadata = part
+                        .thought_signature
+                        .as_deref()
+                        .map(|sig| serde_json::json!({ "thought_signature": sig }));
                     items.push(StreamItem::ToolCallDelta(ToolCallDelta {
                         index: tool_call_index,
                         id: Some(id),

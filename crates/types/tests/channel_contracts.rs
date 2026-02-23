@@ -4,8 +4,8 @@ use types::{
     GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
     GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewayTurnCancelled,
     GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted, GatewayTurnState,
-    GatewayTurnStatus, Message, MessageRole, Response, RuntimeProgressEvent,
-    RuntimeProgressKind, SandboxTier, StartupStatusReport,
+    GatewayTurnStatus, Message, MessageRole, Response, RuntimeProgressEvent, RuntimeProgressKind,
+    SandboxTier, StartupStatusReport,
 };
 
 fn sample_session() -> GatewaySession {

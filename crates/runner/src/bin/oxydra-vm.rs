@@ -334,7 +334,8 @@ mod tests {
         let address: SocketAddr = "127.0.0.1:42001"
             .parse()
             .expect("socket address should parse");
-        let marker_path = write_gateway_endpoint_marker(&root, address).expect("marker should write");
+        let marker_path =
+            write_gateway_endpoint_marker(&root, address).expect("marker should write");
         assert!(
             marker_path.starts_with(root.join("ipc")),
             "marker file should be under workspace ipc/"

@@ -244,9 +244,10 @@ impl<'a> InputBar<'a> {
         let total_row = logical_row + wrapped_row_offset;
 
         // +1 for the left border.
-        let cx = area.x.saturating_add(1).saturating_add(
-            u16::try_from(cursor_col_on_screen).unwrap_or(u16::MAX),
-        );
+        let cx = area
+            .x
+            .saturating_add(1)
+            .saturating_add(u16::try_from(cursor_col_on_screen).unwrap_or(u16::MAX));
         // +1 for the top border.
         let cy = area
             .y

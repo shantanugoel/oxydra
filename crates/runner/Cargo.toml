@@ -28,5 +28,5 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 toml = "1.0"
 tools = { path = "../tools" }
 tracing = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 types = { path = "../types" }

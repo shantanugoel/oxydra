@@ -9,6 +9,21 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
     let manifest_path = Path::new(&manifest_dir);
 
+    let guest_output_dir = manifest_path.join("guest");
+    let wasm_dest = guest_output_dir.join("oxydra_wasm_guest.wasm");
+
+    // If caller pre-built and copied the wasm, skip the nested cargo invocation entirely
+    if env::var("OXYDRA_WASM_PREBUILT").is_ok() {
+        if !wasm_dest.exists() {
+            panic!(
+                "OXYDRA_WASM_PREBUILT is set but wasm artifact not found at {}",
+                wasm_dest.display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", wasm_dest.display());
+        return;
+    }
+
     // Workspace root is two levels up from crates/sandbox/
     let workspace_root = manifest_path
         .parent()
@@ -25,17 +40,17 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", guest_cargo_toml.display());
 
-    let guest_output_dir = manifest_path.join("guest");
-    let wasm_dest = guest_output_dir.join("oxydra_wasm_guest.wasm");
-
     compile_wasm_guest(&guest_cargo_toml, workspace_root, &wasm_dest);
 }
 
 fn compile_wasm_guest(guest_cargo_toml: &Path, workspace_root: &Path, wasm_dest: &Path) {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
 
-    // The output .wasm lives in the workspace target directory.
-    let wasm_output = workspace_root.join("target/wasm32-wasip1/release/oxydra_wasm_guest.wasm");
+    // Use a separate target dir to avoid deadlocking on the outer build's file lock
+    let wasm_target_dir = workspace_root.join("target/wasm-guest-build");
+
+    // The output .wasm lives in the separate target directory.
+    let wasm_output = wasm_target_dir.join("wasm32-wasip1/release/oxydra_wasm_guest.wasm");
 
     let status = Command::new(&cargo)
         .args([
@@ -46,6 +61,8 @@ fn compile_wasm_guest(guest_cargo_toml: &Path, workspace_root: &Path, wasm_dest:
             "--manifest-path",
         ])
         .arg(guest_cargo_toml)
+        .arg("--target-dir")
+        .arg(&wasm_target_dir)
         .status()
         .unwrap_or_else(|e| {
             panic!(

@@ -211,18 +211,17 @@ Container names follow the pattern `oxydra-{tier}-{user}-{role}` (e.g. `oxydra-c
 
 ### Guest Docker Images
 
-Guest images are built from `docker/Dockerfile`, a multi-stage Dockerfile with a shared Rust builder and two targets:
+Guest images can be built from `docker/Dockerfile` (full in-Docker build) or from `docker/Dockerfile.prebuilt` after local cross-compilation.
 
 ```bash
-# Build both images
-./scripts/build-guest-images.sh
+# Local cross-compilation (recommended)
+./scripts/build-guest-images.sh arm64
 
-# Or individually
-docker build --target oxydra-vm -t oxydra-vm:latest -f docker/Dockerfile .
-docker build --target shell-vm  -t shell-vm:latest  -f docker/Dockerfile .
+# Full in-Docker build
+./scripts/build-guest-images-in-docker.sh
 ```
 
-The builder stage compiles both `oxydra-vm` and `shell-daemon` binaries. The final images use `debian:trixie-slim` with only `ca-certificates` installed.
+The in-Docker build compiles both `oxydra-vm` and `shell-daemon` binaries in a shared Rust builder. The prebuilt path packages locally compiled binaries into `debian:trixie-slim` images.
 
 Image names are configured in `runner.toml` under `[guest_images]`:
 ```toml

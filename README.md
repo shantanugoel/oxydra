@@ -41,21 +41,38 @@ cargo build --workspace
 
 ### 3. Build guest Docker images
 
-The container and MicroVM isolation tiers run `oxydra-vm` and `shell-daemon` inside Docker containers. You must build the guest images before using these tiers:
+The container and MicroVM isolation tiers run `oxydra-vm` and `shell-daemon` inside Docker containers. You must build the guest images before using these tiers.
+
+#### Option A — Local cross-compilation (recommended, faster)
+
+This cross-compiles the guest binaries on your host machine and packages them into lightweight Docker images. It requires [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) and [`zig`](https://ziglang.org/download/):
 
 ```bash
-./scripts/build-guest-images.sh
+# Install prerequisites (once)
+cargo install cargo-zigbuild
+brew install zig            # macOS — see ziglang.org for other platforms
 ```
 
-This produces two images: `oxydra-vm:latest` (agent runtime) and `shell-vm:latest` (shell/browser sidecar). These names match the defaults in `examples/config/runner.toml`.
-
-To tag a specific version:
+Then build for the target architecture:
 
 ```bash
-./scripts/build-guest-images.sh v0.2.0
+./scripts/build-guest-images.sh arm64          # Apple Silicon / ARM servers
+./scripts/build-guest-images.sh amd64          # Intel / AMD servers
+./scripts/build-guest-images.sh arm64 v0.2.0   # with a custom tag
 ```
 
-Then update `[guest_images]` in your `runner.toml` to reference the tag.
+#### Option B — Full in-Docker build (slower, no local toolchain needed)
+
+Builds everything inside a multi-stage Docker container. No cross-compilation toolchain required, but rebuilds the Rust toolchain each time:
+
+```bash
+./scripts/build-guest-images-in-docker.sh          # default tag: latest
+./scripts/build-guest-images-in-docker.sh v0.2.0   # custom tag
+```
+
+Both options produce two images: `oxydra-vm:latest` (agent runtime) and `shell-vm:latest` (shell/browser sidecar). These names match the defaults in `examples/config/runner.toml`.
+
+To use a custom tag, update `[guest_images]` in your `runner.toml` to reference it.
 
 ### 4. Docker socket (macOS)
 

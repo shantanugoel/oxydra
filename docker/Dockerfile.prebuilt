@@ -1,0 +1,64 @@
+# Lightweight Dockerfiles that package pre-built guest binaries.
+# Used by scripts/build-guest-images.sh after local cross-compilation.
+#
+# Build each target separately:
+#   docker build --build-arg BINARY=target/<triple>/release/oxydra-vm \
+#                --target oxydra-vm -t oxydra-vm:latest \
+#                -f docker/Dockerfile.prebuilt .
+#
+#   docker build --build-arg BINARY=target/<triple>/release/shell-daemon \
+#                --target shell-vm -t shell-vm:latest \
+#                -f docker/Dockerfile.prebuilt .
+
+# --- oxydra-vm image ---
+FROM debian:trixie-slim AS oxydra-vm
+
+ARG BINARY
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates musl \
+    && rm -rf /var/lib/apt/lists/*
+COPY ${BINARY} /usr/local/bin/oxydra-vm
+RUN chmod +x /usr/local/bin/oxydra-vm
+ENTRYPOINT ["/usr/local/bin/oxydra-vm"]
+
+# --- shell-vm (shell-daemon sidecar) image ---
+FROM debian:trixie-slim AS shell-vm
+
+ARG BINARY
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # essentials
+    ca-certificates \
+    curl \
+    wget \
+    # shell & scripting
+    bash \
+    jq \
+    python3 \
+    python3-pip \
+    # file operations
+    git \
+    unzip \
+    tar \
+    file \
+    ripgrep \
+    fd-find \
+    # text processing
+    sed \
+    gawk \
+    # network tools
+    dnsutils \
+    iputils-ping \
+    netcat-openbsd \
+    socat \
+    # process tools
+    procps \
+    lsof \
+    htop \
+    # build basics (agents often need to compile/run things)
+    make \
+    gcc \
+    # Browser
+    chromium \
+    && rm -rf /var/lib/apt/lists/*
+COPY ${BINARY} /usr/local/bin/shell-daemon
+RUN chmod +x /usr/local/bin/shell-daemon
+ENTRYPOINT ["/usr/local/bin/shell-daemon"]

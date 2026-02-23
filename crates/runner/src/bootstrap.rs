@@ -15,11 +15,14 @@ use provider::{ReliableProvider, RetryPolicy};
 use runtime::{ContextBudgetLimits, RetrievalLimits, RuntimeLimits, SummarizationLimits};
 use serde::Serialize;
 use thiserror::Error;
-use tools::{RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools};
+use tools::{
+    MemoryToolContext, RuntimeToolsBootstrap, ToolAvailability, ToolRegistry,
+    bootstrap_runtime_tools, register_memory_tools,
+};
 use types::{
-    AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, Memory, MemoryError,
-    ModelCatalog, ModelDescriptor, Provider, ProviderError, ProviderId, RunnerBootstrapEnvelope,
-    StartupStatusReport, WebSearchConfig,
+    AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
+    MemoryRetrieval, ModelCatalog, ModelDescriptor, Provider, ProviderError, ProviderId,
+    RunnerBootstrapEnvelope, StartupStatusReport, WebSearchConfig,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -55,11 +58,12 @@ pub struct VmBootstrapRuntime {
     pub bootstrap: Option<RunnerBootstrapEnvelope>,
     pub config: AgentConfig,
     pub provider: Box<dyn Provider>,
-    pub memory: Option<Arc<dyn Memory>>,
+    pub memory: Option<Arc<dyn MemoryRetrieval>>,
     pub runtime_limits: RuntimeLimits,
     pub tool_registry: ToolRegistry,
     pub tool_availability: ToolAvailability,
     pub startup_status: StartupStatusReport,
+    pub memory_tool_context: MemoryToolContext,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -396,10 +400,10 @@ pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, Bootstr
 
 pub async fn build_memory_backend(
     config: &AgentConfig,
-) -> Result<Option<Arc<dyn Memory>>, BootstrapError> {
+) -> Result<Option<Arc<dyn MemoryRetrieval>>, BootstrapError> {
     config.validate()?;
     let backend = LibsqlMemory::from_config(&config.memory).await?;
-    Ok(backend.map(|memory| Arc::new(memory) as Arc<dyn Memory>))
+    Ok(backend.map(|memory| Arc::new(memory) as Arc<dyn MemoryRetrieval>))
 }
 
 pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
@@ -450,9 +454,21 @@ pub async fn bootstrap_vm_runtime_with_paths(
     let memory = build_memory_backend(&config).await?;
     let runtime_limits = runtime_limits(&config);
     let RuntimeToolsBootstrap {
-        registry,
+        mut registry,
         availability,
     } = bootstrap_runtime_tools(bootstrap.as_ref()).await;
+
+    let memory_tool_context = MemoryToolContext::new();
+    if let Some(ref memory_retrieval) = memory {
+        register_memory_tools(
+            &mut registry,
+            memory_retrieval.clone(),
+            memory_tool_context.clone(),
+            config.memory.retrieval.vector_weight,
+            config.memory.retrieval.fts_weight,
+        );
+    }
+
     let startup_status = availability.startup_status(bootstrap.as_ref());
 
     Ok(VmBootstrapRuntime {
@@ -464,6 +480,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
         tool_registry: registry,
         tool_availability: availability,
         startup_status,
+        memory_tool_context,
     })
 }
 

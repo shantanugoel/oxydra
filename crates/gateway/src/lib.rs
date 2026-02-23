@@ -363,6 +363,7 @@ impl GatewayServer {
         tokio::spawn(async move {
             let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
             let runtime_future = runtime.run_turn(
+                &session.user_id,
                 &session.runtime_session_id,
                 send_turn.prompt,
                 cancellation,

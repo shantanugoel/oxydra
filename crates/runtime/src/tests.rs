@@ -443,6 +443,19 @@ impl MemoryRetrieval for RecordingMemory {
             current_epoch: request.next_epoch,
         })
     }
+
+    async fn store_note(
+        &self,
+        _session_id: &str,
+        _note_id: &str,
+        _content: &str,
+    ) -> Result<(), MemoryError> {
+        Ok(())
+    }
+
+    async fn delete_note(&self, _session_id: &str, _note_id: &str) -> Result<bool, MemoryError> {
+        Ok(false)
+    }
 }
 
 fn mock_provider(

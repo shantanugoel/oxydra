@@ -30,12 +30,18 @@ use types::{
 
 mod registry;
 
+pub mod memory_tools;
+
 #[cfg(test)]
 mod tests;
 
 pub use registry::{
     RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
     default_registry,
+};
+pub use memory_tools::{
+    MEMORY_DELETE_TOOL_NAME, MEMORY_SAVE_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
+    MEMORY_UPDATE_TOOL_NAME, MemoryToolContext, register_memory_tools,
 };
 
 pub const FILE_READ_TOOL_NAME: &str = "file_read";

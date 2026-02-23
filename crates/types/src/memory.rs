@@ -155,4 +155,24 @@ pub trait MemoryRetrieval: Memory {
         &self,
         request: MemorySummaryWriteRequest,
     ) -> Result<MemorySummaryWriteResult, MemoryError>;
+
+    /// Store a note in the given session with the specified `note_id`.
+    ///
+    /// The content is stored as a synthetic conversation event, chunked,
+    /// embedded, and indexed for hybrid search. The `note_id` is propagated
+    /// into each chunk's `metadata_json` so it can be queried by
+    /// [`Self::delete_note`].
+    async fn store_note(
+        &self,
+        session_id: &str,
+        note_id: &str,
+        content: &str,
+    ) -> Result<(), MemoryError>;
+
+    /// Delete all chunks and the conversation event associated with `note_id`
+    /// within the given session.
+    ///
+    /// Returns `true` if the note was found and deleted, `false` if nothing
+    /// matched.
+    async fn delete_note(&self, session_id: &str, note_id: &str) -> Result<bool, MemoryError>;
 }

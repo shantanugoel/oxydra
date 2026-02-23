@@ -11,12 +11,12 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 1 | Types + error hierarchy + tracing | **Complete** | All types, traits, error enums, tracing spans |
 | 2 | Provider trait + OpenAI (non-streaming) | **Complete** | Provider trait, OpenAI impl, model catalog. |
 | 3 | Streaming support + SSE parsing | **Complete** | OpenAI SSE streaming, StreamItem enum, bounded channels |
-| 4 | Tool trait + `#[tool]` macro + core tools | **Complete** | Tool trait, proc macro, file/shell/web/vault tools |
+| 4 | Tool trait + `#[tool]` macro + core tools | **Complete** | Tool trait, proc macro, file/shell/web/vault tools, LLM-callable memory tools |
 | 5 | Agent loop + cancellation + testing | **Complete** | Turn loop, CancellationToken, MockProvider, budget guards |
 | 6 | Self-correction + parallel tool execution | **Complete** | Validation error feedback, join_all for ReadOnly tools |
 | 7 | Anthropic provider + config + switching | **Complete** | Anthropic impl, figment config, ReliableProvider. |
 | 8 | Memory trait + libSQL persistence | **Complete** | Memory trait, libSQL, SQL migrations, session management |
-| 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
+| 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3, note storage/deletion API. **Gap: upsert_chunks unimplemented** |
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring. **Resolved:** multi-line input (Alt+Enter), runtime activity visibility (`TurnProgress`) |
@@ -89,6 +89,7 @@ Built the foundation layer with zero internal dependencies:
 - Core tools: file read/write/edit/delete/search/list, bash, web fetch/search, vault copy
 - `SafetyTier` enum: `ReadOnly`, `SideEffecting`, `Privileged`
 - `ToolRegistry` with policy enforcement (timeout, output truncation, safety tier gating)
+- LLM-callable memory tools: `memory_search` (ReadOnly), `memory_save`, `memory_update`, `memory_delete` (SideEffecting) — per-user scoped note management with UUID-based `note_id` identifiers, shared `MemoryToolContext` for user/session propagation, registered during bootstrap when memory is configured
 
 ### Phase 5: Agent Loop + Cancellation + Testing
 
@@ -142,6 +143,7 @@ Built the foundation layer with zero internal dependencies:
 - History filled newest-first, truncated when budget exhausted
 - Rolling summarization triggered by configurable token ratio threshold
 - `MemoryRetrieval` trait with hybrid search (vector cosine similarity + FTS5 BM25)
+- `MemoryRetrieval` extended with `store_note` and `delete_note` methods for direct note management (per-user scoped, UUID-based note identifiers, chunk metadata tagging)
 - `fastembed-rs` local embeddings (384-dimensional, ONNX-based)
 - `blake3` deterministic fallback (64-dimensional)
 - `chunks_fts` FTS5 virtual table for keyword search
@@ -346,7 +348,7 @@ These gaps do not block any currently completed phase's functionality but should
 
 - **Phase 1 types** are used unchanged through Phase 21
 - **Phase 2 Provider trait** — Phase 7 added Anthropic without changing the trait; future providers follow the same pattern
-- **Phase 4 Tool trait** with `safety_tier()` and `timeout()` — Phase 6 uses these for parallel execution, Phase 11 for WASM policy, Phase 17 for MCP
+- **Phase 4 Tool trait** with `safety_tier()` and `timeout()` — Phase 6 uses these for parallel execution, Phase 11 for WASM policy, Phase 17 for MCP; memory tools reuse the same `Tool` trait and `ToolRegistry` infrastructure without any trait changes
 - **Phase 5 CancellationToken** — Phase 15 reuses for subagent lifecycle management
 - **Phase 1 tracing** — Phase 16 upgrades subscriber to OpenTelemetry without changing instrumentation code
 - **Phase 8 SQL migrations** — Phase 9 added vector/FTS tables via migration, not schema wipe

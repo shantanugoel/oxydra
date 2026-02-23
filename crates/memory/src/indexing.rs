@@ -111,6 +111,16 @@ pub(crate) fn prepare_index_document(
     sequence: i64,
     payload: &serde_json::Value,
 ) -> Result<Option<PreparedIndexDocument>, MemoryError> {
+    prepare_index_document_with_extra_metadata(embedding_adapter, session_id, sequence, payload, None)
+}
+
+pub(crate) fn prepare_index_document_with_extra_metadata(
+    embedding_adapter: &EmbeddingAdapter,
+    session_id: &str,
+    sequence: i64,
+    payload: &serde_json::Value,
+    extra_metadata: Option<&serde_json::Value>,
+) -> Result<Option<PreparedIndexDocument>, MemoryError> {
     let Some(indexable_payload) = extract_indexable_payload(payload) else {
         return Ok(None);
     };
@@ -143,7 +153,7 @@ pub(crate) fn prepare_index_document(
         .enumerate()
     {
         let content_hash = stable_hash_hex(chunk_text.as_bytes());
-        let chunk_metadata_json = serde_json::to_string(&json!({
+        let mut chunk_metadata = json!({
             "source": indexable_payload.source,
             "role": indexable_payload.role,
             "sequence_start": sequence,
@@ -151,7 +161,16 @@ pub(crate) fn prepare_index_document(
             "chunk_index": chunk_index,
             "chunk_count": chunk_count,
             "tool_call_id": indexable_payload.tool_call_id.clone(),
-        }))?;
+        });
+        if let Some(extra) = extra_metadata
+            && let (Some(target), Some(source)) =
+                (chunk_metadata.as_object_mut(), extra.as_object())
+        {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        let chunk_metadata_json = serde_json::to_string(&chunk_metadata)?;
         chunks.push(PreparedChunk {
             chunk_id: format!(
                 "chunk:{session_id}:{sequence}:{chunk_index}:{}",

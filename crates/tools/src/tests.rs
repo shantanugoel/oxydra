@@ -637,3 +637,333 @@ impl Tool for SlowTool {
         SafetyTier::ReadOnly
     }
 }
+
+// ---------------------------------------------------------------------------
+// Memory tool tests
+// ---------------------------------------------------------------------------
+
+mod memory_tool_tests {
+    use std::sync::Arc;
+
+    use memory::LibsqlMemory;
+    use serde_json::json;
+    use types::{MemoryRetrieval, SafetyTier, Tool};
+
+    use crate::memory_tools::*;
+
+    fn temp_db_path(label: &str) -> String {
+        use std::{
+            env,
+            sync::atomic::{AtomicU64, Ordering},
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut path = env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should move forward")
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!(
+            "oxydra-tools-memory-{label}-{}-{unique}-{seq}.db",
+            std::process::id()
+        ));
+        path.to_string_lossy().to_string()
+    }
+
+    async fn test_memory_backend() -> Arc<dyn MemoryRetrieval> {
+        let db_path = temp_db_path("tool-test");
+        Arc::new(
+            LibsqlMemory::new_local(db_path)
+                .await
+                .expect("test memory should initialize"),
+        )
+    }
+
+    async fn test_context(user_id: &str, session_id: &str) -> MemoryToolContext {
+        let ctx = MemoryToolContext::new();
+        *ctx.user_id.lock().await = Some(user_id.to_owned());
+        *ctx.session_id.lock().await = Some(session_id.to_owned());
+        ctx
+    }
+
+    #[tokio::test]
+    async fn memory_search_tool_schema_is_valid() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+        let schema = tool.schema();
+        assert_eq!(schema.name, MEMORY_SEARCH_TOOL_NAME);
+        assert!(schema.description.is_some());
+        assert_eq!(schema.parameters["type"], "object");
+        assert!(schema.parameters["required"]
+            .as_array()
+            .expect("required should be array")
+            .iter()
+            .any(|v| v.as_str() == Some("query")));
+        assert_eq!(tool.safety_tier(), SafetyTier::ReadOnly);
+    }
+
+    #[tokio::test]
+    async fn memory_save_tool_schema_is_valid() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let tool = MemorySaveTool::new(memory, ctx);
+        let schema = tool.schema();
+        assert_eq!(schema.name, MEMORY_SAVE_TOOL_NAME);
+        assert!(schema.description.is_some());
+        assert!(schema.parameters["required"]
+            .as_array()
+            .expect("required should be array")
+            .iter()
+            .any(|v| v.as_str() == Some("content")));
+        assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
+    }
+
+    #[tokio::test]
+    async fn memory_update_tool_schema_is_valid() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let tool = MemoryUpdateTool::new(memory, ctx);
+        let schema = tool.schema();
+        assert_eq!(schema.name, MEMORY_UPDATE_TOOL_NAME);
+        let required = schema.parameters["required"]
+            .as_array()
+            .expect("required should be array");
+        assert!(required.iter().any(|v| v.as_str() == Some("note_id")));
+        assert!(required.iter().any(|v| v.as_str() == Some("content")));
+        assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
+    }
+
+    #[tokio::test]
+    async fn memory_delete_tool_schema_is_valid() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let tool = MemoryDeleteTool::new(memory, ctx);
+        let schema = tool.schema();
+        assert_eq!(schema.name, MEMORY_DELETE_TOOL_NAME);
+        assert!(schema.parameters["required"]
+            .as_array()
+            .expect("required should be array")
+            .iter()
+            .any(|v| v.as_str() == Some("note_id")));
+        assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
+    }
+
+    #[tokio::test]
+    async fn memory_save_returns_note_id() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let tool = MemorySaveTool::new(memory, ctx);
+
+        let result = tool
+            .execute(&json!({"content": "User likes pizza"}).to_string())
+            .await
+            .expect("save should succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result should be valid JSON");
+        let note_id = parsed["note_id"].as_str().expect("should have note_id");
+        assert!(
+            note_id.starts_with("note-"),
+            "note_id should start with 'note-'"
+        );
+        assert_eq!(parsed["message"].as_str(), Some("Note saved successfully."));
+    }
+
+    #[tokio::test]
+    async fn memory_save_rejects_empty_content() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let tool = MemorySaveTool::new(memory, ctx);
+
+        let error = tool
+            .execute(&json!({"content": "   "}).to_string())
+            .await
+            .expect_err("empty content should fail");
+        assert!(matches!(
+            error,
+            types::ToolError::InvalidArguments { tool, .. } if tool == MEMORY_SAVE_TOOL_NAME
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_search_returns_saved_notes() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let save_tool = MemorySaveTool::new(memory.clone(), ctx.clone());
+        let search_tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+
+        save_tool
+            .execute(&json!({"content": "User prefers dark mode"}).to_string())
+            .await
+            .expect("save should succeed");
+
+        let result = search_tool
+            .execute(&json!({"query": "dark mode"}).to_string())
+            .await
+            .expect("search should succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result should be JSON");
+        let results = parsed.as_array().expect("should be array");
+        assert!(!results.is_empty(), "search should return results");
+        let first = &results[0];
+        assert!(first["text"].as_str().unwrap_or("").contains("dark mode"));
+        assert_eq!(first["source"].as_str(), Some("user_memory"));
+        assert!(
+            !first["note_id"].as_str().unwrap_or("").is_empty(),
+            "note_id should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_delete_removes_note() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let save_tool = MemorySaveTool::new(memory.clone(), ctx.clone());
+        let delete_tool = MemoryDeleteTool::new(memory.clone(), ctx.clone());
+        let search_tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+
+        let save_result = save_tool
+            .execute(&json!({"content": "User likes chocolates"}).to_string())
+            .await
+            .expect("save should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&save_result).unwrap();
+        let note_id = parsed["note_id"].as_str().unwrap();
+
+        let delete_result = delete_tool
+            .execute(&json!({"note_id": note_id}).to_string())
+            .await
+            .expect("delete should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&delete_result).unwrap();
+        assert_eq!(
+            parsed["message"].as_str(),
+            Some("Note deleted successfully.")
+        );
+
+        let search_result = search_tool
+            .execute(&json!({"query": "chocolates"}).to_string())
+            .await
+            .expect("search should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&search_result).unwrap();
+        let results = parsed.as_array().unwrap();
+        assert!(
+            results.is_empty(),
+            "deleted note should not appear in search"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_delete_returns_error_for_nonexistent_note() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let delete_tool = MemoryDeleteTool::new(memory, ctx);
+
+        let error = delete_tool
+            .execute(&json!({"note_id": "note-nonexistent"}).to_string())
+            .await
+            .expect_err("delete of nonexistent note should fail");
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == MEMORY_DELETE_TOOL_NAME && message.contains("not found")
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_update_replaces_note_content() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let save_tool = MemorySaveTool::new(memory.clone(), ctx.clone());
+        let update_tool = MemoryUpdateTool::new(memory.clone(), ctx.clone());
+        let search_tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+
+        let save_result = save_tool
+            .execute(&json!({"content": "User's name is Shantanu"}).to_string())
+            .await
+            .expect("save should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&save_result).unwrap();
+        let note_id = parsed["note_id"].as_str().unwrap().to_owned();
+
+        let update_result = update_tool
+            .execute(&json!({"note_id": note_id, "content": "User prefers SG"}).to_string())
+            .await
+            .expect("update should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&update_result).unwrap();
+        assert_eq!(parsed["note_id"].as_str(), Some(note_id.as_str()));
+        assert_eq!(
+            parsed["message"].as_str(),
+            Some("Note updated successfully.")
+        );
+
+        let search_result = search_tool
+            .execute(&json!({"query": "name preference"}).to_string())
+            .await
+            .expect("search should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&search_result).unwrap();
+        let results = parsed.as_array().unwrap();
+        assert!(!results.is_empty(), "search should find the updated note");
+        let has_sg = results
+            .iter()
+            .any(|r| r["text"].as_str().unwrap_or("").contains("SG"));
+        assert!(has_sg, "updated note should contain 'SG'");
+    }
+
+    #[tokio::test]
+    async fn memory_update_returns_error_for_nonexistent_note() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let update_tool = MemoryUpdateTool::new(memory, ctx);
+
+        let error = update_tool
+            .execute(
+                &json!({"note_id": "note-nonexistent", "content": "new content"}).to_string(),
+            )
+            .await
+            .expect_err("update of nonexistent note should fail");
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == MEMORY_UPDATE_TOOL_NAME && message.contains("not found")
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_search_fails_without_user_context() {
+        let memory = test_memory_backend().await;
+        let ctx = MemoryToolContext::new();
+        let tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+
+        let error = tool
+            .execute(&json!({"query": "test"}).to_string())
+            .await
+            .expect_err("search without user context should fail");
+        assert!(matches!(
+            error,
+            types::ToolError::ExecutionFailed { tool, message }
+                if tool == MEMORY_SEARCH_TOOL_NAME && message.contains("user context")
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_memory_tools_adds_four_tools_to_registry() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice").await;
+        let mut registry = crate::ToolRegistry::default();
+
+        register_memory_tools(&mut registry, memory, ctx, 0.7, 0.3);
+
+        assert!(registry.get(MEMORY_SEARCH_TOOL_NAME).is_some());
+        assert!(registry.get(MEMORY_SAVE_TOOL_NAME).is_some());
+        assert!(registry.get(MEMORY_UPDATE_TOOL_NAME).is_some());
+        assert!(registry.get(MEMORY_DELETE_TOOL_NAME).is_some());
+
+        let schemas = registry.schemas();
+        let names: Vec<String> = schemas.iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&MEMORY_SEARCH_TOOL_NAME.to_owned()));
+        assert!(names.contains(&MEMORY_SAVE_TOOL_NAME.to_owned()));
+        assert!(names.contains(&MEMORY_UPDATE_TOOL_NAME.to_owned()));
+        assert!(names.contains(&MEMORY_DELETE_TOOL_NAME.to_owned()));
+    }
+}

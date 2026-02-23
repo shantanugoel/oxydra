@@ -221,7 +221,7 @@ impl TuiViewModel {
 
     /// Scroll down by one line.
     pub fn scroll_down(&mut self) {
-        self.scroll_offset += 1;
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
         // Note: auto_scroll is not re-enabled here; the caller should use
         // `scroll_to_bottom()` when the user explicitly jumps to the end.
     }

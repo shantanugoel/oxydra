@@ -106,6 +106,10 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `web_search` | `SideEffecting` | Performs web searches via configured providers |
 | `vault_copyto` | `SideEffecting` | Securely copies data from vault to shared/tmp workspace |
 | `shell_exec` | `Privileged` | Executes shell commands (via sidecar or host) |
+| `memory_search` | `ReadOnly` | Searches the user's personal memory store |
+| `memory_save` | `SideEffecting` | Saves a new note to the user's memory |
+| `memory_update` | `SideEffecting` | Replaces the content of an existing note by note_id |
+| `memory_delete` | `SideEffecting` | Deletes a note from the user's memory by note_id |
 
 Most tools (except `BashTool`) execute through the `HostWasmToolRunner`, which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
 
@@ -116,6 +120,41 @@ The `BashTool` operates in three modes determined by the bootstrap environment:
 1. **Host** — direct execution via `std::process::Command` (local development)
 2. **Session** — forwarded to a `ShellSession` in the shell-daemon sidecar (production)
 3. **Disabled** — rejects all execution if no safe execution environment is available
+
+### Memory Tools
+
+**File:** `tools/src/memory_tools.rs`
+
+Four LLM-callable tools expose the persistent memory system directly to the agent. They allow the LLM to proactively save, search, update, and delete user-scoped notes — turning passive memory retrieval into an active knowledge management capability.
+
+#### Per-User Scoping
+
+All memory tools operate within a per-user namespace using the session ID pattern `memory:{user_id}`. This ensures:
+- Each user has an isolated note store
+- Notes persist across conversation sessions
+- The LLM cannot access another user's memory
+
+#### Shared Context (`MemoryToolContext`)
+
+All four tools share a `MemoryToolContext` that holds the current `user_id` and `session_id` behind `Arc<Mutex<Option<String>>>`. The gateway sets these values at the start of each turn. If the user context is not set (e.g., during startup before a handshake), tool execution returns a descriptive error rather than silently failing.
+
+#### Tool Details
+
+| Tool | Parameters | Returns |
+|------|-----------|---------|
+| `memory_search` | `query` (required), `max_results` (optional, default 10) | JSON array of `{text, source, score, note_id}` results |
+| `memory_save` | `content` (required) | `{note_id, message}` with the generated `note-{uuid}` identifier |
+| `memory_update` | `note_id` (required), `content` (required) | `{note_id, message}` confirming the update |
+| `memory_delete` | `note_id` (required) | `{message}` confirming deletion |
+
+- `memory_search` uses the existing hybrid retrieval pipeline (vector + FTS5) with configurable `vector_weight` and `fts_weight` parameters.
+- `memory_save` generates a UUID-based `note_id` (format: `note-{uuid}`) and stores the content through `MemoryRetrieval::store_note`.
+- `memory_update` performs a delete-then-save under the same `note_id`, preserving the identifier while replacing content.
+- `memory_delete` removes all chunks and events associated with the `note_id`.
+
+#### Registration
+
+Memory tools are registered during bootstrap via `register_memory_tools()` when a memory backend is configured. The function takes a `ToolRegistry`, `Arc<dyn MemoryRetrieval>`, `MemoryToolContext`, and the retrieval weight parameters, then creates and registers all four tools.
 
 ## Tool Registry
 

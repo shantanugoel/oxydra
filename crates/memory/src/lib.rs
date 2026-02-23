@@ -19,6 +19,7 @@ use connection::{ConnectionStrategy, ensure_local_parent_directory};
 use errors::{connection_error, initialization_error, query_error};
 use indexing::{
     EmbeddingAdapter, decode_embedding_blob, index_prepared_document, prepare_index_document,
+    prepare_index_document_with_extra_metadata,
 };
 use schema::{
     enable_foreign_keys, ensure_migration_bookkeeping, rollback_quietly, run_pending_migrations,
@@ -659,6 +660,128 @@ impl MemoryRetrieval for LibsqlMemory {
             .map_err(|error| query_error(error.to_string()))?;
         Ok(result)
     }
+
+    async fn store_note(
+        &self,
+        session_id: &str,
+        note_id: &str,
+        content: &str,
+    ) -> Result<(), MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        // Build a synthetic message payload that the indexing pipeline can extract.
+        let payload = json!({
+            "role": "user",
+            "content": content,
+            "tool_call_id": note_id,
+        });
+        let payload_json = serde_json::to_string(&payload)?;
+
+        // Determine the next sequence for this session.
+        let next_sequence = next_event_sequence(&conn, session_id).await?;
+        let sequence = i64::try_from(next_sequence)
+            .map_err(|_| query_error("note sequence exceeds sqlite integer range".to_owned()))?;
+
+        let extra_metadata = json!({
+            "note_id": note_id,
+            "source": "memory_save",
+        });
+        let prepared_index = prepare_index_document_with_extra_metadata(
+            &self.embedding_adapter,
+            session_id,
+            sequence,
+            &payload,
+            Some(&extra_metadata),
+        )?;
+
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            conn.execute(
+                "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
+                 VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+                params![session_id],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            conn.execute(
+                "INSERT INTO conversation_events (session_id, sequence, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
+                params![session_id, sequence, payload_json],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            if let Some(index_document) = prepared_index.as_ref() {
+                index_prepared_document(&conn, session_id, sequence, index_document).await?;
+            }
+
+            Ok::<(), MemoryError>(())
+        }
+        .await;
+        if let Err(error) = transaction_result {
+            rollback_quietly(&conn).await;
+            return Err(error);
+        }
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_note(&self, session_id: &str, note_id: &str) -> Result<bool, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            // Find all chunk IDs whose metadata contains this note_id.
+            let chunk_ids = find_chunk_ids_by_note_id(&conn, session_id, note_id).await?;
+
+            // Delete matching chunks (CASCADE handles chunks_vec; triggers
+            // handle chunks_fts).
+            for chunk_id in &chunk_ids {
+                conn.execute(
+                    "DELETE FROM chunks WHERE chunk_id = ?1 AND session_id = ?2",
+                    params![chunk_id.as_str(), session_id],
+                )
+                .await
+                .map_err(|error| query_error(error.to_string()))?;
+            }
+
+            // Delete the conversation event whose payload carries this note_id
+            // in its tool_call_id field.
+            let deleted_events = conn
+                .execute(
+                    "DELETE FROM conversation_events
+                     WHERE session_id = ?1
+                       AND json_extract(payload_json, '$.tool_call_id') = ?2",
+                    params![session_id, note_id],
+                )
+                .await
+                .map_err(|error| query_error(error.to_string()))?;
+
+            Ok::<bool, MemoryError>(!chunk_ids.is_empty() || deleted_events > 0)
+        }
+        .await;
+        let found = match transaction_result {
+            Ok(found) => found,
+            Err(error) => {
+                rollback_quietly(&conn).await;
+                return Err(error);
+            }
+        };
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(found)
+    }
 }
 
 pub struct UnconfiguredMemory;
@@ -727,6 +850,19 @@ impl MemoryRetrieval for UnconfiguredMemory {
         &self,
         _request: MemorySummaryWriteRequest,
     ) -> Result<MemorySummaryWriteResult, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn store_note(
+        &self,
+        _session_id: &str,
+        _note_id: &str,
+        _content: &str,
+    ) -> Result<(), MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn delete_note(&self, _session_id: &str, _note_id: &str) -> Result<bool, MemoryError> {
         Err(Self::backend_unavailable())
     }
 }
@@ -859,6 +995,62 @@ async fn ensure_monotonic_sequence(
         )));
     }
     Ok(())
+}
+
+async fn next_event_sequence(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<u64, MemoryError> {
+    let mut rows = conn
+        .query(
+            "SELECT COALESCE(MAX(sequence), -1) FROM conversation_events WHERE session_id = ?1",
+            params![session_id],
+        )
+        .await
+        .map_err(|error| query_error(error.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| query_error(error.to_string()))?
+        .ok_or_else(|| query_error("failed to inspect existing sequence state".to_owned()))?;
+    let max_sequence = row
+        .get::<i64>(0)
+        .map_err(|error| query_error(error.to_string()))?;
+    if max_sequence < 0 {
+        Ok(1)
+    } else {
+        let next = u64::try_from(max_sequence)
+            .map_err(|_| query_error("stored sequence is negative".to_owned()))?;
+        Ok(next.saturating_add(1))
+    }
+}
+
+async fn find_chunk_ids_by_note_id(
+    conn: &Connection,
+    session_id: &str,
+    note_id: &str,
+) -> Result<Vec<String>, MemoryError> {
+    let mut rows = conn
+        .query(
+            "SELECT chunk_id FROM chunks
+             WHERE session_id = ?1
+               AND json_extract(metadata_json, '$.note_id') = ?2",
+            params![session_id, note_id],
+        )
+        .await
+        .map_err(|error| query_error(error.to_string()))?;
+    let mut chunk_ids = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| query_error(error.to_string()))?
+    {
+        let chunk_id = row
+            .get::<String>(0)
+            .map_err(|error| query_error(error.to_string()))?;
+        chunk_ids.push(chunk_id);
+    }
+    Ok(chunk_ids)
 }
 
 fn validate_hybrid_weights(vector_weight: f64, fts_weight: f64) -> Result<(), MemoryError> {

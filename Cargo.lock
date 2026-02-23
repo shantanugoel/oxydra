@@ -1973,6 +1973,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "tools",
  "tracing",
  "types",
  "url",
@@ -6113,6 +6114,7 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "memory",
  "sandbox",
  "serde",
  "serde_json",
@@ -6121,6 +6123,7 @@ dependencies = [
  "tools-macros",
  "tracing",
  "types",
+ "uuid",
 ]
 
 [[package]]

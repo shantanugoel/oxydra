@@ -34,6 +34,7 @@ impl ScriptedTurnRunner {
 impl GatewayTurnRunner for ScriptedTurnRunner {
     async fn run_turn(
         &self,
+        _user_id: &str,
         runtime_session_id: &str,
         prompt: String,
         cancellation: CancellationToken,

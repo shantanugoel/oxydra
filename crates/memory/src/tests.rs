@@ -1176,3 +1176,421 @@ fn assert_approx_eq(left: f64, right: f64) {
         "expected {left} ~= {right} within 1e-6"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Note lifecycle tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn store_note_creates_chunks_with_note_id_in_metadata() {
+    let db_path = temp_db_path("store-note-metadata");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    MemoryRetrieval::store_note(&backend, "memory:alice", "note-abc123", "User likes chocolate")
+        .await
+        .expect("store_note should succeed");
+
+    let conn = backend.connect().expect("backend should connect");
+    let mut rows = conn
+        .query(
+            "SELECT chunk_id, metadata_json FROM chunks WHERE session_id = ?1",
+            params!["memory:alice"],
+        )
+        .await
+        .expect("chunk query should run");
+    let mut found = false;
+    while let Some(row) = rows.next().await.expect("chunk row should read") {
+        found = true;
+        let metadata_json = row
+            .get::<String>(1)
+            .expect("metadata_json should be readable");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json).expect("metadata should parse");
+        assert_eq!(
+            metadata.get("note_id").and_then(|v| v.as_str()),
+            Some("note-abc123"),
+            "chunk metadata should carry note_id"
+        );
+        assert_eq!(
+            metadata.get("source").and_then(|v| v.as_str()),
+            Some("memory_save"),
+            "chunk metadata should carry source marker"
+        );
+    }
+    assert!(found, "at least one chunk should have been created");
+
+    drop(conn);
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn store_note_creates_searchable_conversation_event() {
+    let db_path = temp_db_path("store-note-event");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    MemoryRetrieval::store_note(&backend, "memory:alice", "note-ev1", "User prefers dark mode")
+        .await
+        .expect("store_note should succeed");
+
+    let conn = backend.connect().expect("backend should connect");
+    let mut rows = conn
+        .query(
+            "SELECT payload_json FROM conversation_events WHERE session_id = ?1",
+            params!["memory:alice"],
+        )
+        .await
+        .expect("event query should run");
+    let row = rows.next().await.expect("row read").expect("row exists");
+    let payload_json = row.get::<String>(0).expect("payload readable");
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload_json).expect("payload should parse");
+    assert_eq!(
+        payload.get("tool_call_id").and_then(|v| v.as_str()),
+        Some("note-ev1")
+    );
+    assert_eq!(
+        payload.get("content").and_then(|v| v.as_str()),
+        Some("User prefers dark mode")
+    );
+
+    drop(conn);
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn delete_note_removes_chunks_and_event() {
+    let db_path = temp_db_path("delete-note");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:alice",
+        "note-del1",
+        "User likes chocolates",
+    )
+    .await
+    .expect("store_note should succeed");
+
+    // Verify chunks exist before deletion
+    let conn = backend.connect().expect("backend should connect");
+    let mut count_rows = conn
+        .query(
+            "SELECT COUNT(*) FROM chunks WHERE session_id = ?1",
+            params!["memory:alice"],
+        )
+        .await
+        .expect("count query");
+    let count = count_rows
+        .next()
+        .await
+        .expect("row read")
+        .expect("row exists")
+        .get::<i64>(0)
+        .expect("count readable");
+    assert!(count > 0, "chunks should exist before deletion");
+    drop(count_rows);
+
+    let found =
+        MemoryRetrieval::delete_note(&backend, "memory:alice", "note-del1")
+            .await
+            .expect("delete_note should succeed");
+    assert!(found, "delete should report note was found");
+
+    // Verify chunks are gone
+    let mut count_rows = conn
+        .query(
+            "SELECT COUNT(*) FROM chunks WHERE session_id = ?1",
+            params!["memory:alice"],
+        )
+        .await
+        .expect("count query");
+    let count = count_rows
+        .next()
+        .await
+        .expect("row read")
+        .expect("row exists")
+        .get::<i64>(0)
+        .expect("count readable");
+    assert_eq!(count, 0, "chunks should be deleted");
+    drop(count_rows);
+
+    // Verify event is gone
+    let mut event_rows = conn
+        .query(
+            "SELECT COUNT(*) FROM conversation_events WHERE session_id = ?1",
+            params!["memory:alice"],
+        )
+        .await
+        .expect("event count query");
+    let event_count = event_rows
+        .next()
+        .await
+        .expect("row read")
+        .expect("row exists")
+        .get::<i64>(0)
+        .expect("count readable");
+    assert_eq!(event_count, 0, "conversation event should be deleted");
+
+    drop(conn);
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn delete_note_returns_false_for_nonexistent_note() {
+    let db_path = temp_db_path("delete-note-missing");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    let found =
+        MemoryRetrieval::delete_note(&backend, "memory:alice", "note-nonexistent")
+            .await
+            .expect("delete_note should not fail for missing note");
+    assert!(!found, "should return false for non-existent note");
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn note_save_search_update_delete_roundtrip() {
+    let db_path = temp_db_path("note-roundtrip");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    // Save
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:bob",
+        "note-rt1",
+        "User's name is Shantanu",
+    )
+    .await
+    .expect("store_note should succeed");
+
+    // Search - should find the note
+    let results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:bob".to_owned(),
+            query: "name".to_owned(),
+            query_embedding: None,
+            top_k: Some(5),
+            vector_weight: Some(0.7),
+            fts_weight: Some(0.3),
+        },
+    )
+    .await
+    .expect("search should succeed");
+    assert!(!results.is_empty(), "search should find the saved note");
+    let found_note = results
+        .iter()
+        .any(|r| r.text.contains("Shantanu"));
+    assert!(found_note, "search should find 'Shantanu'");
+
+    // Update the note
+    MemoryRetrieval::delete_note(&backend, "memory:bob", "note-rt1")
+        .await
+        .expect("delete old note should succeed");
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:bob",
+        "note-rt1",
+        "User prefers to be called SG",
+    )
+    .await
+    .expect("store updated note should succeed");
+
+    // Search again - should find updated version
+    let results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:bob".to_owned(),
+            query: "name".to_owned(),
+            query_embedding: None,
+            top_k: Some(5),
+            vector_weight: Some(0.7),
+            fts_weight: Some(0.3),
+        },
+    )
+    .await
+    .expect("search after update should succeed");
+    let found_updated = results.iter().any(|r| r.text.contains("SG"));
+    assert!(found_updated, "search should find updated note with 'SG'");
+    let old_still_present = results.iter().any(|r| r.text.contains("Shantanu"));
+    assert!(
+        !old_still_present,
+        "old note content should not appear in search results"
+    );
+
+    // Delete
+    let found =
+        MemoryRetrieval::delete_note(&backend, "memory:bob", "note-rt1")
+            .await
+            .expect("delete should succeed");
+    assert!(found, "delete should report note was found");
+
+    // Search again - should find nothing
+    let results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:bob".to_owned(),
+            query: "name".to_owned(),
+            query_embedding: None,
+            top_k: Some(5),
+            vector_weight: Some(0.7),
+            fts_weight: Some(0.3),
+        },
+    )
+    .await
+    .expect("search after delete should succeed");
+    assert!(
+        results.is_empty(),
+        "search should return no results after deletion"
+    );
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn note_user_scoping_isolates_across_users() {
+    let db_path = temp_db_path("note-user-isolation");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    // User A saves a note
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:user-a",
+        "note-ua1",
+        "User A prefers red",
+    )
+    .await
+    .expect("user A store should succeed");
+
+    // User B saves a note
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:user-b",
+        "note-ub1",
+        "User B prefers blue",
+    )
+    .await
+    .expect("user B store should succeed");
+
+    // User A's search should only find their own note
+    let results_a = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:user-a".to_owned(),
+            query: "prefers".to_owned(),
+            query_embedding: None,
+            top_k: Some(10),
+            vector_weight: Some(0.5),
+            fts_weight: Some(0.5),
+        },
+    )
+    .await
+    .expect("user A search should succeed");
+    assert!(!results_a.is_empty(), "user A should have results");
+    for result in &results_a {
+        assert!(
+            !result.text.contains("blue"),
+            "user A should not see user B's note"
+        );
+    }
+
+    // User B's search should only find their own note
+    let results_b = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:user-b".to_owned(),
+            query: "prefers".to_owned(),
+            query_embedding: None,
+            top_k: Some(10),
+            vector_weight: Some(0.5),
+            fts_weight: Some(0.5),
+        },
+    )
+    .await
+    .expect("user B search should succeed");
+    assert!(!results_b.is_empty(), "user B should have results");
+    for result in &results_b {
+        assert!(
+            !result.text.contains("red"),
+            "user B should not see user A's note"
+        );
+    }
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn store_note_multiple_notes_in_same_session_coexist() {
+    let db_path = temp_db_path("note-multiple-coexist");
+    let config = local_memory_config(&db_path);
+    let backend = LibsqlMemory::from_config(&config)
+        .await
+        .expect("local memory should initialize")
+        .expect("memory should be enabled");
+
+    MemoryRetrieval::store_note(&backend, "memory:carol", "note-m1", "Favorite color is green")
+        .await
+        .expect("first note should store");
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:carol",
+        "note-m2",
+        "Preferred language is Rust",
+    )
+    .await
+    .expect("second note should store");
+
+    // Delete only one note
+    let found = MemoryRetrieval::delete_note(&backend, "memory:carol", "note-m1")
+        .await
+        .expect("delete should succeed");
+    assert!(found);
+
+    // The other note should still be searchable
+    let results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:carol".to_owned(),
+            query: "Rust".to_owned(),
+            query_embedding: None,
+            top_k: Some(5),
+            vector_weight: Some(0.5),
+            fts_weight: Some(0.5),
+        },
+    )
+    .await
+    .expect("search should succeed");
+    assert!(
+        !results.is_empty(),
+        "second note should survive first note's deletion"
+    );
+    let has_rust = results.iter().any(|r| r.text.contains("Rust"));
+    assert!(has_rust, "second note should be found");
+
+    let _ = fs::remove_file(db_path);
+}

@@ -11,6 +11,7 @@ runtime = { path = "../runtime" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tools = { path = "../tools" }
 tracing = "0.1"
 types = { path = "../types" }
 

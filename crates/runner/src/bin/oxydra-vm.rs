@@ -130,14 +130,13 @@ async fn run() -> Result<(), VmError> {
         bootstrap.runtime_limits,
     );
     if let Some(memory) = bootstrap.memory {
-        runtime = runtime.with_memory(memory);
+        runtime = runtime.with_memory_retrieval(memory);
     }
 
-    let turn_runner = Arc::new(RuntimeGatewayTurnRunner::new(
-        Arc::new(runtime),
-        provider_id,
-        model_id,
-    ));
+    let turn_runner = Arc::new(
+        RuntimeGatewayTurnRunner::new(Arc::new(runtime), provider_id, model_id)
+            .with_memory_tool_context(bootstrap.memory_tool_context),
+    );
     let gateway = Arc::new(GatewayServer::with_startup_status(
         turn_runner,
         startup_status,

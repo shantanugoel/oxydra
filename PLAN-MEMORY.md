@@ -441,3 +441,241 @@ Step 10 depends on Steps 1–8.
 2. **Session management tools** (Phase 18): `memory_list_sessions`, `memory_read_session`, `memory_delete_session` with proper session metadata (titles, summaries, timestamps).
 3. **Bulk note operations**: `memory_export` / `memory_import` for backup/migration.
 4. **Category filtering**: Add optional `category` parameter to `memory_save` and `memory_search` for organization without imposing structure on the content itself. Stored in chunk metadata, used as an optional filter in search queries.
+
+---
+
+## Post-Implementation Review
+
+Review of commit `88e28be` against this plan. Performed after the initial implementation landed.
+
+### Overall Assessment
+
+The implementation is **faithful to the plan** in its core design: 4 tools, per-user `memory:{user_id}` scoping, natural language notes with UUID-based `note_id`, correct safety tiers and timeouts, proper delegation to existing traits, shared context holders, conditional registration, and documentation updates. All memory and tools tests pass (24 + 31). The single failing test (`run_session_executes_readonly_tools_in_parallel`) is pre-existing and unrelated.
+
+### Findings
+
+#### F1. Race Condition on `MemoryToolContext` — HIGH
+
+`MemoryToolContext` uses `Arc<Mutex<Option<String>>>` for `user_id` and `session_id`. These are set in `RuntimeGatewayTurnRunner::run_turn()` and read during tool execution. However, the `RuntimeGatewayTurnRunner` (and therefore the `MemoryToolContext`) is a **single instance shared across all users/sessions**. The gateway dispatches turns via `tokio::spawn`, meaning concurrent turns for different users run in parallel.
+
+The race:
+1. Turn for User A starts: `run_turn()` sets `user_id = "alice"`.
+2. Turn for User B starts before Alice's memory tool executes: `run_turn()` overwrites `user_id = "bob"`.
+3. Alice's `memory_save` reads `user_id = "bob"` → saves into Bob's namespace.
+
+This is a **cross-user data leak** — a memory tool could operate on the wrong user's namespace.
+
+**Resolution plan:**
+
+Option A (minimal, recommended): Pass `user_id` and `session_id` through the `Tool::execute()` interface as part of an execution context. This requires adding an optional context parameter to the `Tool` trait (or a separate `ToolExecutionContext` that wraps per-invocation state). This is the cleanest fix but requires a trait change.
+
+Option B (no trait change): Replace the single shared `MemoryToolContext` with a per-turn context map keyed by some turn identifier. The gateway would generate a turn ID, store the context in a `DashMap<TurnId, (String, String)>`, and pass the turn ID through the existing `args` JSON (as an injected field). Memory tools would extract the turn ID from args and look up the context. This is hacky but avoids a trait change.
+
+Option C (intermediate): Use `tokio::task_local!` to store the user_id/session_id. The gateway sets the task-local before spawning the turn future. Memory tools read from the task-local during execution. This avoids a trait change and is thread-safe, but task-locals don't propagate across `tokio::spawn` boundaries without explicit wrapping.
+
+**Recommended approach:** Option A. The `Tool` trait should accept an execution context. This is a natural evolution — tools like memory tools are inherently context-dependent, and future tools (e.g., session management, user preferences) will need the same context. The change is:
+```rust
+// New struct in types
+pub struct ToolExecutionContext {
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+// Tool trait change
+async fn execute(&self, args: &str, context: &ToolExecutionContext) -> Result<String, ToolError>;
+```
+
+All existing tools ignore the context (they don't need it). Memory tools read `user_id`/`session_id` from it. The `MemoryToolContext` shared holder is removed entirely.
+
+#### F2. Missing Test for `include_conversation=true` — MEDIUM
+
+The plan (Step 10) explicitly calls for a test: "`memory_search` with `include_conversation=true` merges results from both sessions." No such test exists. All search tests use the default (`include_conversation=false`). This leaves the merge/dedup/re-sort logic in `MemorySearchTool::execute()` untested.
+
+**Resolution:** Add a test that:
+1. Stores a note in the user memory namespace.
+2. Stores a conversation event in a separate session (the current conversation session ID).
+3. Calls `memory_search` with `include_conversation=true`.
+4. Verifies results contain entries from both sources with correct `source` labels.
+5. Verifies deduplication works if the same chunk appears in both sessions.
+
+#### F3. Missing Runtime Integration Tests — MEDIUM
+
+The plan (Step 10) calls for integration tests in the `runtime` crate verifying:
+- Memory tools appear in tool schemas sent to the provider.
+- Memory tools work within the existing execution pipeline (safety tier gating, timeout, output truncation, scrubbing).
+- Context holders are correctly set before tool execution.
+
+The only change to `crates/runtime/src/tests.rs` is adding `store_note`/`delete_note` stubs to `RecordingMemory`. No actual integration tests exist. These are important for ensuring memory tools behave correctly when invoked by the LLM through the full turn loop.
+
+**Resolution:** Add at least one integration test that wires up memory tools in a `MockProvider`-driven turn and verifies the tool executes and returns results through the standard pipeline.
+
+#### F4. Documentation Discrepancy: `max_results` vs `top_k` — LOW
+
+`docs/guidebook/04-tool-system.md` (line 145) documents the `memory_search` parameter as `max_results` (default 10). The actual implementation uses `top_k` (default 5, max 20). The `include_conversation` parameter is also not mentioned in the table.
+
+**Resolution:** Fix the table row to:
+```
+| `memory_search` | `query` (required), `top_k` (optional, default 5, max 20), `include_conversation` (optional, default false) | JSON array of `{text, source, score, note_id}` results |
+```
+
+#### F5. `include_conversation` Silently Swallows Errors — LOW
+
+When `include_conversation=true`, failures in `resolve_session_id` or `hybrid_query` for the conversation session are silently ignored via chained `if let Ok(...)`:
+
+```rust
+if request.include_conversation.unwrap_or(false)
+    && let Ok(conversation_session) = resolve_session_id(...)
+    && let Ok(conversation_results) = self.memory.hybrid_query(...).await
+```
+
+This is arguably correct (graceful degradation — return memory results even if the conversation search fails), but the user gets no indication that part of the search was skipped. At minimum, a `tracing::warn!` when the conversation query fails would aid debugging.
+
+**Resolution:** Add `tracing::warn!` on either failure case. This doesn't change behavior but provides observability.
+
+#### F6. No `tracing` Instrumentation on Memory Tools — LOW
+
+The memory tool implementations have zero `tracing` calls despite the rest of the codebase using tracing extensively. Save, delete, update, and search operations should log at `info` or `debug` level for operational visibility.
+
+**Resolution:** Add `tracing::info!` for save/update/delete operations (including `note_id` and `user_id`), and `tracing::debug!` for search (including query and result count).
+
+#### F7. `saturating_add(1)` in `next_event_sequence` Masks Overflow — VERY LOW
+
+If the sequence ever reaches `u64::MAX`, `saturating_add(1)` returns `u64::MAX` again, causing a duplicate sequence and a constraint violation at the database level. This is practically impossible (would require 18 quintillion notes) but `checked_add` with an explicit error message would be more correct.
+
+**Resolution:** Replace `saturating_add(1)` with `checked_add(1).ok_or_else(|| query_error("sequence overflow"))`.
+
+#### F8. `with_memory()` vs `with_memory_retrieval()` Coexistence — VERY LOW
+
+`oxydra-vm.rs` was changed from `with_memory()` to `with_memory_retrieval()`. The old `with_memory()` still exists and sets `memory_retrieval = None`. If anyone calls `with_memory()` in the future, the runtime's internal retrieval pipeline would lose its `MemoryRetrieval` reference even though memory tools have their own `Arc<dyn MemoryRetrieval>` from bootstrap. The two methods serve overlapping purposes and their coexistence is a footgun.
+
+**Resolution:** Consider deprecating `with_memory()` or making it call `with_memory_retrieval()` internally when the `Arc<dyn Memory>` also implements `MemoryRetrieval` (which it always does since `MemoryRetrieval: Memory`).
+
+#### F9. Empty `note_id` for Conversation Results — INFORMATIONAL
+
+When `include_conversation=true`, conversation-sourced results return `"note_id": ""`. The LLM could attempt to pass this empty string to `memory_update` or `memory_delete`, which would fail with "not found." The behavior is correct (conversation messages are not deletable via memory tools), but the LLM tool descriptions don't explicitly say conversation results cannot be updated/deleted. The LLM might attempt it and get confused.
+
+**Resolution:** Consider adding a sentence to the `memory_search` description: "Results with an empty `note_id` (from conversation search) cannot be updated or deleted via memory tools."
+
+#### F10. Large Notes Produce Multiple Search Results — INFORMATIONAL
+
+If a note is large enough to be split into multiple chunks, `memory_search` may return multiple results from the same note as separate entries. This is correct behavior and the `note_id` in each result allows the LLM to identify they belong to the same note. However, for a better UX, a future enhancement could group results by `note_id` and return consolidated entries.
+
+#### F11. Unrelated Change in Commit — COSMETIC
+
+The commit includes a `saturating_add(1)` change in `crates/tui/src/ui_model.rs` (scroll_down). This is unrelated to memory tools. Not a bug — just commit hygiene.
+
+### Recommended Action Plan (Priority Order)
+
+| Priority | Finding | Action | Effort |
+|----------|---------|--------|--------|
+| **HIGH** | F1: Race condition on MemoryToolContext | Add `ToolExecutionContext` to `Tool::execute()` trait; remove shared mutable holders | Medium — trait change touches all tool implementations |
+| **MEDIUM** | F2: Missing `include_conversation` test | Add integration test for merged search results | Small |
+| **MEDIUM** | F3: Missing runtime integration tests | Add turn-loop test with memory tools | Small-Medium |
+| **LOW** | F4: Doc `max_results` vs `top_k` | Fix parameter name/default in `04-tool-system.md` | Trivial |
+| **LOW** | F5: Silent error swallowing | Add `tracing::warn!` on conversation search failure | Trivial |
+| **LOW** | F6: No tracing instrumentation | Add tracing to all four tool execute methods | Small |
+| **LOW** | F7: `saturating_add` overflow | Replace with `checked_add` + error | Trivial |
+| **LOW** | F8: `with_memory` footgun | Deprecate or unify | Trivial |
+| **LOW** | F9: Empty `note_id` UX | Add clarification to tool description | Trivial |
+
+---
+
+## Memory Database Access in Isolated Environments
+
+### Problem Statement
+
+The memory database (`memory.db`) is currently configured with a **relative path** default of `.oxydra/memory.db` (set in `default_memory_db_path()` in `crates/types/src/config.rs`). When `oxydra-vm` runs, this path resolves relative to the current working directory.
+
+In the current **Process tier** (`--insecure` mode), everything runs on the host machine and the CWD is the workspace root, so `oxydra-vm` directly accesses `.oxydra/memory.db` from the filesystem. This works today. However, this design has significant implications for Container and MicroVM tiers.
+
+### Current Behavior
+
+```
+Process tier (--insecure):
+  Host CWD = workspace root
+  oxydra-vm opens .oxydra/memory.db → resolves to <workspace>/.oxydra/memory.db
+  Direct filesystem access. Works.
+```
+
+### Problem in Container/MicroVM Tiers
+
+In Container and MicroVM tiers, `oxydra-vm` runs inside an isolated guest. The workspace directories (`shared/`, `tmp/`, `vault/`) are bind-mounted from the host into the guest (see Chapter 8). But `.oxydra/memory.db` is **not** inside any of those well-known workspace subdirectories — it sits at the workspace root level.
+
+Several issues arise:
+
+#### Issue 1: Memory DB Location vs. Workspace Layout
+
+The runner's workspace layout is:
+```
+<workspace_root>/<user_id>/
+  ├── shared/    (persistent user data)
+  ├── tmp/       (ephemeral, IPC markers)
+  └── vault/     (credentials, restricted access)
+```
+
+The memory DB at `.oxydra/memory.db` (relative to CWD) would need to be at `<workspace_root>/<user_id>/.oxydra/memory.db` on the host, and then bind-mounted into the guest. Currently, the runner doesn't provision or mount this path.
+
+#### Issue 2: Security — LLM Tools Can Access the Memory DB File
+
+In Process tier, the memory DB file lives on the host filesystem alongside the workspace. Any tool with filesystem access (file_read, shell_exec) could potentially read or corrupt the raw SQLite database. In Container/MicroVM tiers, if the DB is bind-mounted, the same tools could access it unless the mount is specifically excluded from tool mount policies.
+
+The LLM-callable memory tools provide a safe, scoped API for memory access. Direct file-level access to the database bypasses all of that — the LLM could `file_read .oxydra/memory.db` and see raw data from all sessions, or `shell_exec "sqlite3 .oxydra/memory.db 'SELECT * FROM conversation_events'"` to dump everything.
+
+#### Issue 3: Multi-Channel Shared State
+
+Per-user memory must survive across sessions and channels. In Container/MicroVM tiers where guests are ephemeral, the DB must be on a persistent volume that survives container restarts. The current relative-path default doesn't express this requirement — it works only because Process tier guests are long-lived host processes.
+
+#### Issue 4: Remote Memory Mode
+
+`MemoryConfig` already supports `remote_url` + `auth_token` for connecting to a remote libSQL instance (e.g., Turso). In this mode, the DB path is irrelevant — the guest connects over the network. This avoids all mount/access issues but introduces network latency and a dependency on an external service.
+
+### Resolution Plan
+
+#### Phase A: Correct Placement of Local Memory DB (Required for Container/MicroVM)
+
+1. **Move the default DB path** from `.oxydra/memory.db` (workspace-root-relative) to `shared/.oxydra/memory.db` (inside the `shared/` subdirectory). The `shared/` directory is already bind-mounted into guests and is designed for persistent data that survives container restarts.
+
+2. **Update the runner's workspace provisioning** to create `shared/.oxydra/` during workspace setup.
+
+3. **Update `ConnectionStrategy::from_config`** to resolve the `db_path` relative to the workspace root when running inside a guest (the workspace root is available from the bootstrap envelope's `workspace_root` field).
+
+4. **Migration path**: If an existing `.oxydra/memory.db` exists at the old location and no DB exists at the new location, move it during first startup. Log a warning about the migration.
+
+#### Phase B: Protect the Memory DB from Tool Access (Required)
+
+1. **Add `.oxydra/` to the security policy's path denial list.** The existing `SecurityPolicy::check_file_access()` should reject any path that resolves into the `.oxydra/` directory (or wherever the DB is stored). This prevents `file_read`, `file_write`, `file_edit`, and `file_delete` from touching the database.
+
+2. **Add `shared/.oxydra/` to the shell command path restriction.** The shell allowlist/blocklist should prevent `shell_exec` from accessing the database directory.
+
+3. **In Container/MicroVM tiers**, mount the DB directory as a separate read-write volume that is **not** included in any tool's WASM mount policy. Tools see `shared/` but the `.oxydra/` subdirectory is excluded from their preopened directories. This is the strongest isolation — the DB is accessible to the `oxydra-vm` process but invisible to sandboxed tool execution.
+
+#### Phase C: Prefer Remote Memory in Production Tiers (Recommended)
+
+For production Container/MicroVM deployments:
+
+1. **Recommend remote libSQL (Turso or self-hosted sqld)** as the default for non-Process tiers. Remote mode eliminates all mount/access/persistence concerns — the guest connects over the network, and the database lives outside the guest's filesystem entirely.
+
+2. **Auto-detect and warn** if local memory mode is used with Container/MicroVM tiers. The bootstrap sequence should log a warning: "Local memory DB in Container/MicroVM tier — ensure the DB path is on a persistent volume and excluded from tool mounts."
+
+3. **Document the trade-offs:**
+   - Local mode: zero external dependencies, lowest latency, but requires careful mount management and security exclusions.
+   - Remote mode: slight network latency, requires a running sqld/Turso instance, but cleanly separates storage from compute and avoids all mount concerns.
+
+#### Phase D: Encrypt the Memory DB at Rest (Future Enhancement)
+
+For additional defense in depth:
+
+1. **SQLCipher or libSQL encryption** for the local database file. Even if a tool manages to read the raw file, the contents are encrypted.
+
+2. **Key management**: The encryption key would be delivered via the bootstrap envelope (alongside `auth_token`) and never written to the filesystem.
+
+This is a future enhancement — Phases A and B provide sufficient protection for current needs.
+
+### Summary
+
+| Tier | Current State | Required Action |
+|------|--------------|-----------------|
+| **Process** | Works (direct filesystem access) | Add security policy denials for `.oxydra/` paths (Phase B) |
+| **Container** | Broken (DB path not mounted) | Move DB to `shared/.oxydra/` + mount (Phase A) + security exclusions (Phase B) |
+| **MicroVM** | Broken (DB path not mounted) | Same as Container (Phase A + B) |
+| **Remote mode** | Works (network access, no file) | No changes needed; recommend as default for production (Phase C) |

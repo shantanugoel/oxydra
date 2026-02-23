@@ -61,7 +61,7 @@ impl JsonSchema {
             schema_type: JsonSchemaType::Object,
             properties,
             required,
-            additional_properties: Some(false),
+            additional_properties: None,
             description: None,
             items: None,
         }

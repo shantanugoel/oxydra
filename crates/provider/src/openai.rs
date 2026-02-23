@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, JsonSchema, Message, MessageRole, ModelCatalog, Provider, ProviderError,
-    ProviderId, ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
+    Context, FunctionDecl, JsonSchema, JsonSchemaType, Message, MessageRole, ModelCatalog,
+    Provider, ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall,
+    ToolCallDelta, UsageUpdate,
 };
 
 use crate::{
@@ -362,6 +363,31 @@ struct OpenAIRequestToolDefinition {
     function: OpenAIRequestFunctionDecl,
 }
 
+/// Recursively sanitize a schema for OpenAI strict mode:
+/// - Set `additionalProperties: false` on every object schema.
+/// - Add all property names to `required` so the model fills them all in.
+fn sanitize_schema_strict(schema: &JsonSchema) -> JsonSchema {
+    let mut s = schema.clone();
+    if s.schema_type == JsonSchemaType::Object {
+        s.additional_properties = Some(false);
+        let all_keys: Vec<String> = s.properties.keys().cloned().collect();
+        for key in all_keys {
+            if !s.required.contains(&key) {
+                s.required.push(key);
+            }
+        }
+        s.properties = s
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), sanitize_schema_strict(v)))
+            .collect();
+    }
+    if let Some(items) = &s.items {
+        s.items = Some(Box::new(sanitize_schema_strict(items)));
+    }
+    s
+}
+
 impl From<&FunctionDecl> for OpenAIRequestToolDefinition {
     fn from(value: &FunctionDecl) -> Self {
         Self {
@@ -369,7 +395,7 @@ impl From<&FunctionDecl> for OpenAIRequestToolDefinition {
             function: OpenAIRequestFunctionDecl {
                 name: value.name.clone(),
                 description: value.description.clone(),
-                parameters: value.parameters.clone(),
+                parameters: sanitize_schema_strict(&value.parameters),
             },
         }
     }

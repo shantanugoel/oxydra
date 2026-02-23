@@ -31,8 +31,7 @@ fn function_decl_serializes_to_expected_json_shape() {
                         "description": "Absolute file path"
                     }
                 },
-                "required": ["path"],
-                "additionalProperties": false
+                "required": ["path"]
             }
         })
     );

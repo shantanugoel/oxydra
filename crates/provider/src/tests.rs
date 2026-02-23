@@ -184,7 +184,6 @@ fn anthropic_request_normalization_snapshot_is_stable() {
             {
               "description": "Read UTF-8 text from a file",
               "input_schema": {
-                "additionalProperties": false,
                 "properties": {
                   "path": {
                     "type": "string"
@@ -1706,7 +1705,6 @@ fn gemini_request_serialization_snapshot() {
                   "description": "Read UTF-8 text from a file",
                   "name": "file_read",
                   "parameters": {
-                    "additionalProperties": false,
                     "properties": {
                       "path": {
                         "type": "string"

@@ -31,8 +31,7 @@ fn generated_schema_for_file_read_is_deterministic() {
                         "type": "string"
                     }
                 },
-                "required": ["path"],
-                "additionalProperties": false
+                "required": ["path"]
             }
         })
     );
@@ -56,8 +55,7 @@ fn generated_schema_maps_supported_rust_types() {
                     "dry_run": { "type": "boolean" },
                     "timeout_secs": { "type": "number" }
                 },
-                "required": ["command", "retries", "dry_run", "timeout_secs"],
-                "additionalProperties": false
+                "required": ["command", "retries", "dry_run", "timeout_secs"]
             }
         })
     );

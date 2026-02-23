@@ -1,5 +1,47 @@
 use super::{scrubbing::scrub_tool_output, *};
 
+/// Recursively strip `additionalProperties` from every object node in a JSON Schema value
+/// so the runtime validator accepts extra properties the LLM may have injected.
+fn strip_additional_properties(schema: &mut serde_json::Value) {
+    if let Some(obj) = schema.as_object_mut() {
+        obj.remove("additionalProperties");
+        if let Some(props) = obj.get_mut("properties") {
+            if let Some(props_obj) = props.as_object_mut() {
+                for v in props_obj.values_mut() {
+                    strip_additional_properties(v);
+                }
+            }
+        }
+        if let Some(items) = obj.get_mut("items") {
+            strip_additional_properties(items);
+        }
+    }
+}
+
+/// Remove `null`-valued keys from `args` when they are not listed in the schema's
+/// `required` array.  LLMs often send `null` for optional parameters; the schema
+/// type (e.g. `"string"`) would reject `null`, but the Rust deserializer treats
+/// `null` the same as the field being absent.
+fn strip_null_optional_fields(args: &mut serde_json::Value, schema: &serde_json::Value) {
+    let (Some(obj), Some(schema_obj)) = (args.as_object_mut(), schema.as_object()) else {
+        return;
+    };
+    let required: Vec<&str> = schema_obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let null_optional_keys: Vec<String> = obj
+        .iter()
+        .filter(|(k, v)| v.is_null() && !required.contains(&k.as_str()))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in null_optional_keys {
+        obj.remove(&key);
+    }
+}
+
 impl AgentRuntime {
     pub(crate) fn invalid_streamed_arguments(arguments: &serde_json::Value) -> Option<String> {
         let object = arguments.as_object()?;
@@ -31,8 +73,13 @@ impl AgentRuntime {
         }
 
         let schema_decl = tool.schema();
-        let schema_json =
+        let mut schema_json =
             serde_json::to_value(&schema_decl.parameters).map_err(ToolError::Serialization)?;
+        strip_additional_properties(&mut schema_json);
+
+        let mut validation_args = arguments.clone();
+        strip_null_optional_fields(&mut validation_args, &schema_json);
+
         let validator = jsonschema::options().build(&schema_json).map_err(|error| {
             RuntimeError::Tool(ToolError::ExecutionFailed {
                 tool: name.to_string(),
@@ -40,9 +87,9 @@ impl AgentRuntime {
             })
         })?;
 
-        if !validator.is_valid(arguments) {
+        if !validator.is_valid(&validation_args) {
             let error_msgs: Vec<String> = validator
-                .iter_errors(arguments)
+                .iter_errors(&validation_args)
                 .map(|e| format!("- {e}"))
                 .collect();
             return Err(RuntimeError::Tool(ToolError::InvalidArguments {

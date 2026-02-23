@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, JsonSchema, Message, MessageRole, ModelCatalog, Provider, ProviderError,
-    ProviderId, ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
+    Context, FunctionDecl, JsonSchema, JsonSchemaType, Message, MessageRole, ModelCatalog,
+    Provider, ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall,
+    ToolCallDelta, UsageUpdate,
 };
 
 use crate::{
@@ -484,12 +485,30 @@ struct GeminiFunctionDeclaration {
     parameters: JsonSchema,
 }
 
+/// Recursively sanitize a schema for Gemini: strip `additionalProperties` because
+/// Gemini's function-calling API does not support that keyword.
+fn sanitize_schema_for_gemini(schema: &JsonSchema) -> JsonSchema {
+    let mut s = schema.clone();
+    if s.schema_type == JsonSchemaType::Object {
+        s.additional_properties = None;
+        s.properties = s
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), sanitize_schema_for_gemini(v)))
+            .collect();
+    }
+    if let Some(items) = &s.items {
+        s.items = Some(Box::new(sanitize_schema_for_gemini(items)));
+    }
+    s
+}
+
 impl From<&FunctionDecl> for GeminiFunctionDeclaration {
     fn from(value: &FunctionDecl) -> Self {
         Self {
             name: value.name.clone(),
             description: value.description.clone(),
-            parameters: value.parameters.clone(),
+            parameters: sanitize_schema_for_gemini(&value.parameters),
         }
     }
 }

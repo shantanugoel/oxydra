@@ -166,7 +166,7 @@ the new fragment, not the full accumulated string. Specifically, verify that:
 
 ---
 
-## Issue 2: Tool Call Validation Failures (Missing/Additional Parameters)
+## Issue 2: Tool Call Validation Failures (Missing/Additional Parameters) - RESOLVED
 
 ### Symptoms
 
@@ -384,7 +384,7 @@ come exclusively from environment variables (the existing
 
 **Step 3:** Remove `search_provider_from_arguments()` function in
 `crates/sandbox/src/web_search.rs` or simplify it to only read from env. Delete
-the `config` override logic (lines 136–212).
+the `config` override logic (lines 136–212). Make sure that setting the search provider, url, parameters etc is available to be set via config params in agent.toml
 
 **Step 4:** Evaluate `output_format` and `max_body_chars` on `web_fetch`:
 - `output_format` is reasonable for the LLM to control — keep it.

@@ -29,12 +29,26 @@
 //! [`TerminalGuard`] is an RAII struct whose `Drop` restores terminal
 //! state. A panic hook is installed to attempt the same restoration before
 //! the default handler runs.
+//!
+//! ## Reconnection
+//!
+//! When the WebSocket connection drops, reconnection is handled inside the
+//! main `select!` loop so user input (including Ctrl+C) is always
+//! processed. A timer arm fires at the next retry deadline; on failure the
+//! deadline is rescheduled with exponential back-off. A dummy channel is
+//! substituted for `gateway_rx` while disconnected so that arm never
+//! spins.
+//!
+//! ## Force-Quit Safety Net
+//!
+//! Pressing Ctrl+C twice within [`FORCE_QUIT_WINDOW`] always exits, even
+//! if the adapter believes a turn is still active. This prevents the TUI
+//! from being permanently stuck when the gateway is unreachable.
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::cursor;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -85,6 +99,13 @@ const EVENT_READER_BUFFER: usize = 64;
 /// Capacity of the adapter listen stream.
 const ADAPTER_LISTEN_BUFFER: usize = 128;
 
+/// Pressing Ctrl+C this many times within [`FORCE_QUIT_WINDOW`] forces an
+/// exit regardless of active turn state.
+const FORCE_QUIT_PRESSES: u32 = 2;
+
+/// Window within which consecutive Ctrl+C presses count toward force-quit.
+const FORCE_QUIT_WINDOW: Duration = Duration::from_secs(2);
+
 // ---------------------------------------------------------------------------
 // TerminalGuard
 // ---------------------------------------------------------------------------
@@ -92,24 +113,21 @@ const ADAPTER_LISTEN_BUFFER: usize = 128;
 /// RAII guard that restores terminal state on drop.
 ///
 /// Created at the start of `TuiApp::run`, it enables raw mode, enters the
-/// alternate screen, hides the cursor, and enables mouse capture. Its
-/// [`Drop`] implementation reverses all of these. A complementary panic
-/// hook is installed to attempt restoration even on unwind.
+/// alternate screen, and hides the cursor. Its [`Drop`] implementation
+/// reverses all of these. A complementary panic hook is installed to attempt
+/// restoration even on unwind.
+///
+/// Mouse capture is intentionally **not** enabled so users retain native
+/// terminal mouse selection and copy/paste behaviour.
 struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Set up raw mode, alternate screen, hidden cursor, and mouse capture.
+    /// Set up raw mode, alternate screen, and hidden cursor.
     /// Returns the guard whose `Drop` undoes everything.
     fn setup() -> Result<Self, TuiError> {
         enable_raw_mode().map_err(io::Error::other)?;
         let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            cursor::Hide,
-        )
-        .map_err(io::Error::other)?;
+        execute!(stdout, EnterAlternateScreen, cursor::Hide).map_err(io::Error::other)?;
 
         // Install panic hook so the terminal is restored even on panics.
         let default_hook = std::panic::take_hook();
@@ -133,12 +151,7 @@ impl Drop for TerminalGuard {
 fn restore_terminal() -> Result<(), io::Error> {
     disable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        cursor::Show,
-    )?;
+    execute!(stdout, LeaveAlternateScreen, cursor::Show)?;
     stdout.flush()?;
     Ok(())
 }
@@ -282,6 +295,10 @@ pub struct TuiApp {
     adapter: TuiChannelAdapter,
     view_model: TuiViewModel,
     gateway_endpoint: String,
+    /// Time of the most recent Ctrl+C press, used for the force-quit window.
+    last_ctrl_c_at: Option<Instant>,
+    /// Number of Ctrl+C presses within the current force-quit window.
+    consecutive_ctrl_c: u32,
 }
 
 impl TuiApp {
@@ -302,6 +319,8 @@ impl TuiApp {
             adapter: TuiChannelAdapter::new(user_id, connection_id),
             view_model: TuiViewModel::new(),
             gateway_endpoint: gateway_endpoint.into(),
+            last_ctrl_c_at: None,
+            consecutive_ctrl_c: 0,
         }
     }
 
@@ -335,13 +354,24 @@ impl TuiApp {
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut last_health_check = Instant::now();
 
-        // 6. Initial draw.
+        // 6. Reconnection state.
+        //
+        // When disconnected, `gateway_rx` is replaced with a dummy channel
+        // (whose sender is kept alive in `_dummy_gw_tx`) so the select arm
+        // blocks instead of spinning with repeated `None`s.
+        // `reconnect_next_retry` drives a timer arm that attempts one
+        // reconnection and re-schedules itself with back-off on failure.
+        let mut reconnect_next_retry: Option<tokio::time::Instant> = None;
+        let mut reconnect_attempt: u32 = 0;
+        let mut _dummy_gw_tx: Option<mpsc::Sender<GatewayServerFrame>> = None;
+
+        // 7. Initial draw.
         {
             let adapter_state = self.adapter.state_snapshot().await;
             terminal.draw(|frame| render_app(frame, &self.view_model, &adapter_state))?;
         }
 
-        // 7. Main select! loop.
+        // 8. Main select! loop.
         loop {
             let needs_draw;
 
@@ -365,38 +395,96 @@ impl TuiApp {
                             self.view_model.connection_state =
                                 ConnectionState::Disconnected { since: Instant::now() };
 
-                            // Draw the disconnected state, then reconnect.
-                            let adapter_state = self.adapter.state_snapshot().await;
-                            let _ = terminal.draw(|frame| {
-                                render_app(frame, &self.view_model, &adapter_state);
-                            });
-
                             // Abort old tasks.
                             reader_handle.abort();
                             writer_handle.abort();
 
-                            // Reconnect loop.
-                            let (new_gw_rx, new_ws_tx, new_rh, new_wh) =
-                                self.reconnect_loop(&mut terminal).await?;
-                            gateway_rx = new_gw_rx;
-                            ws_tx = new_ws_tx;
-                            reader_handle = new_rh;
-                            writer_handle = new_wh;
-                            last_health_check = Instant::now();
+                            // Replace gateway_rx with a dummy that blocks
+                            // forever (as long as _dummy_gw_tx is alive) so
+                            // the select arm above does not spin.
+                            let (dummy_gw_tx, dummy_gw_rx) = mpsc::channel(1);
+                            _dummy_gw_tx = Some(dummy_gw_tx);
+                            gateway_rx = dummy_gw_rx;
 
-                            // Re-create adapter listen stream for new
-                            // outbound frames.
-                            adapter_rx = self
-                                .adapter
-                                .listen(ADAPTER_LISTEN_BUFFER)
-                                .await
-                                .map_err(|e| {
-                                    TuiError::Io(io::Error::other(e))
-                                })?;
+                            // Replace ws_tx with a dummy. Sends will fail
+                            // silently; that is fine because health checks
+                            // and submit are gated on ConnectionState::Connected.
+                            let (dummy_ws_tx, _dummy_ws_rx) = mpsc::channel(1);
+                            ws_tx = dummy_ws_tx;
+
+                            // Schedule the first reconnection attempt.
+                            reconnect_attempt = 0;
+                            let delay = backoff_with_jitter(
+                                0,
+                                RECONNECT_BACKOFF_INITIAL,
+                                RECONNECT_BACKOFF_MAX,
+                            );
+                            let next_retry_tokio =
+                                tokio::time::Instant::now() + delay;
+                            let next_retry_std = Instant::now() + delay;
+                            reconnect_next_retry = Some(next_retry_tokio);
+                            self.view_model.connection_state =
+                                ConnectionState::Reconnecting {
+                                    attempt: 1,
+                                    next_retry: next_retry_std,
+                                };
 
                             needs_draw = true;
                         }
                     }
+                }
+
+                // -- Reconnection timer -------------------------------------
+                //
+                // This arm is only active while `reconnect_next_retry` is
+                // `Some`. When not reconnecting the `pending()` branch
+                // ensures it never fires.
+                () = async {
+                    if let Some(deadline) = reconnect_next_retry {
+                        time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+
+                    match self.try_reconnect().await {
+                        Ok((new_gw_rx, new_ws_tx, new_rh, new_wh)) => {
+                            // Reconnection succeeded.
+                            gateway_rx = new_gw_rx;
+                            ws_tx = new_ws_tx;
+                            reader_handle = new_rh;
+                            writer_handle = new_wh;
+                            _dummy_gw_tx = None; // Drop dummy sender.
+                            reconnect_next_retry = None;
+                            last_health_check = Instant::now();
+
+                            // Re-create adapter listen stream for new outbound frames.
+                            adapter_rx = self
+                                .adapter
+                                .listen(ADAPTER_LISTEN_BUFFER)
+                                .await
+                                .map_err(|e| TuiError::Io(io::Error::other(e)))?;
+                        }
+                        Err(_) => {
+                            // Schedule next retry with increased backoff.
+                            let delay = backoff_with_jitter(
+                                reconnect_attempt,
+                                RECONNECT_BACKOFF_INITIAL,
+                                RECONNECT_BACKOFF_MAX,
+                            );
+                            let next_retry_tokio = tokio::time::Instant::now() + delay;
+                            let next_retry_std = Instant::now() + delay;
+                            reconnect_next_retry = Some(next_retry_tokio);
+                            self.view_model.connection_state =
+                                ConnectionState::Reconnecting {
+                                    attempt: reconnect_attempt,
+                                    next_retry: next_retry_std,
+                                };
+                        }
+                    }
+
+                    needs_draw = true;
                 }
 
                 // -- Outbound client frames from the adapter -----------------
@@ -468,7 +556,7 @@ impl TuiApp {
             }
         }
 
-        // 8. Cleanup: abort WS tasks. TerminalGuard::drop restores terminal.
+        // 9. Cleanup: abort WS tasks. TerminalGuard::drop restores terminal.
         reader_handle.abort();
         writer_handle.abort();
 
@@ -547,58 +635,6 @@ impl TuiApp {
         }
 
         Ok((gateway_rx, ws_tx, reader_handle, writer_handle))
-    }
-
-    /// Reconnection loop with exponential backoff and jitter.
-    ///
-    /// Draws status updates to the terminal during reconnection so the user
-    /// sees progress. On success, sends Hello with the prior session via
-    /// `adapter.build_hello_frame()`.
-    async fn reconnect_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<
-        (
-            mpsc::Receiver<GatewayServerFrame>,
-            mpsc::Sender<GatewayClientFrame>,
-            JoinHandle<()>,
-            JoinHandle<()>,
-        ),
-        TuiError,
-    > {
-        let mut attempt: u32 = 0;
-
-        loop {
-            attempt = attempt.saturating_add(1);
-            let delay = backoff_with_jitter(
-                attempt.saturating_sub(1),
-                RECONNECT_BACKOFF_INITIAL,
-                RECONNECT_BACKOFF_MAX,
-            );
-            let next_retry = Instant::now() + delay;
-
-            self.view_model.connection_state = ConnectionState::Reconnecting {
-                attempt,
-                next_retry,
-            };
-
-            // Draw reconnection state.
-            {
-                let adapter_state = self.adapter.state_snapshot().await;
-                let _ = terminal.draw(|frame| {
-                    render_app(frame, &self.view_model, &adapter_state);
-                });
-            }
-
-            time::sleep(delay).await;
-
-            match self.try_reconnect().await {
-                Ok(result) => return Ok(result),
-                Err(_) => {
-                    // Will loop and try again with increased backoff.
-                }
-            }
-        }
     }
 
     /// Single reconnection attempt: connect, split, handshake.
@@ -710,6 +746,26 @@ impl TuiApp {
             }
 
             AppAction::Cancel => {
+                // Force-quit safety net: two Ctrl+C presses within
+                // FORCE_QUIT_WINDOW always exits, even if the adapter thinks
+                // a turn is active or the gateway is unreachable.
+                let now = Instant::now();
+                if let Some(last) = self.last_ctrl_c_at {
+                    if now.duration_since(last) <= FORCE_QUIT_WINDOW {
+                        self.consecutive_ctrl_c =
+                            self.consecutive_ctrl_c.saturating_add(1);
+                    } else {
+                        self.consecutive_ctrl_c = 1;
+                    }
+                } else {
+                    self.consecutive_ctrl_c = 1;
+                }
+                self.last_ctrl_c_at = Some(now);
+
+                if self.consecutive_ctrl_c >= FORCE_QUIT_PRESSES {
+                    return Ok(true);
+                }
+
                 let outcome = self
                     .adapter
                     .handle_ctrl_c(next_request_id())

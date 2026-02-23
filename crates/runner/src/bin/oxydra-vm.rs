@@ -98,6 +98,11 @@ async fn run() -> Result<(), VmError> {
     let provider_id = bootstrap.config.selection.provider.clone();
     let model_id = bootstrap.config.selection.model.clone();
     let startup_status = bootstrap.startup_status.clone();
+    info!(
+        provider = %provider_id,
+        model = %model_id,
+        "agent config loaded"
+    );
     if startup_status.is_degraded() {
         warn!(
             user_id = %args.user_id,
@@ -147,10 +152,10 @@ async fn run() -> Result<(), VmError> {
         })?;
     let address = listener.local_addr().map_err(VmError::GatewayAddress)?;
     write_gateway_endpoint_marker(&args.workspace_root, address)?;
-    eprintln!(
-        "oxydra-vm started user_id={} gateway_endpoint={}",
-        args.user_id,
-        gateway_endpoint(address)
+    info!(
+        user_id = %args.user_id,
+        gateway_endpoint = %gateway_endpoint(address),
+        "oxydra-vm started"
     );
 
     axum::serve(listener, app)

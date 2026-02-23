@@ -225,6 +225,7 @@ impl AgentRuntime {
 
             let state = TurnState::Streaming;
             tracing::debug!(turn, ?state, "running provider turn");
+            tracing::info!(turn, max_turns = self.limits.max_turns, "calling provider");
 
             self.maybe_trigger_rolling_summary(session_id, context)
                 .await?;

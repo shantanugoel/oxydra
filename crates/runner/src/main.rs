@@ -133,6 +133,13 @@ fn run() -> Result<(), CliError> {
     for warning in &startup.warnings {
         println!("warning={warning}");
     }
+    tracing::info!(
+        user_id = %startup.user_id,
+        sandbox_tier = ?startup.sandbox_tier,
+        shell_available = startup.shell_available,
+        browser_available = startup.browser_available,
+        "runner user session started"
+    );
 
     if args.daemon {
         let control_socket_path = startup.workspace.tmp.join("runner-control.sock");
@@ -155,6 +162,11 @@ fn run() -> Result<(), CliError> {
                 })?;
 
             println!("control_socket={}", control_socket_path.display());
+            tracing::info!(
+                socket_path = %control_socket_path.display(),
+                user_id = %startup.user_id,
+                "runner control socket listening"
+            );
 
             let shutdown_signal = tokio::signal::ctrl_c();
             tokio::pin!(shutdown_signal);

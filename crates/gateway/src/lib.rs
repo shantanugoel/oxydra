@@ -284,6 +284,11 @@ impl GatewayServer {
                     hello.user_id
                 ));
             }
+            tracing::debug!(
+                user_id = %hello.user_id,
+                runtime_session_id = %existing.runtime_session_id,
+                "client reconnected to existing gateway session"
+            );
             return Ok(Arc::clone(existing));
         }
 
@@ -291,6 +296,11 @@ impl GatewayServer {
             .runtime_session_id
             .clone()
             .unwrap_or_else(|| default_runtime_session_id(&hello.user_id));
+        tracing::info!(
+            user_id = %hello.user_id,
+            runtime_session_id = %runtime_session_id,
+            "gateway session created"
+        );
         let session = Arc::new(UserSessionState::new(
             hello.user_id.clone(),
             runtime_session_id,
@@ -343,6 +353,11 @@ impl GatewayServer {
             session: session.gateway_session(),
             turn: running_turn.clone(),
         }));
+        tracing::info!(
+            turn_id = %send_turn.turn_id,
+            runtime_session_id = %session.runtime_session_id,
+            "turn started"
+        );
 
         let runtime = Arc::clone(&self.turn_runner);
         tokio::spawn(async move {
@@ -369,34 +384,47 @@ impl GatewayServer {
                     }
                     result = &mut runtime_future => {
                         let terminal_frame = match result {
-                            Ok(response) => GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
-                                request_id: send_turn.request_id.clone(),
-                                session: session.gateway_session(),
-                                turn: GatewayTurnStatus {
-                                    turn_id: send_turn.turn_id.clone(),
-                                    state: GatewayTurnState::Completed,
-                                },
-                                response,
-                            }),
-                            Err(RuntimeError::Cancelled) => GatewayServerFrame::TurnCancelled(
-                                GatewayTurnCancelled {
+                            Ok(response) => {
+                                tracing::info!(turn_id = %send_turn.turn_id, "turn completed");
+                                GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
                                     request_id: send_turn.request_id.clone(),
                                     session: session.gateway_session(),
                                     turn: GatewayTurnStatus {
                                         turn_id: send_turn.turn_id.clone(),
-                                        state: GatewayTurnState::Cancelled,
+                                        state: GatewayTurnState::Completed,
                                     },
-                                },
-                            ),
-                            Err(error) => GatewayServerFrame::Error(GatewayErrorFrame {
-                                request_id: Some(send_turn.request_id.clone()),
-                                session: Some(session.gateway_session()),
-                                turn: Some(GatewayTurnStatus {
-                                    turn_id: send_turn.turn_id.clone(),
-                                    state: GatewayTurnState::Failed,
-                                }),
-                                message: error.to_string(),
-                            }),
+                                    response,
+                                })
+                            }
+                            Err(RuntimeError::Cancelled) => {
+                                tracing::info!(turn_id = %send_turn.turn_id, "turn cancelled");
+                                GatewayServerFrame::TurnCancelled(
+                                    GatewayTurnCancelled {
+                                        request_id: send_turn.request_id.clone(),
+                                        session: session.gateway_session(),
+                                        turn: GatewayTurnStatus {
+                                            turn_id: send_turn.turn_id.clone(),
+                                            state: GatewayTurnState::Cancelled,
+                                        },
+                                    },
+                                )
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    turn_id = %send_turn.turn_id,
+                                    %error,
+                                    "turn failed"
+                                );
+                                GatewayServerFrame::Error(GatewayErrorFrame {
+                                    request_id: Some(send_turn.request_id.clone()),
+                                    session: Some(session.gateway_session()),
+                                    turn: Some(GatewayTurnStatus {
+                                        turn_id: send_turn.turn_id.clone(),
+                                        state: GatewayTurnState::Failed,
+                                    }),
+                                    message: error.to_string(),
+                                })
+                            }
                         };
 
                         {

@@ -491,35 +491,35 @@ fn apply_web_search_config(config: &WebSearchConfig) {
 
     let provider_upper = provider.to_ascii_uppercase();
 
-    if let Some(base_url) = config.base_url.as_deref() {
-        if !provider_upper.is_empty() {
-            set_if_absent(
-                &format!("OXYDRA_WEB_SEARCH_{provider_upper}_BASE_URL"),
-                base_url,
-            );
-        }
+    if let Some(base_url) = config.base_url.as_deref()
+        && !provider_upper.is_empty()
+    {
+        set_if_absent(
+            &format!("OXYDRA_WEB_SEARCH_{provider_upper}_BASE_URL"),
+            base_url,
+        );
     }
-    if let Some(base_urls) = config.base_urls.as_deref() {
-        if !provider_upper.is_empty() {
-            set_if_absent(
-                &format!("OXYDRA_WEB_SEARCH_{provider_upper}_BASE_URLS"),
-                base_urls,
-            );
-        }
+    if let Some(base_urls) = config.base_urls.as_deref()
+        && !provider_upper.is_empty()
+    {
+        set_if_absent(
+            &format!("OXYDRA_WEB_SEARCH_{provider_upper}_BASE_URLS"),
+            base_urls,
+        );
     }
 
     // api_key_env and engine_id_env are indirection: the config value names the
     // env var holding the actual secret, and we copy it into the canonical var.
     if provider == "google" {
-        if let Some(api_key_env) = config.api_key_env.as_deref() {
-            if let Ok(api_key) = env::var(api_key_env) {
-                set_if_absent("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY", &api_key);
-            }
+        if let Some(api_key_env) = config.api_key_env.as_deref()
+            && let Ok(api_key) = env::var(api_key_env)
+        {
+            set_if_absent("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY", &api_key);
         }
-        if let Some(engine_id_env) = config.engine_id_env.as_deref() {
-            if let Ok(engine_id) = env::var(engine_id_env) {
-                set_if_absent("OXYDRA_WEB_SEARCH_GOOGLE_CX", &engine_id);
-            }
+        if let Some(engine_id_env) = config.engine_id_env.as_deref()
+            && let Ok(engine_id) = env::var(engine_id_env)
+        {
+            set_if_absent("OXYDRA_WEB_SEARCH_GOOGLE_CX", &engine_id);
         }
     }
 

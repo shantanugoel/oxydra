@@ -113,11 +113,20 @@ impl AgentRuntime {
         tool_call: &ToolCall,
         cancellation: &CancellationToken,
     ) -> Result<Message, RuntimeError> {
+        tracing::debug!(tool = %tool_call.name, "executing tool call");
+        let start = std::time::Instant::now();
         let output = match self
             .execute_tool_call(&tool_call.name, &tool_call.arguments, cancellation)
             .await
         {
-            Ok(out) => out,
+            Ok(out) => {
+                tracing::debug!(
+                    tool = %tool_call.name,
+                    duration_ms = start.elapsed().as_millis(),
+                    "tool call succeeded"
+                );
+                out
+            }
             Err(RuntimeError::Tool(err)) => {
                 tracing::warn!(
                     ?err,

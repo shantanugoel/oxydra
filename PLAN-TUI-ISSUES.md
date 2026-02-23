@@ -2,16 +2,16 @@
 
 ## Table of Contents
 
-1. [Issue 1: Socket Files Exposed in User Workspace `tmp/`](#issue-1-socket-files-exposed-in-user-workspace-tmp)
+1. [Issue 1: Socket Files Exposed in User Workspace `tmp/` ✅ RESOLVED](#issue-1-socket-files-exposed-in-user-workspace-tmp)
 2. [Issue 2: TUI Does Not Support Mouse Selection / Copy ✅ RESOLVED](#issue-2-tui-does-not-support-mouse-selection--copy-✅-resolved)
 3. [Issue 3: TUI Becomes Unresponsive on Connection Loss (No Ctrl+C) ✅ RESOLVED](#issue-3-tui-becomes-unresponsive-on-connection-loss-no-ctrlc-✅-resolved)
-4. [Issue 4: Gateway WebSocket Port Discovery Is Manual and Fragile](#issue-4-gateway-websocket-port-discovery-is-manual-and-fragile)
+4. [Issue 4: Gateway WebSocket Port Discovery Is Manual and Fragile ✅ RESOLVED](#issue-4-gateway-websocket-port-discovery-is-manual-and-fragile)
 5. [Issue 5: Insufficient Logging Across the Stack ✅ RESOLVED](#issue-5-insufficient-logging-across-the-stack-✅-resolved)
 6. [Issue 6: Additional UX Issues Found During Review](#issue-6-additional-ux-issues-found-during-review)
 
 ---
 
-## Issue 1: Socket Files Exposed in User Workspace `tmp/`
+## Issue 1: Socket Files Exposed in User Workspace `tmp/` ✅ RESOLVED
 
 ### Problem
 
@@ -217,7 +217,7 @@ As a belt-and-suspenders approach, track consecutive Ctrl+C presses even if the 
 
 ---
 
-## Issue 4: Gateway WebSocket Port Discovery Is Manual and Fragile
+## Issue 4: Gateway WebSocket Port Discovery Is Manual and Fragile ✅ RESOLVED
 
 ### Problem
 
@@ -647,7 +647,7 @@ This keeps progress transient (shown in the status bar area, not permanently in 
 - Does not add a separate WebSocket channel for progress (over-engineering)
 - Does not require channels to handle progress — it's optional for any channel implementation
 
-### 6c. No Graceful Shutdown — Socket and Marker File Cleanup
+### 6c. No Graceful Shutdown — Socket and Marker File Cleanup ✅ RESOLVED
 
 **Problem:** When oxydra-vm or the runner exits (normally or via signal), the `gateway-endpoint` marker file and socket files are not cleaned up. Stale marker files cause `--tui` mode to attempt connection to a dead endpoint, leading to confusing errors.
 
@@ -693,14 +693,14 @@ Approach B — **Embed TUI in runner**: Instead of spawning a separate binary, m
 
 | # | Issue | Root Cause | Severity | Fix Scope |
 |---|-------|-----------|----------|-----------|
-| 1 | Socket files in shared `tmp/` | IPC and scratch share the same directory | **Critical** (security) | runner, oxydra-vm, backend, sandbox policy |
+| 1 | Socket files in shared `tmp/` | IPC and scratch share the same directory | **Critical** (security) | runner, oxydra-vm, backend, sandbox policy | ✅ RESOLVED |
 | 2 | No mouse copy/paste | `EnableMouseCapture` enabled but mouse events are dropped | **Medium** | app.rs (2 lines) | ✅ RESOLVED |
 | 3 | TUI frozen on disconnect | `reconnect_loop()` blocks the main `select!` loop | **High** | app.rs (restructure main loop) | ✅ RESOLVED |
-| 4 | Manual port discovery | Gateway port not surfaced to runner stdout; no auto-discovery in TUI | **High** | main.rs, oxydra-vm.rs, oxydra-tui.rs |
+| 4 | Manual port discovery | Gateway port not surfaced to runner stdout; no auto-discovery in TUI | **High** | main.rs, oxydra-vm.rs, oxydra-tui.rs | ✅ RESOLVED |
 | 5 | Insufficient logging | Missing key lifecycle events at INFO/DEBUG | **Medium** | types, runtime, gateway, runner, oxydra-vm | ✅ RESOLVED |
 | 6a | No multi-line input | `Enter` = submit, no alternative for newlines | **Low** | event_loop.rs, widgets.rs |
 | 6b | No runtime activity visibility | Progress events not emitted or forwarded to channels | **Medium** | types, runtime, gateway, tui (~150 LOC) |
-| 6c | Stale marker/socket files | No cleanup on shutdown | **Medium** | oxydra-vm.rs, runner lib.rs |
+| 6c | Stale marker/socket files | No cleanup on shutdown | **Medium** | oxydra-vm.rs, runner lib.rs | ✅ RESOLVED |
 | 6d | Subtle disabled input state | Only border color changes on disconnect | **Low** | widgets.rs |
 | 6e | TUI binary not bundled | Separate `cargo install` required | **Low** | main.rs, build scripts |
 

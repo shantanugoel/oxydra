@@ -1,15 +1,16 @@
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
 use runner::{
-    Runner, RunnerControlTransportError, RunnerError, RunnerStartRequest, RunnerTuiConnectRequest,
-    catalog::CatalogError,
+    GATEWAY_ENDPOINT_MARKER_FILE, Runner, RunnerControlTransportError, RunnerError,
+    RunnerStartRequest, RunnerTuiConnectRequest, catalog::CatalogError,
 };
 use thiserror::Error;
 use types::init_tracing;
 
 const DEFAULT_RUNNER_CONFIG_PATH: &str = ".oxydra/runner.toml";
 const TUI_BINARY_NAME: &str = "oxydra-tui";
+const GATEWAY_ENDPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 enum CliCommand {
@@ -76,6 +77,11 @@ enum CliError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "timed out waiting for gateway endpoint marker at `{path}` after {timeout_secs}s; \
+         the oxydra-vm process may not have started correctly"
+    )]
+    GatewayEndpointTimeout { path: PathBuf, timeout_secs: u64 },
 }
 
 fn main() -> ExitCode {
@@ -141,8 +147,22 @@ fn run() -> Result<(), CliError> {
         "runner user session started"
     );
 
+    // Poll for the gateway endpoint marker written by oxydra-vm and print it
+    // so callers can discover the WebSocket URL without manual file inspection.
+    match wait_for_gateway_endpoint(&startup.workspace.ipc, GATEWAY_ENDPOINT_WAIT_TIMEOUT) {
+        Ok(gateway_endpoint) => {
+            println!("gateway_endpoint={gateway_endpoint}");
+            tracing::info!(%gateway_endpoint, user_id = %startup.user_id, "runner started guest");
+        }
+        Err(error) => {
+            // Non-fatal: log the warning but continue — some tiers may not
+            // expose a gateway endpoint immediately or at all.
+            tracing::warn!(error = %error, "could not read gateway endpoint marker");
+        }
+    }
+
     if args.daemon {
-        let control_socket_path = startup.workspace.tmp.join("runner-control.sock");
+        let control_socket_path = startup.workspace.ipc.join("runner-control.sock");
         let _ = std::fs::remove_file(&control_socket_path);
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -293,6 +313,31 @@ fn which_tui_binary() -> Result<PathBuf, CliError> {
     Err(CliError::TuiBinaryNotFound {
         binary: TUI_BINARY_NAME.to_owned(),
     })
+}
+
+/// Poll the `ipc/` directory for the gateway endpoint marker file written by
+/// `oxydra-vm` after it binds the WebSocket listener. Returns the endpoint URL
+/// once the marker is readable and non-empty, or an error if the timeout
+/// elapses first.
+fn wait_for_gateway_endpoint(ipc_dir: &std::path::Path, timeout: Duration) -> Result<String, CliError> {
+    use std::time::Instant;
+    let marker = ipc_dir.join(GATEWAY_ENDPOINT_MARKER_FILE);
+    let started = Instant::now();
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&marker) {
+            let endpoint = content.trim().to_owned();
+            if !endpoint.is_empty() {
+                return Ok(endpoint);
+            }
+        }
+        if started.elapsed() >= timeout {
+            return Err(CliError::GatewayEndpointTimeout {
+                path: marker,
+                timeout_secs: timeout.as_secs(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 #[cfg(test)]

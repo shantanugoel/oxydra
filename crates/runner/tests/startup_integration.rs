@@ -87,6 +87,7 @@ fn runner_provisions_workspace_layout_on_first_start() {
     assert!(startup.workspace.shared.is_dir());
     assert!(startup.workspace.tmp.is_dir());
     assert!(startup.workspace.vault.is_dir());
+    assert!(startup.workspace.ipc.is_dir());
     assert!(startup.startup_status.sidecar_available);
 
     let _ = fs::remove_dir_all(root);

@@ -61,7 +61,8 @@ const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
 const LOGS_DIR_NAME: &str = "logs";
-const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
+const IPC_DIR_NAME: &str = "ipc";
+pub const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
 
 const FIRECRACKER_BINARY: &str = "firecracker";
 const PROCESS_EXECUTABLE_ENV_KEY: &str = "OXYDRA_VM_PROCESS_EXECUTABLE";
@@ -247,9 +248,20 @@ impl Runner {
         let user_id = validate_user_id(&request.user_id)?.to_owned();
         let _user_config = self.load_user_config(&user_id)?;
         let workspace = self.provision_user_workspace(&user_id)?;
-        let endpoint_path = workspace.tmp.join(GATEWAY_ENDPOINT_MARKER_FILE);
+        let endpoint_path = workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
         let gateway_endpoint = read_gateway_endpoint_marker(&endpoint_path, &user_id)?;
-        let runtime_session_id = probe_gateway_health(&gateway_endpoint, &user_id)?;
+        let runtime_session_id =
+            probe_gateway_health(&gateway_endpoint, &user_id).map_err(|error| {
+                if let RunnerError::GatewayProbeFailed { endpoint, message } = error {
+                    RunnerError::StaleGatewayEndpoint {
+                        endpoint,
+                        marker_path: endpoint_path.clone(),
+                        message,
+                    }
+                } else {
+                    error
+                }
+            })?;
 
         Ok(RunnerTuiConnection {
             user_id,
@@ -334,7 +346,7 @@ pub fn provision_user_workspace(
     let root = workspace_root.as_ref().join(user_id);
 
     // Create directories first so canonicalize can resolve the path.
-    for dir_name in [SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME, LOGS_DIR_NAME] {
+    for dir_name in [SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME, LOGS_DIR_NAME, IPC_DIR_NAME] {
         let path = root.join(dir_name);
         fs::create_dir_all(&path)
             .map_err(|source| RunnerError::ProvisionWorkspace { path, source })?;
@@ -348,6 +360,7 @@ pub fn provision_user_workspace(
     let tmp = root.join(TMP_DIR_NAME);
     let vault = root.join(VAULT_DIR_NAME);
     let logs = root.join(LOGS_DIR_NAME);
+    let ipc = root.join(IPC_DIR_NAME);
 
     Ok(UserWorkspace {
         root,
@@ -355,6 +368,7 @@ pub fn provision_user_workspace(
         tmp,
         vault,
         logs,
+        ipc,
     })
 }
 
@@ -677,6 +691,7 @@ pub struct UserWorkspace {
     pub tmp: PathBuf,
     pub vault: PathBuf,
     pub logs: PathBuf,
+    pub ipc: PathBuf,
 }
 
 #[derive(Debug)]
@@ -709,6 +724,10 @@ impl RunnerStartup {
             StartupDegradedReasonCode::RuntimeShutdown,
             "runtime is shut down",
         );
+        // Remove the gateway endpoint marker so stale files don't confuse
+        // a future `connect_tui` call.
+        let marker_path = self.workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
+        let _ = fs::remove_file(&marker_path);
         Ok(())
     }
 
@@ -1065,6 +1084,17 @@ pub enum RunnerError {
     InvalidGatewayEndpoint { path: PathBuf },
     #[error("failed to probe gateway endpoint `{endpoint}`: {message}")]
     GatewayProbeFailed { endpoint: String, message: String },
+    #[error(
+        "found gateway endpoint marker at `{marker_path}` but the gateway is not responding \
+         (`{endpoint}`): {message}\n\
+         The previous session may have exited without cleanup. \
+         Remove `{marker_path}` and restart."
+    )]
+    StaleGatewayEndpoint {
+        endpoint: String,
+        marker_path: PathBuf,
+        message: String,
+    },
     #[error("failed to transfer image `{image}` into sandbox VM: {message}")]
     ImageTransfer { image: String, message: String },
 }
@@ -1141,7 +1171,7 @@ fn pre_compute_sidecar_endpoint(
             address: format!(
                 "unix://{}",
                 workspace
-                    .tmp
+                    .ipc
                     .join("shell-daemon-vsock.sock")
                     .to_string_lossy()
             ),
@@ -1149,7 +1179,7 @@ fn pre_compute_sidecar_endpoint(
         _ => SidecarEndpoint {
             transport: SidecarTransport::Unix,
             address: workspace
-                .tmp
+                .ipc
                 .join("shell-daemon.sock")
                 .to_string_lossy()
                 .into_owned(),
@@ -1306,7 +1336,7 @@ async fn launch_docker_container_async(
         RunnerGuestRole::ShellVm => {
             let socket_path = params
                 .workspace
-                .tmp
+                .ipc
                 .join("shell-daemon.sock")
                 .to_string_lossy()
                 .into_owned();
@@ -1791,7 +1821,7 @@ fn write_bootstrap_file(
     workspace: &UserWorkspace,
     bootstrap: &RunnerBootstrapEnvelope,
 ) -> Result<PathBuf, RunnerError> {
-    let bootstrap_dir = workspace.tmp.join("bootstrap");
+    let bootstrap_dir = workspace.ipc.join("bootstrap");
     fs::create_dir_all(&bootstrap_dir).map_err(|source| RunnerError::ProvisionWorkspace {
         path: bootstrap_dir.clone(),
         source,

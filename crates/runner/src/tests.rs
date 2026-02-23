@@ -171,6 +171,7 @@ fn workspace_provisioning_creates_expected_directories() {
     assert!(workspace.shared.is_dir());
     assert!(workspace.tmp.is_dir());
     assert!(workspace.vault.is_dir());
+    assert!(workspace.ipc.is_dir());
 
     let _ = fs::remove_dir_all(root);
 }
@@ -605,7 +606,7 @@ fn tui_connect_only_succeeds_against_running_gateway_endpoint() {
 
     let (gateway_endpoint, server_task) = spawn_mock_gateway_probe_server(true);
     fs::write(
-        workspace.tmp.join(GATEWAY_ENDPOINT_MARKER_FILE),
+        workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE),
         &gateway_endpoint,
     )
     .expect("gateway endpoint marker should be writable");
@@ -661,7 +662,7 @@ fn tui_connect_only_never_spawns_guest_when_probe_fails() {
         .provision_user_workspace("alice")
         .expect("workspace should provision");
     fs::write(
-        workspace.tmp.join(GATEWAY_ENDPOINT_MARKER_FILE),
+        workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE),
         "ws://127.0.0.1:9/ws",
     )
     .expect("gateway endpoint marker should be writable");
@@ -669,7 +670,7 @@ fn tui_connect_only_never_spawns_guest_when_probe_fails() {
     let error = runner
         .connect_tui(RunnerTuiConnectRequest::new("alice"))
         .expect_err("unreachable gateway probe should fail");
-    assert!(matches!(error, RunnerError::GatewayProbeFailed { .. }));
+    assert!(matches!(error, RunnerError::StaleGatewayEndpoint { .. }));
     assert!(backend.recorded_launches().is_empty());
 
     let _ = fs::remove_dir_all(root);
@@ -889,8 +890,8 @@ fn bootstrap_file_written_with_correct_content_for_non_process_tier() {
 
     assert!(path.exists(), "bootstrap file should exist on disk");
     assert!(
-        path.starts_with(&workspace.tmp),
-        "bootstrap file should be under workspace.tmp"
+        path.starts_with(&workspace.ipc),
+        "bootstrap file should be under workspace.ipc"
     );
     assert_eq!(
         path.file_name().and_then(|n| n.to_str()),

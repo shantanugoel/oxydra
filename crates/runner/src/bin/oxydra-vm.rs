@@ -151,23 +151,33 @@ async fn run() -> Result<(), VmError> {
             source,
         })?;
     let address = listener.local_addr().map_err(VmError::GatewayAddress)?;
-    write_gateway_endpoint_marker(&args.workspace_root, address)?;
+    let marker_path = write_gateway_endpoint_marker(&args.workspace_root, address)?;
     info!(
         user_id = %args.user_id,
         gateway_endpoint = %gateway_endpoint(address),
         "oxydra-vm started"
     );
 
+    // Run the gateway until the process receives a termination signal, then
+    // clean up the endpoint marker so stale files do not confuse future
+    // `connect_tui` calls.
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
-        .map_err(VmError::ServeGateway)
+        .map_err(VmError::ServeGateway)?;
+
+    let _ = fs::remove_file(&marker_path);
+    Ok(())
 }
 
 fn write_gateway_endpoint_marker(
     workspace_root: &Path,
     address: SocketAddr,
-) -> Result<(), VmError> {
-    let marker_directory = workspace_root.join("tmp");
+) -> Result<PathBuf, VmError> {
+    let marker_directory = workspace_root.join("ipc");
     fs::create_dir_all(&marker_directory).map_err(|source| VmError::GatewayMarkerWrite {
         path: marker_directory.clone(),
         source,
@@ -176,10 +186,11 @@ fn write_gateway_endpoint_marker(
     let marker_path = marker_directory.join(GATEWAY_ENDPOINT_MARKER_FILE);
     fs::write(&marker_path, gateway_endpoint(address)).map_err(|source| {
         VmError::GatewayMarkerWrite {
-            path: marker_path,
+            path: marker_path.clone(),
             source,
         }
-    })
+    })?;
+    Ok(marker_path)
 }
 
 fn gateway_endpoint(address: SocketAddr) -> String {
@@ -323,9 +334,12 @@ mod tests {
         let address: SocketAddr = "127.0.0.1:42001"
             .parse()
             .expect("socket address should parse");
-        write_gateway_endpoint_marker(&root, address).expect("marker should write");
-        let marker_path = root.join("tmp").join(GATEWAY_ENDPOINT_MARKER_FILE);
-        let marker = fs::read_to_string(marker_path).expect("marker file should be readable");
+        let marker_path = write_gateway_endpoint_marker(&root, address).expect("marker should write");
+        assert!(
+            marker_path.starts_with(root.join("ipc")),
+            "marker file should be under workspace ipc/"
+        );
+        let marker = fs::read_to_string(&marker_path).expect("marker file should be readable");
         assert_eq!(marker, "ws://127.0.0.1:42001/ws");
         let _ = fs::remove_dir_all(root);
     }

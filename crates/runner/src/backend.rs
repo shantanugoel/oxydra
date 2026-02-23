@@ -41,14 +41,14 @@ impl CrateSandboxBackend {
             })?;
 
         // Generate a per-launch config with bootstrap injected into boot_args.
-        let generated_config = request.workspace.tmp.join("firecracker-oxydra-vm.json");
+        let generated_config = request.workspace.ipc.join("firecracker-oxydra-vm.json");
         generate_firecracker_config(
             fc_oxydra_config,
             request.bootstrap_file.as_deref(),
             &generated_config,
         )?;
 
-        let runtime_api_socket = request.workspace.tmp.join("oxydra-vm-firecracker.sock");
+        let runtime_api_socket = request.workspace.ipc.join("oxydra-vm-firecracker.sock");
         let runtime_command = RunnerCommandSpec::new(
             FIRECRACKER_BINARY,
             vec![
@@ -105,7 +105,7 @@ impl CrateSandboxBackend {
             };
 
             // Generate a per-launch sidecar config (bootstrap not injected for sidecar).
-            let generated_sidecar_config = request.workspace.tmp.join("firecracker-shell-vm.json");
+            let generated_sidecar_config = request.workspace.ipc.join("firecracker-shell-vm.json");
             if let Err(error) = generate_firecracker_config(
                 &fc_shell_config,
                 None, // sidecar does not need bootstrap
@@ -132,7 +132,7 @@ impl CrateSandboxBackend {
                 });
             }
 
-            let sidecar_api_socket = request.workspace.tmp.join("shell-vm-firecracker.sock");
+            let sidecar_api_socket = request.workspace.ipc.join("shell-vm-firecracker.sock");
             let sidecar_command = RunnerCommandSpec::new(
                 FIRECRACKER_BINARY,
                 vec![

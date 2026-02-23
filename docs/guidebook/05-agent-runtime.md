@@ -244,3 +244,37 @@ The runtime is instrumented with `tracing` spans throughout:
 - **Budget spans** — context utilization percentage, cost accumulation
 
 These spans are emitted via `tracing-subscriber` and can be upgraded to OpenTelemetry export without changing instrumentation code.
+
+## Progress Events
+
+The runtime emits `StreamItem::Progress` events at key transition points within `run_session_internal`. These are delivered on the same `stream_events` channel as `StreamItem::Text` deltas and flow all the way to connected channels, giving users real-time visibility into multi-step execution.
+
+```rust
+pub enum StreamItem {
+    Text(String),
+    Progress(RuntimeProgressEvent),  // ← emitted by runtime
+    // ... other variants
+}
+
+pub struct RuntimeProgressEvent {
+    pub kind: RuntimeProgressKind,
+    pub message: String,   // e.g. "[2/8] Executing tools: file_read"
+    pub turn: usize,
+    pub max_turns: usize,
+}
+
+pub enum RuntimeProgressKind {
+    ProviderCall,
+    ToolExecution { tool_names: Vec<String> },
+    RollingSummary,
+}
+```
+
+**Emission points:**
+
+| Point | Event |
+|-------|-------|
+| Before each `request_provider_response()` call | `RuntimeProgressKind::ProviderCall` |
+| Before tool dispatch loop | `RuntimeProgressKind::ToolExecution { tool_names }` |
+
+Progress events are not emitted from within provider streams — they originate only in the runtime loop itself, at transitions the provider cannot observe. Channels decide independently how to render them. The TUI shows the `progress.message` string as the input bar title (replacing "Waiting...") while a turn is active.

@@ -166,6 +166,11 @@ impl TuiViewModel {
             GatewayServerFrame::HealthStatus(_) => {
                 // Health status does not affect message history.
             }
+            GatewayServerFrame::TurnProgress(_) => {
+                // Progress events are reflected in the adapter's `activity_status`
+                // field and shown in the input bar title.  They do not produce
+                // permanent chat history entries.
+            }
         }
     }
 
@@ -528,6 +533,30 @@ mod tests {
         ));
 
         assert!(vm.message_history.is_empty());
+    }
+
+    #[test]
+    fn turn_progress_does_not_affect_history() {
+        use types::{GatewayTurnProgress, RuntimeProgressEvent, RuntimeProgressKind};
+
+        let mut vm = TuiViewModel::new();
+        vm.apply_server_frame(&GatewayServerFrame::TurnProgress(GatewayTurnProgress {
+            request_id: "req-1".to_owned(),
+            session: session("rt-1"),
+            turn: turn_status("t1", GatewayTurnState::Running),
+            progress: RuntimeProgressEvent {
+                kind: RuntimeProgressKind::ProviderCall,
+                message: "[1/8] Calling provider".to_owned(),
+                turn: 1,
+                max_turns: 8,
+            },
+        }));
+
+        // Progress events do not produce chat history entries.
+        assert!(
+            vm.message_history.is_empty(),
+            "turn_progress should not add to message history"
+        );
     }
 
     // ── Full turn cycle ─────────────────────────────────────────────────

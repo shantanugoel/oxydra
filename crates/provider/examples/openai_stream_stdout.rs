@@ -59,6 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     StreamItem::FinishReason(reason) => {
                         eprintln!("\n[finish_reason] {reason}");
                     }
+                    StreamItem::Progress(_) => {
+                        // Progress events are emitted by the runtime layer, not
+                        // by provider streams; ignored in this example.
+                    }
                 }
             }
             println!();

@@ -6,8 +6,9 @@ use tools::ToolRegistry;
 use types::{
     Context, Memory, MemoryError, MemoryHybridQueryRequest, MemoryRecallRequest, MemoryRetrieval,
     MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
-    Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError, SafetyTier,
-    StreamItem, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError,
+    RuntimeProgressEvent, RuntimeProgressKind, SafetyTier, StreamItem, ToolCall, ToolCallDelta,
+    ToolError, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -227,6 +228,16 @@ impl AgentRuntime {
             tracing::debug!(turn, ?state, "running provider turn");
             tracing::info!(turn, max_turns = self.limits.max_turns, "calling provider");
 
+            // Notify listeners that a provider call is about to happen.
+            if let Some(ref sender) = stream_events {
+                let _ = sender.send(StreamItem::Progress(RuntimeProgressEvent {
+                    kind: RuntimeProgressKind::ProviderCall,
+                    message: format!("[{turn}/{}] Calling provider", self.limits.max_turns),
+                    turn,
+                    max_turns: self.limits.max_turns,
+                }));
+            }
+
             self.maybe_trigger_rolling_summary(session_id, context)
                 .await?;
             let provider_context = self.prepare_provider_context(session_id, context).await?;
@@ -273,6 +284,21 @@ impl AgentRuntime {
                 tool_calls = tool_calls.len(),
                 "executing tool calls"
             );
+
+            // Notify listeners about the upcoming tool execution batch.
+            if let Some(ref sender) = stream_events {
+                let tool_names: Vec<String> =
+                    tool_calls.iter().map(|tc| tc.name.clone()).collect();
+                let names_display = tool_names.join(", ");
+                let _ = sender.send(StreamItem::Progress(RuntimeProgressEvent {
+                    kind: RuntimeProgressKind::ToolExecution {
+                        tool_names: tool_names.clone(),
+                    },
+                    message: format!("[{turn}/{}] Executing tools: {names_display}", self.limits.max_turns),
+                    turn,
+                    max_turns: self.limits.max_turns,
+                }));
+            }
 
             let mut current_batch = Vec::new();
             for tool_call in &tool_calls {

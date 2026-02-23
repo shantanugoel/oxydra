@@ -13,7 +13,8 @@ pub use channel::{
     GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn, GatewayClientFrame,
     GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
     GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewayTurnCancelled,
-    GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus,
+    GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted, GatewayTurnState,
+    GatewayTurnStatus,
 };
 pub use config::{
     AgentConfig, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
@@ -31,8 +32,8 @@ pub use memory::{
 pub use model::{
     CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, InterleavedSpec, Message,
     MessageRole, Modalities, ModelCatalog, ModelCost, ModelDescriptor, ModelId, ModelLimits,
-    ProviderCaps, ProviderId, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
-    derive_caps,
+    ProviderCaps, ProviderId, Response, RuntimeProgressEvent, RuntimeProgressKind, StreamItem,
+    ToolCall, ToolCallDelta, UsageUpdate, derive_caps,
 };
 pub use provider::{Provider, ProviderStream};
 pub use runner::{

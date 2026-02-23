@@ -174,16 +174,26 @@ fn push_streaming_lines(lines: &mut Vec<Line<'static>>, text: &str) {
 // InputBar
 // ---------------------------------------------------------------------------
 
-/// Single-line text input with a bordered block.
+/// Single-line or multi-line text input with a bordered block.
 ///
-/// The block title reflects prompt status (`" Prompt "` or `" Waiting... "`),
-/// and the border color turns gray when input is disabled (active turn in
-/// progress or connection lost).
+/// The block title reflects prompt status (`" Prompt "`, `" Waiting... "`, or
+/// a runtime activity message when one is available), and the border color
+/// turns gray when input is disabled (active turn in progress or connection
+/// lost).
+///
+/// Multi-line input is supported: pressing Alt+Enter inserts a newline into
+/// the buffer, and the widget grows vertically to accommodate the content.
+/// The layout in [`render_app`] computes the input area height dynamically
+/// from the buffer's line count.
 pub struct InputBar<'a> {
     content: &'a str,
     cursor_byte_position: usize,
     is_disabled: bool,
     has_active_turn: bool,
+    /// Optional activity description shown in the title while a turn is
+    /// running, e.g. `"[1/8] Executing tools: file_read"`.  When `None`
+    /// and a turn is active, the title falls back to `" Waiting... "`.
+    activity_message: Option<&'a str>,
 }
 
 impl<'a> InputBar<'a> {
@@ -192,12 +202,14 @@ impl<'a> InputBar<'a> {
         cursor_byte_position: usize,
         is_disabled: bool,
         has_active_turn: bool,
+        activity_message: Option<&'a str>,
     ) -> Self {
         Self {
             content,
             cursor_byte_position,
             is_disabled,
             has_active_turn,
+            activity_message,
         }
     }
 
@@ -205,22 +217,41 @@ impl<'a> InputBar<'a> {
     /// [`Frame::set_cursor_position`].
     ///
     /// Returns `None` when input is disabled (the cursor should be hidden).
-    /// Uses `unicode-width` to translate the byte-index cursor into a
-    /// display-column offset.
+    ///
+    /// For multi-line content, the method accounts for logical newlines and
+    /// for visual line-wrapping within the inner widget width.
     pub fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
         if self.is_disabled {
             return None;
         }
+        let inner_width = area.width.saturating_sub(2) as usize;
+        if inner_width == 0 {
+            return None;
+        }
+
         let prefix = &self.content[..self.cursor_byte_position];
-        let display_offset = UnicodeWidthStr::width(prefix);
-        // +1 for the left border; clamp so the cursor stays inside the area.
-        let inner_width = area.width.saturating_sub(2);
+
+        // Split on logical newlines to find cursor row and column.
+        let lines: Vec<&str> = prefix.split('\n').collect();
+        let logical_row = lines.len() - 1;
+        let last_line = lines.last().copied().unwrap_or("");
+        let display_col = UnicodeWidthStr::width(last_line);
+
+        // Account for visual wrapping within the inner area width.
+        let wrapped_row_offset = display_col / inner_width;
+        let cursor_col_on_screen = display_col % inner_width;
+
+        let total_row = logical_row + wrapped_row_offset;
+
+        // +1 for the left border.
         let cx = area.x.saturating_add(1).saturating_add(
-            u16::try_from(display_offset)
-                .unwrap_or(inner_width)
-                .min(inner_width),
+            u16::try_from(cursor_col_on_screen).unwrap_or(u16::MAX),
         );
-        let cy = area.y.saturating_add(1); // +1 for the top border
+        // +1 for the top border.
+        let cy = area
+            .y
+            .saturating_add(1)
+            .saturating_add(u16::try_from(total_row).unwrap_or(u16::MAX));
         Some((cx, cy))
     }
 }
@@ -228,9 +259,13 @@ impl<'a> InputBar<'a> {
 impl Widget for InputBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let title = if self.has_active_turn {
-            " Waiting... "
+            if let Some(status) = self.activity_message {
+                format!(" {status} ")
+            } else {
+                " Waiting... ".to_owned()
+            }
         } else {
-            " Prompt "
+            " Prompt ".to_owned()
         };
         let border_style = if self.is_disabled {
             Style::new().fg(Color::DarkGray)
@@ -240,7 +275,10 @@ impl Widget for InputBar<'_> {
 
         let block = Block::bordered().title(title).border_style(border_style);
 
-        Paragraph::new(self.content).block(block).render(area, buf);
+        Paragraph::new(self.content)
+            .wrap(Wrap { trim: false })
+            .block(block)
+            .render(area, buf);
     }
 }
 
@@ -335,17 +373,27 @@ impl Widget for StatusBar<'_> {
 ///
 /// The layout splits vertically into three regions:
 /// - **Message pane** (fills remaining space) -- scrollable chat history
-/// - **Input bar** (3 rows) -- text input with border and status title
+/// - **Input bar** (3+ rows, grows with content) -- text input with border
 /// - **Status bar** (1 row) -- connection / session / turn info and key hints
+///
+/// The input bar height is computed dynamically from the number of logical
+/// lines in the input buffer, capped at 10 rows total (8 content + 2 borders).
+/// This supports multi-line prompts entered via Alt+Enter.
 ///
 /// The `adapter_state` snapshot drives protocol-aware visuals: the streaming
 /// indicator appears when `active_turn_id` is set and the latest message is
 /// from the assistant; input is disabled during an active turn or when the
 /// connection is not in the [`ConnectionState::Connected`] state.
 pub fn render_app(frame: &mut Frame, model: &TuiViewModel, adapter_state: &TuiUiState) {
+    // Compute input area height based on buffer line count (at least 3, at most 10).
+    // We split on '\n' rather than using `lines()` so a trailing newline is
+    // counted as starting an additional line.
+    let line_count = model.input_buffer.split('\n').count().max(1).min(8);
+    let input_height = (line_count + 2) as u16; // +2 for top/bottom borders
+
     let [message_area, input_area, status_area] = Layout::vertical([
         Constraint::Fill(1),
-        Constraint::Length(3),
+        Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -373,6 +421,7 @@ pub fn render_app(frame: &mut Frame, model: &TuiViewModel, adapter_state: &TuiUi
         model.input_cursor_position,
         is_disabled,
         adapter_state.active_turn_id.is_some(),
+        adapter_state.activity_status.as_deref(),
     );
     let cursor_pos = input_bar.cursor_position(input_area);
     frame.render_widget(input_bar, input_area);
@@ -661,6 +710,79 @@ mod tests {
         assert!(
             input_title_row.contains("Prompt"),
             "input bar should show 'Prompt' when disconnected, got: {input_title_row}"
+        );
+    }
+
+    #[test]
+    fn activity_message_appears_in_input_bar_title_during_active_turn() {
+        let model = TuiViewModel::new();
+        let adapter = TuiUiState {
+            connected: true,
+            runtime_session_id: Some("rt-1".to_owned()),
+            active_turn_id: Some("turn-1".to_owned()),
+            activity_status: Some("[2/8] Executing tools: file_read".to_owned()),
+            ..TuiUiState::default()
+        };
+        let buf = render(&model, &adapter, 80, 24);
+
+        // Input bar title should show the activity message instead of "Waiting...".
+        let input_title_row = row_text(&buf, 20, 80);
+        assert!(
+            input_title_row.contains("Executing tools"),
+            "input bar title should show activity message, got: {input_title_row}"
+        );
+        assert!(
+            !input_title_row.contains("Waiting..."),
+            "input bar should not show 'Waiting...' when activity_status is set, got: {input_title_row}"
+        );
+    }
+
+    #[test]
+    fn waiting_title_shown_when_active_turn_has_no_activity_message() {
+        let model = TuiViewModel::new();
+        let adapter = TuiUiState {
+            connected: true,
+            runtime_session_id: Some("rt-1".to_owned()),
+            active_turn_id: Some("turn-1".to_owned()),
+            activity_status: None,
+            ..TuiUiState::default()
+        };
+        let buf = render(&model, &adapter, 80, 24);
+
+        let input_title_row = row_text(&buf, 20, 80);
+        assert!(
+            input_title_row.contains("Waiting..."),
+            "input bar should show 'Waiting...' when no activity_status, got: {input_title_row}"
+        );
+    }
+
+    #[test]
+    fn multiline_input_expands_input_area_height() {
+        let mut model = TuiViewModel::new();
+        // Two logical lines → input area height should be 4 (2 lines + 2 borders).
+        model.input_buffer = "hello\nworld".to_owned();
+        model.input_cursor_position = model.input_buffer.len();
+
+        let adapter = TuiUiState {
+            connected: true,
+            runtime_session_id: Some("rt-1".to_owned()),
+            ..TuiUiState::default()
+        };
+
+        // Render at 80x24. With 4-row input + 1-row status, message pane gets 19 rows.
+        // Status bar stays on row 23 regardless.
+        let buf = render(&model, &adapter, 80, 24);
+        let status = row_text(&buf, 23, 80);
+        assert!(
+            status.contains("connected"),
+            "status bar should still be on last row, got: {status}"
+        );
+
+        // The input area starts at row 19 (= 24 - 4 - 1) with a 4-row input bar.
+        let input_title_row = row_text(&buf, 19, 80);
+        assert!(
+            input_title_row.contains("Prompt"),
+            "input bar top border should be at row 19 for 2-line buffer, got: {input_title_row}"
         );
     }
 

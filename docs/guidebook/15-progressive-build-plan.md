@@ -19,7 +19,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3. **Gap: upsert_chunks unimplemented** |
 | 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
-| 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring |
+| 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring. **Resolved:** multi-line input (Alt+Enter), runtime activity visibility (`TurnProgress`) |
 | 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides, cached catalog resolution, `skip_catalog_validation` escape hatch, updated CLI (`fetch --pinned`, unfiltered cache) |
 | 14 | External channels + identity mapping | Planned | |
 | 15 | Multi-agent orchestration | Planned | |
@@ -75,7 +75,7 @@ Built the foundation layer with zero internal dependencies:
 
 **Crates:** `provider`
 
-- `StreamItem` enum: `Text`, `ToolCallDelta`, `ReasoningDelta`, `UsageUpdate`, `FinishReason`
+- `StreamItem` enum: `Text`, `ToolCallDelta`, `ReasoningDelta`, `UsageUpdate`, `FinishReason`, `ConnectionLost` (added during TUI phases), `Progress(RuntimeProgressEvent)` (added for runtime activity visibility)
 - OpenAI SSE parser handling `data: [DONE]`, chunked tool call deltas, and usage updates
 - Bounded `mpsc` channels for backpressure between SSE parser and consumer
 - Tool chunk accumulator for reconstructing fragmented JSON arguments
@@ -198,6 +198,8 @@ Built the foundation layer with zero internal dependencies:
 - `TuiApp`: main `tokio::select!` loop with WebSocket split transport (reader/writer tasks), Hello handshake, reconnection with exponential backoff + jitter, `TerminalGuard` RAII for terminal safety, single-point-of-draw rendering
 - `oxydra-tui`: standalone binary entry point (clap CLI, UUID connection ID, multi-threaded tokio runtime)
 - `runner --tui` execs `oxydra-tui` binary; `--probe` flag preserves the old print-and-exit behavior
+- **Multi-line input (Issue 6a):** Alt+Enter inserts a literal newline into the input buffer. The input bar expands vertically to accommodate multiple lines (up to 10 rows). Cursor position accounting handles logical newlines and visual wrapping.
+- **Runtime activity visibility (Issue 6b):** `RuntimeProgressEvent` / `RuntimeProgressKind` types added to `StreamItem`. The runtime emits `StreamItem::Progress` at `ProviderCall` and `ToolExecution` transitions. The gateway turn runner forwards them as `GatewayServerFrame::TurnProgress` frames. `TuiUiState.activity_status` tracks the latest message and it appears in the input bar title while a turn is active.
 
 
 ### Phase 13: Model Catalog Governance + Provider Flexibility

@@ -6,7 +6,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
-use types::ProviderError;
+use types::{ProviderError, StreamItem};
 use url::Url;
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -37,7 +37,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         runtime_session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
-        delta_sender: mpsc::UnboundedSender<String>,
+        delta_sender: mpsc::UnboundedSender<StreamItem>,
     ) -> Result<Response, RuntimeError> {
         self.recorded_calls
             .lock()
@@ -55,7 +55,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
             tokio::select! {
                 _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
                 _ = tokio::time::sleep(delay) => {
-                    let _ = delta_sender.send(delta);
+                    let _ = delta_sender.send(StreamItem::Text(delta));
                 }
             }
         }

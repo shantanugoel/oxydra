@@ -3,8 +3,9 @@ use types::{
     GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn, GatewayClientFrame,
     GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
     GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewayTurnCancelled,
-    GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus, Message,
-    MessageRole, Response, SandboxTier, StartupStatusReport,
+    GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted, GatewayTurnState,
+    GatewayTurnStatus, Message, MessageRole, Response, RuntimeProgressEvent,
+    RuntimeProgressKind, SandboxTier, StartupStatusReport,
 };
 
 fn sample_session() -> GatewaySession {
@@ -111,8 +112,8 @@ fn gateway_server_frames_round_trip_through_serde() {
         GatewayServerFrame::HealthStatus(GatewayHealthStatus {
             request_id: "req-health".to_owned(),
             healthy: true,
-            session: Some(session),
-            active_turn: Some(running_turn),
+            session: Some(session.clone()),
+            active_turn: Some(running_turn.clone()),
             startup_status: Some(StartupStatusReport {
                 sandbox_tier: SandboxTier::Container,
                 sidecar_available: true,
@@ -121,6 +122,19 @@ fn gateway_server_frames_round_trip_through_serde() {
                 degraded_reasons: Vec::new(),
             }),
             message: Some("ok".to_owned()),
+        }),
+        GatewayServerFrame::TurnProgress(GatewayTurnProgress {
+            request_id: "req-send".to_owned(),
+            session: session.clone(),
+            turn: running_turn.clone(),
+            progress: RuntimeProgressEvent {
+                kind: RuntimeProgressKind::ToolExecution {
+                    tool_names: vec!["file_read".to_owned()],
+                },
+                message: "[2/8] Executing tools: file_read".to_owned(),
+                turn: 2,
+                max_turns: 8,
+            },
         }),
     ];
 

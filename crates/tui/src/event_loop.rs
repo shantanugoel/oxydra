@@ -17,7 +17,8 @@ use tokio::sync::mpsc;
 /// protocol actions through the [`TuiChannelAdapter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
-    /// A printable character typed by the user.
+    /// A printable character typed by the user (including `'\n'` for newlines
+    /// inserted via Alt+Enter).
     Char(char),
     /// Backspace key — delete the character before the cursor.
     Backspace,
@@ -32,6 +33,9 @@ pub enum AppAction {
     /// End key — move cursor to the end of input.
     End,
     /// Enter key — submit the current input as a prompt.
+    ///
+    /// Alt+Enter inserts a literal newline ([`AppAction::Char('\n')`]) instead
+    /// of submitting, enabling multi-line prompts.
     Submit,
     /// Scroll message pane up by one line (arrow up or mouse scroll up).
     ScrollUp,
@@ -153,13 +157,18 @@ fn map_key_event(key: KeyEvent) -> Option<AppAction> {
     }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     match (key.code, ctrl) {
         // -- Quit / Cancel ---------------------------------------------------
         (KeyCode::Char('c'), true) => Some(AppAction::Cancel),
         (KeyCode::Char('d'), true) | (KeyCode::Char('q'), true) => Some(AppAction::Quit),
 
-        // -- Submit ----------------------------------------------------------
+        // -- Submit / Newline ------------------------------------------------
+        // Alt+Enter inserts a literal newline into the input buffer so users
+        // can compose multi-line prompts.  Plain Enter (with or without Shift)
+        // submits the current prompt.
+        (KeyCode::Enter, false) if alt => Some(AppAction::Char('\n')),
         (KeyCode::Enter, _) => Some(AppAction::Submit),
 
         // -- Text editing ----------------------------------------------------
@@ -248,6 +257,19 @@ mod tests {
     #[test]
     fn enter_maps_to_submit() {
         let action = map_key_event(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, Some(AppAction::Submit));
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline() {
+        let action = map_key_event(press(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(action, Some(AppAction::Char('\n')));
+    }
+
+    #[test]
+    fn ctrl_enter_still_submits() {
+        // Ctrl+Enter should not insert a newline — plain submit.
+        let action = map_key_event(press(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(action, Some(AppAction::Submit));
     }
 

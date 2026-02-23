@@ -151,6 +151,40 @@ pub enum StreamItem {
     UsageUpdate(UsageUpdate),
     ConnectionLost(String),
     FinishReason(String),
+    /// A progress event emitted by the runtime during multi-step execution.
+    /// Channels can surface these to users in whatever way fits their UX
+    /// (status line update, transient system message, etc.).
+    Progress(RuntimeProgressEvent),
+}
+
+/// A progress notification emitted by the runtime during a multi-step turn.
+///
+/// These events track what the agent is doing between provider calls and tool
+/// executions.  Channels receive them via [`StreamItem::Progress`] and can
+/// choose how to present them (e.g. the TUI shows them in the input bar title;
+/// API channels can include them in a status stream).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeProgressEvent {
+    /// What is currently happening.
+    pub kind: RuntimeProgressKind,
+    /// Human-readable description, e.g. `"[2/8] Executing tools: file_read"`.
+    pub message: String,
+    /// Current internal loop iteration (1-indexed).
+    pub turn: usize,
+    /// Maximum number of internal loop iterations allowed.
+    pub max_turns: usize,
+}
+
+/// Discriminant for [`RuntimeProgressEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RuntimeProgressKind {
+    /// About to call the LLM provider.
+    ProviderCall,
+    /// Executing one or more tool calls.
+    ToolExecution { tool_names: Vec<String> },
+    /// A context rolling summary is being generated.
+    RollingSummary,
 }
 
 // ---------------------------------------------------------------------------

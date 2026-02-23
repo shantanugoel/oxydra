@@ -21,8 +21,9 @@ use types::{
     MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
     MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
     ModelDescriptor, ModelId, ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId,
-    Response, RunnerBootstrapEnvelope, SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport,
-    StreamItem, Tool, ToolCall, ToolCallDelta, ToolError, UsageUpdate,
+    Response, RunnerBootstrapEnvelope, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier,
+    SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall, ToolCallDelta,
+    ToolError, UsageUpdate,
 };
 
 use super::{AgentRuntime, RuntimeLimits};
@@ -597,8 +598,14 @@ async fn run_session_for_session_with_stream_events_forwards_provider_deltas() {
     assert_eq!(
         observed,
         vec![
+            StreamItem::Progress(RuntimeProgressEvent {
+                kind: RuntimeProgressKind::ProviderCall,
+                message: "[1/8] Calling provider".to_owned(),
+                turn: 1,
+                max_turns: 8,
+            }),
             StreamItem::Text("hello".to_owned()),
-            StreamItem::FinishReason("stop".to_owned())
+            StreamItem::FinishReason("stop".to_owned()),
         ]
     );
 }

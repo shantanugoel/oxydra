@@ -97,6 +97,12 @@ impl AgentRuntime {
                         let _ = stream_events.send(StreamItem::ReasoningDelta(delta));
                     }
                 }
+                Ok(StreamItem::Progress(_)) => {
+                    // Progress events are emitted by the runtime layer, not by
+                    // provider streams.  If one somehow arrives here it is a
+                    // no-op; it should not be forwarded from within this collect
+                    // loop since the runtime already emits progress independently.
+                }
                 Err(error) => return Err(StreamCollectError::Provider(error)),
             }
         }

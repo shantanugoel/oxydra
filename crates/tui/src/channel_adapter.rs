@@ -12,8 +12,8 @@ use tokio_tungstenite::{
 use types::{
     Channel, ChannelError, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream,
     ChannelOutboundEvent, GATEWAY_PROTOCOL_VERSION, GatewayCancelActiveTurn, GatewayClientFrame,
-    GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, GatewayTurnState,
-    GatewayTurnStatus,
+    GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, GatewayTurnProgress,
+    GatewayTurnState, GatewayTurnStatus,
 };
 
 const TUI_CHANNEL_ID: &str = "tui";
@@ -33,6 +33,11 @@ pub struct TuiUiState {
     pub prompt_buffer: String,
     pub rendered_output: String,
     pub last_error: Option<String>,
+    /// Most recent runtime progress message received during an active turn,
+    /// e.g. `"[2/8] Executing tools: file_read"`.  Cleared when the turn
+    /// completes, is cancelled, or errors.  Used to populate the input bar
+    /// title while the user waits for the agent.
+    pub activity_status: Option<String>,
 }
 
 impl TuiUiState {
@@ -169,6 +174,7 @@ impl TuiChannelAdapter {
                 state.mark_active_turn(&started.turn);
                 state.rendered_output.clear();
                 state.last_error = None;
+                state.activity_status = None;
             }
             GatewayServerFrame::AssistantDelta(delta) => {
                 state.connected = true;
@@ -188,12 +194,14 @@ impl TuiChannelAdapter {
                 }
                 state.prompt_buffer.clear();
                 state.last_error = None;
+                state.activity_status = None;
             }
             GatewayServerFrame::TurnCancelled(cancelled) => {
                 state.connected = true;
                 state.runtime_session_id = Some(cancelled.session.runtime_session_id.clone());
                 state.clear_active_turn();
                 state.last_error = None;
+                state.activity_status = None;
             }
             GatewayServerFrame::Error(error) => {
                 state.connected = true;
@@ -210,6 +218,7 @@ impl TuiChannelAdapter {
                     state.clear_active_turn();
                 }
                 state.last_error = Some(error.message.clone());
+                state.activity_status = None;
             }
             GatewayServerFrame::HealthStatus(status) => {
                 state.connected = status.healthy;
@@ -229,6 +238,17 @@ impl TuiChannelAdapter {
                         .clone()
                         .or_else(|| Some("gateway unhealthy".to_owned()))
                 };
+            }
+            GatewayServerFrame::TurnProgress(GatewayTurnProgress {
+                session,
+                turn,
+                progress,
+                ..
+            }) => {
+                state.connected = true;
+                state.runtime_session_id = Some(session.runtime_session_id.clone());
+                state.mark_active_turn(turn);
+                state.activity_status = Some(progress.message.clone());
             }
         }
     }
@@ -665,5 +685,58 @@ mod tests {
         assert_eq!(state.active_turn_id, None);
         assert_eq!(state.runtime_session_id.as_deref(), Some("runtime-alice"));
         assert_eq!(state.rendered_output, "firstsecond");
+    }
+
+    #[tokio::test]
+    async fn turn_progress_sets_activity_status_and_clears_on_completion() {
+        use types::{GatewayTurnProgress, RuntimeProgressEvent, RuntimeProgressKind};
+
+        let adapter = TuiChannelAdapter::new("alice", "conn-1");
+        adapter
+            .apply_gateway_frame(&hello_ack("runtime-alice", None))
+            .await;
+        adapter
+            .apply_gateway_frame(&turn_started("turn-1", "runtime-alice"))
+            .await;
+
+        // Activity status should be None at turn start.
+        let state = adapter.state_snapshot().await;
+        assert_eq!(state.activity_status, None);
+
+        // Receive a progress event.
+        adapter
+            .apply_gateway_frame(&GatewayServerFrame::TurnProgress(GatewayTurnProgress {
+                request_id: "req-turn".to_owned(),
+                session: GatewaySession {
+                    user_id: "alice".to_owned(),
+                    runtime_session_id: "runtime-alice".to_owned(),
+                },
+                turn: GatewayTurnStatus {
+                    turn_id: "turn-1".to_owned(),
+                    state: GatewayTurnState::Running,
+                },
+                progress: RuntimeProgressEvent {
+                    kind: RuntimeProgressKind::ProviderCall,
+                    message: "[1/8] Calling provider".to_owned(),
+                    turn: 1,
+                    max_turns: 8,
+                },
+            }))
+            .await;
+
+        let state = adapter.state_snapshot().await;
+        assert_eq!(
+            state.activity_status.as_deref(),
+            Some("[1/8] Calling provider")
+        );
+        assert_eq!(state.active_turn_id.as_deref(), Some("turn-1"));
+
+        // Activity status clears when the turn completes.
+        adapter
+            .apply_gateway_frame(&turn_completed("turn-1", "runtime-alice", "done"))
+            .await;
+        let state = adapter.state_snapshot().await;
+        assert_eq!(state.activity_status, None);
+        assert_eq!(state.active_turn_id, None);
     }
 }

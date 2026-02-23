@@ -7,7 +7,7 @@ pub trait GatewayTurnRunner: Send + Sync {
         runtime_session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
-        delta_sender: mpsc::UnboundedSender<String>,
+        delta_sender: mpsc::UnboundedSender<StreamItem>,
     ) -> Result<Response, RuntimeError>;
 }
 
@@ -45,7 +45,7 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         runtime_session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
-        delta_sender: mpsc::UnboundedSender<String>,
+        delta_sender: mpsc::UnboundedSender<StreamItem>,
     ) -> Result<Response, RuntimeError> {
         let mut context = {
             let mut contexts = self.contexts.lock().await;
@@ -89,8 +89,14 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         let (result, mut context) = loop {
             tokio::select! {
                 maybe_event = stream_events_rx.recv() => {
-                    if let Some(StreamItem::Text(delta)) = maybe_event {
-                        let _ = delta_sender.send(delta);
+                    match maybe_event {
+                        // Forward text deltas and progress events to the gateway.
+                        // Other stream item types (tool call assembly, reasoning
+                        // traces, usage updates) are not surfaced to channels.
+                        Some(item @ StreamItem::Text(_)) | Some(item @ StreamItem::Progress(_)) => {
+                            let _ = delta_sender.send(item);
+                        }
+                        _ => {}
                     }
                 }
                 result = &mut runtime_future => {

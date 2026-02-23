@@ -43,10 +43,13 @@ pub enum GatewayServerFrame {
     AssistantDelta { text: String },
     TurnCompleted { final_message: String, usage: Option<UsageUpdate> },
     TurnCancelled,
+    TurnProgress { progress: RuntimeProgressEvent },  // ← runtime activity notification
     Error { message: String },
     HealthStatus { ... },
 }
 ```
+
+`TurnProgress` carries a `RuntimeProgressEvent` (provider call starting, tools executing, etc.) emitted by the runtime during multi-step execution. Channels decide how to surface it; the TUI shows the `progress.message` in the input bar title.
 
 ## Gateway Server
 
@@ -65,10 +68,13 @@ Channel Adapter                Gateway                    Runtime
      ├── SendTurn ──────────────►│                           │
      │                           ├── create context ────────►│
      │◄── TurnStarted ────────  │                           │
+     │                           │◄── StreamItem::Progress ─ │  ← ProviderCall
+     │◄── TurnProgress ──────  │                           │
      │                           │◄── StreamItem::Text ──── │
      │◄── AssistantDelta ──────  │                           │
      │◄── AssistantDelta ──────  │◄── StreamItem::Text ──── │
-     │                           │                           │
+     │                           │◄── StreamItem::Progress ─ │  ← ToolExecution
+     │◄── TurnProgress ──────  │                           │
      │                           │◄── Response (no tools) ── │
      │◄── TurnCompleted ──────  │                           │
      │                           │                           │
@@ -90,8 +96,13 @@ When a `SendTurn` frame arrives:
 2. If an active turn exists, the request is rejected with an error
 3. A `RuntimeGatewayTurnRunner` is created to bridge gateway and runtime
 4. The runner constructs a `Context` and calls `AgentRuntime::run_session`
-5. Stream items from the runtime are forwarded as `AssistantDelta` frames
+5. Stream items from the runtime are forwarded according to type:
+   - `StreamItem::Text(delta)` → published as an `AssistantDelta` frame
+   - `StreamItem::Progress(event)` → published as a `TurnProgress` frame (channels display it however fits their UX; the TUI shows it in the input bar title)
+   - All other `StreamItem` variants (tool call assembly, reasoning traces, usage updates) are not forwarded to channels
 6. On completion, a `TurnCompleted` frame is sent with the final message and usage data
+
+The internal `delta_sender` channel between `RuntimeGatewayTurnRunner` and the gateway's spawn loop carries `StreamItem` values (not raw strings), allowing the gateway to distinguish text deltas from progress events.
 
 ### Reconnection Support
 
@@ -133,8 +144,11 @@ pub struct TuiUiState {
     pub prompt_buffer: String,
     pub rendered_output: String,      // accumulated stream text
     pub last_error: Option<String>,
+    pub activity_status: Option<String>,  // most recent progress message from TurnProgress
 }
 ```
+
+`activity_status` is populated from `GatewayServerFrame::TurnProgress` frames and cleared when the turn completes, is cancelled, or errors. The TUI shows it in the input bar title (replacing "Waiting...") while a turn is active.
 
 ### Event Handling
 
@@ -157,7 +171,7 @@ The adapter translates between gateway frames and channel events:
 The TUI rendering loop is built on `ratatui` (terminal UI framework) and `crossterm` (cross-platform terminal backend). It provides a full-screen interactive chat interface with three visual regions stacked vertically:
 
 - **Message pane** (fills remaining space): scrollable chat history with per-role styling — user messages in cyan with `you:` prefix, assistant messages in default color, errors in red, system notices in dim yellow.
-- **Input bar** (3 rows): bordered text input showing `Prompt` when idle or `Waiting...` during an active turn. The border grays out when input is disabled (active turn or disconnected). Cursor position is tracked via `unicode-width` for correct multi-byte character handling.
+- **Input bar** (3 rows minimum, grows dynamically): bordered multi-line text input. Height expands to accommodate newlines in the buffer (up to 10 rows), so multi-line prompts composed with Alt+Enter display correctly. The title shows `Prompt` when idle, the most recent `RuntimeProgressEvent.message` (e.g. `"[2/8] Executing tools: file_read"`) during an active turn if a progress event has been received, or `Waiting...` when a turn is active but no progress event has arrived yet. The border grays out when input is disabled. Cursor position accounts for logical newlines and visual wrapping via `unicode-width`.
 - **Status bar** (1 row): connection indicator (green/red/yellow), session ID, turn state (`idle`/`streaming`), and key hints (`[Ctrl+C to cancel]` during a turn, `[Ctrl+C to exit]` when idle).
 
 #### State Ownership
@@ -173,14 +187,14 @@ The main loop bridges them: inbound gateway frames update both the adapter (prot
 
 `TuiApp::run()` in `app.rs` orchestrates the full lifecycle:
 
-1. **Terminal setup**: `TerminalGuard` RAII struct enables raw mode, enters the alternate screen, hides the cursor, and enables mouse capture. Its `Drop` restores everything. A panic hook provides the same restoration on unwind.
+1. **Terminal setup**: `TerminalGuard` RAII struct enables raw mode, enters the alternate screen, and hides the cursor. Mouse capture is intentionally **not** enabled so users retain native terminal mouse selection and copy/paste. Its `Drop` restores terminal state. A panic hook provides the same restoration on unwind.
 2. **WebSocket transport**: after `connect_async()`, the stream is split into independent read/write halves. A reader task decodes `GatewayServerFrame`s into an `mpsc` channel (`gateway_rx`). A writer task receives `GatewayClientFrame`s from another channel (`ws_tx`) and sends them on the wire. The main loop never touches the WebSocket directly.
 3. **Hello handshake**: a `Hello` frame is sent via `ws_tx`; the loop waits for `HelloAck` on `gateway_rx` with a 10-second timeout.
-4. **Event reader**: `EventReader` spawns a dedicated `std::thread` that calls `crossterm::event::read()` in a blocking loop, mapping `KeyEvent`s to `AppAction` variants (character input, backspace, cursor movement, submit, scroll, cancel, quit, resize) and sending them into an `mpsc` channel.
+4. **Event reader**: `EventReader` spawns a dedicated `std::thread` that calls `crossterm::event::read()` in a blocking loop, mapping `KeyEvent`s to `AppAction` variants (character input including `'\n'` via Alt+Enter, backspace, cursor movement, submit, scroll, cancel, quit, resize) and sending them into an `mpsc` channel.
 5. **`tokio::select!` loop** over four channels:
    - `gateway_rx` (inbound server frames) → adapter update + view model update + auto-scroll
    - `adapter_rx` (outbound client frames from the adapter's broadcast channel) → forward to `ws_tx`
-   - `action_rx` (user input) → handle text editing, scrolling, submit (via `adapter.submit_prompt()`), cancel (via `adapter.handle_ctrl_c()`), quit
+   - `action_rx` (user input) → handle text editing (including multi-line newlines from Alt+Enter), scrolling, submit (via `adapter.submit_prompt()`), cancel (via `adapter.handle_ctrl_c()`), quit
    - `tick` (100ms interval) → increment spinner, send `HealthCheck` via `ws_tx` every ~5 seconds
    - After any event: single `terminal.draw()` call renders the full UI from the view model + adapter snapshot.
 
@@ -235,14 +249,21 @@ RuntimeGatewayTurnRunner creates Context
   ▼
 AgentRuntime.run_session(context, cancellation_token)
   │
+  ├──► StreamItem::Progress(ProviderCall) emitted
+  │      │
+  │      ▼ TurnProgress frame → WebSocket → TUI input bar title updates
+  │
   ├──► Provider.stream(context) → SSE tokens
   │      │
   │      ▼
   │    StreamItem::Text → AssistantDelta → WebSocket → TUI
   │
-  ├──► Tool calls detected → execute → results appended
+  ├──► Tool calls detected
   │      │
-  │      └──► Loop back to Provider.stream()
+  │      ├──► StreamItem::Progress(ToolExecution) emitted
+  │      │      └──► TurnProgress frame → WebSocket → TUI input bar title updates
+  │      │
+  │      └──► execute → results appended → loop back to Provider.stream()
   │
   ▼
 Final response (no tool calls)

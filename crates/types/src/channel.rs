@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::model::RuntimeProgressEvent;
 use crate::StartupStatusReport;
 use crate::{ChannelError, Response};
 
@@ -132,6 +133,19 @@ pub struct GatewayHealthStatus {
     pub message: Option<String>,
 }
 
+/// A runtime progress notification forwarded through the gateway to connected
+/// channels during an active turn.
+///
+/// Channels decide independently how to render these (the TUI shows them in
+/// the input bar title; future API clients can expose them as a status stream).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayTurnProgress {
+    pub request_id: String,
+    pub session: GatewaySession,
+    pub turn: GatewayTurnStatus,
+    pub progress: RuntimeProgressEvent,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
@@ -142,6 +156,9 @@ pub enum GatewayServerFrame {
     TurnCancelled(GatewayTurnCancelled),
     Error(GatewayErrorFrame),
     HealthStatus(GatewayHealthStatus),
+    /// Runtime progress notification — emitted during tool execution and
+    /// provider calls within a multi-step turn.
+    TurnProgress(GatewayTurnProgress),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

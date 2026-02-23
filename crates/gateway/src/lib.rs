@@ -24,9 +24,9 @@ use types::{
     Context, GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn,
     GatewayClientFrame, GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck,
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
-    GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnStarted, GatewayTurnState,
-    GatewayTurnStatus, Message, MessageRole, ModelId, ProviderId, Response, RuntimeError,
-    StartupStatusReport, StreamItem,
+    GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
+    GatewayTurnState, GatewayTurnStatus, Message, MessageRole, ModelId, ProviderId, Response,
+    RuntimeError, StartupStatusReport, StreamItem,
 };
 
 mod turn_runner;
@@ -361,7 +361,7 @@ impl GatewayServer {
 
         let runtime = Arc::clone(&self.turn_runner);
         tokio::spawn(async move {
-            let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+            let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
             let runtime_future = runtime.run_turn(
                 &session.runtime_session_id,
                 send_turn.prompt,
@@ -372,14 +372,25 @@ impl GatewayServer {
 
             loop {
                 tokio::select! {
-                    maybe_delta = delta_rx.recv() => {
-                        if let Some(delta) = maybe_delta {
-                            session.publish(GatewayServerFrame::AssistantDelta(GatewayAssistantDelta {
-                                request_id: send_turn.request_id.clone(),
-                                session: session.gateway_session(),
-                                turn: running_turn.clone(),
-                                delta,
-                            }));
+                    maybe_item = delta_rx.recv() => {
+                        match maybe_item {
+                            Some(StreamItem::Text(delta)) => {
+                                session.publish(GatewayServerFrame::AssistantDelta(GatewayAssistantDelta {
+                                    request_id: send_turn.request_id.clone(),
+                                    session: session.gateway_session(),
+                                    turn: running_turn.clone(),
+                                    delta,
+                                }));
+                            }
+                            Some(StreamItem::Progress(progress)) => {
+                                session.publish(GatewayServerFrame::TurnProgress(GatewayTurnProgress {
+                                    request_id: send_turn.request_id.clone(),
+                                    session: session.gateway_session(),
+                                    turn: running_turn.clone(),
+                                    progress,
+                                }));
+                            }
+                            _ => {}
                         }
                     }
                     result = &mut runtime_future => {

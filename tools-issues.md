@@ -402,7 +402,7 @@ the `config` override logic (lines 136–212). Make sure that setting the search
 
 ---
 
-## Issue 4: Responses API Ordinal Assignment Bug
+## Issue 4: Responses API Ordinal Assignment Bug - RESOLVED
 
 ### Symptoms
 
@@ -490,7 +490,7 @@ assignment path.
 
 ---
 
-## Issue 5: `response.completed` Event Emits All Tool Calls With index: 0
+## Issue 5: `response.completed` Event Emits All Tool Calls With index: 0 - RESOLVED
 
 ### Symptoms
 

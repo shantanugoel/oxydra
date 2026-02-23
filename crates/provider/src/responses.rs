@@ -707,6 +707,7 @@ pub(crate) enum ResponsesEventAction {
 #[derive(Debug, Default)]
 pub(crate) struct ResponsesToolCallAccumulator {
     output_index_to_call: BTreeMap<u32, ToolCallState>,
+    next_ordinal: u32,
 }
 
 #[derive(Debug, Default)]
@@ -724,7 +725,19 @@ impl ResponsesToolCallAccumulator {
         call_id: Option<String>,
         name: Option<String>,
     ) {
-        let current_len = self.output_index_to_call.len();
+        // Assign a monotonic ordinal for new entries before borrowing entry mutably.
+        let needs_ordinal = self
+            .output_index_to_call
+            .get(&output_index)
+            .is_none_or(|e| e.ordinal.is_none());
+        if needs_ordinal {
+            let next = self.next_ordinal;
+            self.next_ordinal += 1;
+            self.output_index_to_call
+                .entry(output_index)
+                .or_default()
+                .ordinal = Some(next);
+        }
         let entry = self.output_index_to_call.entry(output_index).or_default();
         if call_id.is_some() {
             entry.id = call_id;
@@ -732,23 +745,30 @@ impl ResponsesToolCallAccumulator {
         if name.is_some() {
             entry.name = name;
         }
-        if entry.ordinal.is_none() {
-            let next = current_len.saturating_sub(1) as u32;
-            entry.ordinal = Some(next);
-        }
     }
 
     fn append_arguments(&mut self, output_index: u32, delta: &str) -> Option<StreamItem> {
-        let current_len = self.output_index_to_call.len();
-        let entry = self.output_index_to_call.entry(output_index).or_default();
+        // Assign a monotonic ordinal for entries that arrive without a prior
+        // `response.output_item.added` event (fallback path).
+        let needs_ordinal = self
+            .output_index_to_call
+            .get(&output_index)
+            .is_none_or(|e| e.ordinal.is_none());
+        if needs_ordinal {
+            let next = self.next_ordinal;
+            self.next_ordinal += 1;
+            self.output_index_to_call
+                .entry(output_index)
+                .or_default()
+                .ordinal = Some(next);
+        }
+
+        let entry = self.output_index_to_call.get_mut(&output_index).unwrap();
         entry.arguments.push_str(delta);
-        let ordinal = entry.ordinal.unwrap_or_else(|| {
-            let next = current_len.saturating_sub(1) as u32;
-            entry.ordinal = Some(next);
-            next
-        });
+        let ordinal = entry.ordinal.unwrap() as usize;
+
         Some(StreamItem::ToolCallDelta(ToolCallDelta {
-            index: ordinal as usize,
+            index: ordinal,
             id: entry.id.clone(),
             name: entry.name.clone(),
             arguments: if delta.is_empty() {
@@ -757,6 +777,10 @@ impl ResponsesToolCallAccumulator {
                 Some(delta.to_owned())
             },
         }))
+    }
+
+    fn has_streamed_tool_calls(&self) -> bool {
+        !self.output_index_to_call.is_empty()
     }
 }
 
@@ -817,15 +841,22 @@ pub(crate) fn parse_responses_stream_event(
             if let Some(content) = normalized.response.message.content {
                 items.push(StreamItem::Text(content));
             }
-            for tool_call in &normalized.response.tool_calls {
-                items.push(StreamItem::ToolCallDelta(ToolCallDelta {
-                    index: 0,
-                    id: Some(tool_call.id.clone()),
-                    name: Some(tool_call.name.clone()),
-                    arguments: Some(
-                        serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
-                    ),
-                }));
+            // Only emit tool call deltas from the completed event when no incremental
+            // streaming deltas were already sent.  If the accumulator has entries,
+            // the arguments were already sent fragment-by-fragment via
+            // `response.function_call_arguments.delta`; re-emitting them here would
+            // cause the runtime accumulator to double-append the arguments.
+            if !accumulator.has_streamed_tool_calls() {
+                for (idx, tool_call) in normalized.response.tool_calls.iter().enumerate() {
+                    items.push(StreamItem::ToolCallDelta(ToolCallDelta {
+                        index: idx,
+                        id: Some(tool_call.id.clone()),
+                        name: Some(tool_call.name.clone()),
+                        arguments: Some(
+                            serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+                        ),
+                    }));
+                }
             }
             if let Some(usage) = normalized.response.usage.clone() {
                 items.push(StreamItem::UsageUpdate(usage));
@@ -854,5 +885,173 @@ pub(crate) fn parse_responses_stream_event(
             }))
         }
         _ => Ok(ResponsesEventAction::Items(vec![])),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Issue 4: Ordinal assignment via monotonic counter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_tool_call_gets_ordinal_zero() {
+        let mut acc = ResponsesToolCallAccumulator::default();
+        acc.register_output_item(0, Some("call_1".to_owned()), Some("search".to_owned()));
+        let item = acc.append_arguments(0, r#"{"q":"hi"}"#).unwrap();
+        let StreamItem::ToolCallDelta(delta) = item else {
+            panic!("expected ToolCallDelta");
+        };
+        assert_eq!(delta.index, 0);
+    }
+
+    #[test]
+    fn two_tool_calls_get_distinct_ordinals_zero_and_one() {
+        let mut acc = ResponsesToolCallAccumulator::default();
+        acc.register_output_item(0, Some("call_1".to_owned()), Some("search".to_owned()));
+        acc.register_output_item(1, Some("call_2".to_owned()), Some("fetch".to_owned()));
+
+        let item0 = acc.append_arguments(0, r#"{"q":"a"}"#).unwrap();
+        let item1 = acc.append_arguments(1, r#"{"url":"b"}"#).unwrap();
+
+        let StreamItem::ToolCallDelta(delta0) = item0 else {
+            panic!("expected ToolCallDelta");
+        };
+        let StreamItem::ToolCallDelta(delta1) = item1 else {
+            panic!("expected ToolCallDelta");
+        };
+        assert_eq!(delta0.index, 0, "first tool call must have ordinal 0");
+        assert_eq!(delta1.index, 1, "second tool call must have ordinal 1");
+    }
+
+    #[test]
+    fn three_tool_calls_get_consecutive_ordinals() {
+        let mut acc = ResponsesToolCallAccumulator::default();
+        for i in 0u32..3 {
+            acc.register_output_item(i, Some(format!("call_{i}")), Some(format!("tool_{i}")));
+        }
+        let ordinals: Vec<usize> = (0u32..3)
+            .map(|i| {
+                let item = acc.append_arguments(i, "{}").unwrap();
+                let StreamItem::ToolCallDelta(delta) = item else {
+                    panic!("expected ToolCallDelta");
+                };
+                delta.index
+            })
+            .collect();
+        assert_eq!(ordinals, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ordinal_assigned_in_append_when_no_prior_register() {
+        // Fallback: delta arrives without a preceding output_item.added event.
+        let mut acc = ResponsesToolCallAccumulator::default();
+        let item0 = acc.append_arguments(5, r#"{"a":1}"#).unwrap();
+        let item1 = acc.append_arguments(7, r#"{"b":2}"#).unwrap();
+
+        let StreamItem::ToolCallDelta(delta0) = item0 else {
+            panic!("expected ToolCallDelta");
+        };
+        let StreamItem::ToolCallDelta(delta1) = item1 else {
+            panic!("expected ToolCallDelta");
+        };
+        assert_eq!(delta0.index, 0, "first fallback delta must get ordinal 0");
+        assert_eq!(delta1.index, 1, "second fallback delta must get ordinal 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 5: response.completed index assignment and double-emit guard
+    // -----------------------------------------------------------------------
+
+    fn make_completed_event(tool_calls: &[(&str, &str, &str)]) -> crate::openai::SseEvent {
+        // Build a minimal response.completed SSE event with the given tool calls.
+        // Each tuple is (call_id, name, arguments_json).
+        let output: Vec<serde_json::Value> = tool_calls
+            .iter()
+            .map(|(id, name, args)| {
+                serde_json::json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": args,
+                })
+            })
+            .collect();
+        let data = serde_json::json!({
+            "response": {
+                "id": "resp_1",
+                "status": "completed",
+                "output": output,
+            }
+        });
+        crate::openai::SseEvent {
+            event_type: Some("response.completed".to_owned()),
+            data: data.to_string(),
+        }
+    }
+
+    fn collect_tool_call_deltas(items: &[StreamItem]) -> Vec<(usize, String, String)> {
+        items
+            .iter()
+            .filter_map(|item| {
+                if let StreamItem::ToolCallDelta(d) = item {
+                    Some((
+                        d.index,
+                        d.id.clone().unwrap_or_default(),
+                        d.name.clone().unwrap_or_default(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn completed_event_emits_sequential_indices_when_no_streaming_deltas() {
+        let provider = ProviderId("test".to_owned());
+        let mut acc = ResponsesToolCallAccumulator::default();
+        let event = make_completed_event(&[
+            ("call_a", "search", r#"{"q":"hello"}"#),
+            ("call_b", "fetch", r#"{"url":"http://x.com"}"#),
+            ("call_c", "compute", r#"{"expr":"1+1"}"#),
+        ]);
+
+        let action = parse_responses_stream_event(&event, &provider, &mut acc).unwrap();
+        let ResponsesEventAction::Completed { items, .. } = action else {
+            panic!("expected Completed action");
+        };
+
+        let deltas = collect_tool_call_deltas(&items);
+        assert_eq!(deltas.len(), 3, "should emit 3 tool call deltas");
+        assert_eq!(deltas[0].0, 0, "first delta index must be 0");
+        assert_eq!(deltas[1].0, 1, "second delta index must be 1");
+        assert_eq!(deltas[2].0, 2, "third delta index must be 2");
+        assert_eq!(deltas[0].1, "call_a");
+        assert_eq!(deltas[1].1, "call_b");
+        assert_eq!(deltas[2].1, "call_c");
+    }
+
+    #[test]
+    fn completed_event_skips_tool_calls_when_streaming_deltas_already_sent() {
+        // Simulate streaming: accumulator already has entries from delta events.
+        let provider = ProviderId("test".to_owned());
+        let mut acc = ResponsesToolCallAccumulator::default();
+        acc.register_output_item(0, Some("call_a".to_owned()), Some("search".to_owned()));
+        let _ = acc.append_arguments(0, r#"{"q":"hello"}"#);
+
+        let event = make_completed_event(&[("call_a", "search", r#"{"q":"hello"}"#)]);
+        let action = parse_responses_stream_event(&event, &provider, &mut acc).unwrap();
+        let ResponsesEventAction::Completed { items, .. } = action else {
+            panic!("expected Completed action");
+        };
+
+        let deltas = collect_tool_call_deltas(&items);
+        assert!(
+            deltas.is_empty(),
+            "tool call deltas must not be re-emitted when streaming deltas were already sent"
+        );
     }
 }

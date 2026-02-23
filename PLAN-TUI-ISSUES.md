@@ -352,6 +352,7 @@ These should be visible by default (INFO level):
 | `runner/src/main.rs` — daemon mode | `info!(socket_path, "runner control socket listening")` |
 | `oxydra-vm.rs` — after gateway bind | `info!(address, user_id, "gateway WebSocket listening")` (replace `eprintln!`) |
 | `oxydra-vm.rs` — config loaded | `info!(provider, model, "agent config loaded")` |
+| `runtime/src/lib.rs` — each provider call | `info!(provider, model, turn, max_turns, "calling provider")` |
 | `gateway/src/lib.rs` — session created | `info!(user_id, runtime_session_id, "gateway session created")` |
 | `gateway/src/lib.rs` — turn started | `info!(turn_id, runtime_session_id, "turn started")` |
 | `gateway/src/lib.rs` — turn completed | `info!(turn_id, "turn completed")` |
@@ -373,7 +374,40 @@ These are visible with `RUST_LOG=debug`:
 | `runner/src/bootstrap.rs` — config resolution | `debug!(path, "loading config file")` |
 | `runner/src/bootstrap.rs` — provider built | `debug!(provider_id, model_id, "provider initialized")` |
 
-**Step 4: Ensure no secrets in logs**
+**Step 4: Surface provider/model in logs and TUI status bar**
+
+The active provider and model are important context for operators and users. They should appear in:
+
+- **Logs (INFO level):** Every provider call should log which provider and model is being used. This is already partially covered in Step 2 (`oxydra-vm.rs` config loaded, `runtime/src/lib.rs` provider call), but should also appear in the gateway's turn-started log entry:
+  ```
+  | `gateway/src/lib.rs` — turn started | `info!(turn_id, provider, model, "turn started")` |
+  ```
+
+- **TUI status bar:** The `StatusBar` widget already has a `model_name: Option<&str>` field and renders `" | model: {name}"` when present (`widgets.rs:307-309`). It's currently always passed `None` (`widgets.rs:390`). To wire it up:
+
+  1. Add `provider_id` and `model_id` fields to `GatewayHelloAck` in `types/src/channel.rs`:
+     ```rust
+     pub struct GatewayHelloAck {
+         // ... existing fields ...
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         pub provider_id: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         pub model_id: Option<String>,
+     }
+     ```
+     Using `Option` and `skip_serializing_if` keeps backward compatibility — old clients ignore unknown fields, old servers send `null`.
+
+  2. Populate them in the gateway when constructing `HelloAck` (`gateway/src/lib.rs`). The `GatewayServer` already holds provider/model via its `turn_runner` (`RuntimeGatewayTurnRunner` has `provider: ProviderId` and `model: ModelId`). Expose a method on the `GatewayTurnRunner` trait (or store them directly on `GatewayServer`) and include them in the `HelloAck` response.
+
+  3. Store them in the TUI adapter state — add `model_id: Option<String>` to `TuiUiState` in `tui/src/channel_adapter.rs`, populated from `HelloAck`.
+
+  4. Pass to `StatusBar` in `render_app()` — change `None` on line 390 to `adapter_state.model_id.as_deref()`.
+
+  The TUI status bar will then show e.g.: `o connected | session: rt-alice | model: gpt-4o | idle [Ctrl+C to exit]`
+
+  This approach also benefits from the `HealthStatus` frame — if `GatewayHealthStatus` similarly gains optional `provider_id`/`model_id` fields, the TUI can update the display if the model ever changes mid-session (e.g., model hot-swap in future multi-agent scenarios).
+
+**Step 5: Ensure no secrets in logs**
 
 Review all new log points to ensure:
 - API keys are never logged (even at TRACE level)

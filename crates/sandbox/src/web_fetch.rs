@@ -164,14 +164,17 @@ fn parse_optional_usize(
     default: usize,
     field_name: &str,
 ) -> Result<usize, String> {
-    if let Some(value) = value {
-        let raw = value
-            .as_u64()
-            .ok_or_else(|| format!("`{field_name}` must be a non-negative integer"))?;
-        return usize::try_from(raw)
-            .map_err(|_| format!("`{field_name}` is too large for this platform"));
+    match value {
+        // absent or explicitly null both mean "use the default"
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .ok_or_else(|| format!("`{field_name}` must be a non-negative integer"))?;
+            usize::try_from(raw)
+                .map_err(|_| format!("`{field_name}` is too large for this platform"))
+        }
     }
-    Ok(default)
 }
 
 fn normalize_content_type(value: &str) -> String {

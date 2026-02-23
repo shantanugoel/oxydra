@@ -611,15 +611,19 @@ impl Tool for WebSearchTool {
 
     async fn execute(&self, args: &str) -> Result<String, ToolError> {
         let request: WebSearchArgs = parse_args(WEB_SEARCH_TOOL_NAME, args)?;
+        let mut payload = serde_json::Map::new();
+        payload.insert("query".to_owned(), json!(request.query));
+        if let Some(count) = request.count {
+            payload.insert("count".to_owned(), json!(count));
+        }
+        if let Some(freshness) = request.freshness {
+            payload.insert("freshness".to_owned(), json!(freshness));
+        }
         invoke_wasm_tool(
             &self.runner,
             WEB_SEARCH_TOOL_NAME,
             WasmCapabilityProfile::Web,
-            &json!({
-                "query": request.query,
-                "count": request.count,
-                "freshness": request.freshness
-            }),
+            &serde_json::Value::Object(payload),
             None,
         )
         .await

@@ -122,14 +122,17 @@ fn parse_optional_usize(
     default: usize,
     field_name: &str,
 ) -> Result<usize, String> {
-    if let Some(value) = value {
-        let raw = value
-            .as_u64()
-            .ok_or_else(|| format!("`{field_name}` must be a non-negative integer"))?;
-        return usize::try_from(raw)
-            .map_err(|_| format!("`{field_name}` is too large for this platform"));
+    match value {
+        // absent or explicitly null both mean "use the default"
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .ok_or_else(|| format!("`{field_name}` must be a non-negative integer"))?;
+            usize::try_from(raw)
+                .map_err(|_| format!("`{field_name}` is too large for this platform"))
+        }
     }
-    Ok(default)
 }
 
 fn search_provider_from_env() -> Result<SearchProviderConfig, String> {
@@ -815,6 +818,36 @@ mod tests {
         assert_eq!(
             results[1].get("title").and_then(Value::as_str),
             Some("Result Two")
+        );
+    }
+
+    #[test]
+    fn parse_optional_usize_treats_null_as_absent() {
+        // LLMs (especially Gemini) often send `null` for optional parameters.
+        // `null` must be treated the same as absent — use the default — not
+        // rejected as "must be a non-negative integer".
+        assert_eq!(
+            parse_optional_usize(None, 5, "count").unwrap(),
+            5,
+            "absent field uses default"
+        );
+        assert_eq!(
+            parse_optional_usize(Some(&Value::Null), 5, "count").unwrap(),
+            5,
+            "explicit null uses default"
+        );
+        assert_eq!(
+            parse_optional_usize(Some(&json!(3u64)), 5, "count").unwrap(),
+            3,
+            "explicit integer is used as-is"
+        );
+        assert!(
+            parse_optional_usize(Some(&json!(-1i64)), 5, "count").is_err(),
+            "negative number is rejected"
+        );
+        assert!(
+            parse_optional_usize(Some(&json!("three")), 5, "count").is_err(),
+            "string is rejected"
         );
     }
 }

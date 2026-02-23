@@ -55,6 +55,11 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
                 .clone()
         };
 
+        // Save the message count before this turn so we can roll back on failure.
+        // This prevents a failed turn from leaving dangling tool-call state in the
+        // history that would confuse the LLM on the next user message.
+        let pre_turn_message_count = context.messages.len();
+
         context.messages.push(Message {
             role: MessageRole::User,
             content: Some(prompt),
@@ -81,7 +86,7 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         };
         tokio::pin!(runtime_future);
 
-        let (result, context) = loop {
+        let (result, mut context) = loop {
             tokio::select! {
                 maybe_event = stream_events_rx.recv() => {
                     if let Some(StreamItem::Text(delta)) = maybe_event {
@@ -93,6 +98,13 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
                 }
             }
         };
+
+        if result.is_err() {
+            // Roll back to the pre-turn state so the next user turn starts from a
+            // clean history without any partially-executed tool calls or provider
+            // errors left over from the failed turn.
+            context.messages.truncate(pre_turn_message_count);
+        }
 
         let mut contexts = self.contexts.lock().await;
         contexts.insert(runtime_session_id.to_owned(), context);

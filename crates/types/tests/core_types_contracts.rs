@@ -21,6 +21,7 @@ fn serde_round_trip_for_core_types() {
         id: "call_1".to_owned(),
         name: "file_read".to_owned(),
         arguments: json!({ "path": "Cargo.toml" }),
+        metadata: None,
     };
 
     let message = Message {

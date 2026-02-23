@@ -63,9 +63,12 @@ fn expand_tool(function: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
             }
         };
 
-        let schema_type = map_parameter_type_to_schema_type(argument.ty.as_ref())?;
+        let type_str = map_parameter_type_to_type_str(argument.ty.as_ref())?;
         property_insertions.push(quote! {
-            properties.insert(#parameter_name.to_owned(), ::types::JsonSchema::new(#schema_type));
+            properties.insert(
+                #parameter_name.to_owned(),
+                ::serde_json::json!({ "type": #type_str }),
+            );
         });
         required_parameters.push(parameter_name);
     }
@@ -83,12 +86,21 @@ fn expand_tool(function: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 
         #[doc(hidden)]
         pub fn #schema_function_name() -> ::types::FunctionDecl {
-            let mut properties = ::std::collections::BTreeMap::new();
+            let mut properties = ::serde_json::Map::new();
             #(#property_insertions)*
+            let mut schema = ::serde_json::Map::new();
+            schema.insert("type".to_owned(), ::serde_json::Value::String("object".to_owned()));
+            schema.insert("properties".to_owned(), ::serde_json::Value::Object(properties));
+            schema.insert(
+                "required".to_owned(),
+                ::serde_json::Value::Array(vec![
+                    #(::serde_json::Value::String(#required_tokens)),*
+                ]),
+            );
             ::types::FunctionDecl::new(
                 #function_name,
                 #description_tokens,
-                ::types::JsonSchema::object(properties, vec![#(#required_tokens),*]),
+                ::serde_json::Value::Object(schema),
             )
         }
     })
@@ -125,25 +137,25 @@ fn extract_doc_comment(attributes: &[Attribute]) -> Option<String> {
     }
 }
 
-fn map_parameter_type_to_schema_type(
-    parameter_type: &Type,
-) -> syn::Result<proc_macro2::TokenStream> {
+/// Maps a Rust parameter type to its JSON Schema `type` string value.
+fn map_parameter_type_to_type_str(parameter_type: &Type) -> syn::Result<&'static str> {
     if is_path_type(parameter_type, "String") || is_reference_to_str(parameter_type) {
-        return Ok(quote!(::types::JsonSchemaType::String));
+        return Ok("string");
     }
     if is_path_type(parameter_type, "bool") {
-        return Ok(quote!(::types::JsonSchemaType::Boolean));
+        return Ok("boolean");
     }
     if matches_path_type(
         parameter_type,
         &[
-            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
+            "usize",
         ],
     ) {
-        return Ok(quote!(::types::JsonSchemaType::Integer));
+        return Ok("integer");
     }
     if matches_path_type(parameter_type, &["f32", "f64"]) {
-        return Ok(quote!(::types::JsonSchemaType::Number));
+        return Ok("number");
     }
 
     Err(Error::new(

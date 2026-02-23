@@ -79,6 +79,11 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+    /// Optional provider-specific metadata that must be echoed back when this
+    /// tool call appears in conversation history.  Currently used by Gemini
+    /// thinking models to carry the `thoughtSignature` token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +127,10 @@ pub struct ToolCallDelta {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
+    /// Optional provider-specific metadata forwarded from a streaming function
+    /// call delta.  Mirrors `ToolCall::metadata`; see that field for details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

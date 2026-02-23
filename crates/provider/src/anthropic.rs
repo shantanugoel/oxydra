@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, JsonSchema, Message, MessageRole, ModelCatalog, Provider, ProviderError,
+    Context, FunctionDecl, Message, MessageRole, ModelCatalog, Provider, ProviderError,
     ProviderId, ProviderStream, Response, StreamItem, ToolCall, UsageUpdate,
 };
 
@@ -448,7 +448,7 @@ struct AnthropicRequestToolDefinition {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    input_schema: JsonSchema,
+    input_schema: serde_json::Value,
 }
 
 impl From<&FunctionDecl> for AnthropicRequestToolDefinition {
@@ -705,6 +705,7 @@ mod tool_call_accumulator {
                 id,
                 name,
                 arguments: None,
+                metadata: None,
             }
         }
 
@@ -740,6 +741,7 @@ mod tool_call_accumulator {
                 } else {
                     Some(partial_json.to_owned())
                 },
+                metadata: None,
             }
         }
     }
@@ -1036,6 +1038,7 @@ pub(crate) fn normalize_anthropic_response(
                     id,
                     name,
                     arguments,
+                    metadata: None,
                 });
             }
             _ => {}

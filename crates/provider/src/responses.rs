@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, JsonSchema, JsonSchemaType, Message, MessageRole, ModelCatalog,
+    Context, FunctionDecl, Message, MessageRole, ModelCatalog,
     Provider, ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall,
     ToolCallDelta, UsageUpdate,
 };
@@ -493,7 +493,7 @@ pub(crate) struct ResponsesToolDeclaration {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    parameters: JsonSchema,
+    parameters: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
 }
@@ -501,35 +501,66 @@ pub(crate) struct ResponsesToolDeclaration {
 /// Recursively sanitize a schema for OpenAI Responses API strict mode:
 /// - Set `additionalProperties: false` on every object schema.
 /// - Add all property names to `required` so the model fills them all in.
-fn sanitize_schema_strict(schema: &JsonSchema) -> JsonSchema {
-    let mut s = schema.clone();
-    if s.schema_type == JsonSchemaType::Object {
-        s.additional_properties = Some(false);
-        let all_keys: Vec<String> = s.properties.keys().cloned().collect();
-        for key in all_keys {
-            if !s.required.contains(&key) {
-                s.required.push(key);
+fn sanitize_schema_strict(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    let is_object = obj
+        .get("type")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t == "object");
+
+    if is_object {
+        // Collect all property keys before mutating
+        let all_keys: Vec<String> = obj
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|p| p.keys().cloned().collect())
+            .unwrap_or_default();
+
+        obj.insert(
+            "additionalProperties".to_owned(),
+            serde_json::Value::Bool(false),
+        );
+
+        let required = obj
+            .entry("required")
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(req_arr) = required.as_array_mut() {
+            for key in all_keys {
+                let key_val = serde_json::Value::String(key);
+                if !req_arr.contains(&key_val) {
+                    req_arr.push(key_val);
+                }
             }
         }
-        s.properties = s
-            .properties
-            .iter()
-            .map(|(k, v)| (k.clone(), sanitize_schema_strict(v)))
-            .collect();
     }
-    if let Some(items) = &s.items {
-        s.items = Some(Box::new(sanitize_schema_strict(items)));
+
+    // Recurse into properties
+    if let Some(props) = obj.get_mut("properties")
+        && let Some(props_obj) = props.as_object_mut()
+    {
+        for v in props_obj.values_mut() {
+            sanitize_schema_strict(v);
+        }
     }
-    s
+
+    // Recurse into array items
+    if let Some(items) = obj.get_mut("items") {
+        sanitize_schema_strict(items);
+    }
 }
 
 impl From<&FunctionDecl> for ResponsesToolDeclaration {
     fn from(value: &FunctionDecl) -> Self {
+        let mut parameters = value.parameters.clone();
+        sanitize_schema_strict(&mut parameters);
         Self {
             r#type: "function".to_owned(),
             name: value.name.clone(),
             description: value.description.clone(),
-            parameters: sanitize_schema_strict(&value.parameters),
+            parameters,
             strict: None,
         }
     }
@@ -610,6 +641,7 @@ pub(crate) fn normalize_responses_response(
                     id: call_id.clone(),
                     name: name.clone(),
                     arguments: args_json,
+                    metadata: None,
                 });
             }
         }
@@ -776,6 +808,7 @@ impl ResponsesToolCallAccumulator {
             } else {
                 Some(delta.to_owned())
             },
+            metadata: None,
         }))
     }
 
@@ -855,6 +888,7 @@ pub(crate) fn parse_responses_stream_event(
                         arguments: Some(
                             serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
                         ),
+                        metadata: None,
                     }));
                 }
             }

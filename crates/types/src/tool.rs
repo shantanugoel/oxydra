@@ -1,7 +1,8 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::ToolError;
 
@@ -13,84 +14,41 @@ pub enum SafetyTier {
     Privileged,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JsonSchemaType {
-    Object,
-    String,
-    Integer,
-    Number,
-    Boolean,
-    Array,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JsonSchema {
-    #[serde(rename = "type")]
-    pub schema_type: JsonSchemaType,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub properties: BTreeMap<String, JsonSchema>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required: Vec<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "additionalProperties"
-    )]
-    pub additional_properties: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub items: Option<Box<JsonSchema>>,
-}
-
-impl JsonSchema {
-    pub fn new(schema_type: JsonSchemaType) -> Self {
-        Self {
-            schema_type,
-            properties: BTreeMap::new(),
-            required: Vec::new(),
-            additional_properties: None,
-            description: None,
-            items: None,
-        }
-    }
-
-    pub fn object(properties: BTreeMap<String, JsonSchema>, required: Vec<String>) -> Self {
-        Self {
-            schema_type: JsonSchemaType::Object,
-            properties,
-            required,
-            additional_properties: None,
-            description: None,
-            items: None,
-        }
-    }
-
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    pub fn with_items(mut self, items: JsonSchema) -> Self {
-        self.items = Some(Box::new(items));
-        self
-    }
-}
+/// A tool parameter schema expressed as a raw JSON Schema value.
+///
+/// Using `serde_json::Value` gives full JSON Schema coverage without
+/// maintaining a typed struct that must be extended for every new keyword
+/// (`enum`, `minimum`, `maximum`, `pattern`, `anyOf`, etc.).
+///
+/// Construct schemas with `serde_json::json!({...})`:
+///
+/// ```rust,ignore
+/// use serde_json::json;
+/// let params = json!({
+///     "type": "object",
+///     "required": ["query"],
+///     "properties": {
+///         "query":     { "type": "string", "minLength": 1 },
+///         "count":     { "type": "integer", "minimum": 1, "maximum": 10 },
+///         "freshness": { "type": "string", "enum": ["day", "week", "month"] }
+///     }
+/// });
+/// ```
+pub type ToolParameterSchema = Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionDecl {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub parameters: JsonSchema,
+    pub parameters: ToolParameterSchema,
 }
 
 impl FunctionDecl {
     pub fn new(
         name: impl Into<String>,
         description: Option<String>,
-        parameters: JsonSchema,
+        parameters: ToolParameterSchema,
     ) -> Self {
         Self {
             name: name.into(),

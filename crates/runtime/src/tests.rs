@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use types::{
-    CatalogProvider, Context, FunctionDecl, JsonSchema, JsonSchemaType, Memory,
+    CatalogProvider, Context, FunctionDecl, Memory,
     MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest,
     MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord,
     MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
@@ -162,12 +162,16 @@ struct MockReadTool;
 #[async_trait]
 impl Tool for MockReadTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = std::collections::BTreeMap::new();
-        properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
         FunctionDecl::new(
             "file_read",
             None,
-            JsonSchema::object(properties, vec!["path".to_owned()]),
+            serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
         )
     }
 
@@ -200,7 +204,7 @@ impl Tool for SlowTool {
         FunctionDecl::new(
             "slow_tool",
             None,
-            JsonSchema::object(std::collections::BTreeMap::new(), vec![]),
+            serde_json::json!({ "type": "object", "properties": {} }),
         )
     }
 
@@ -227,7 +231,7 @@ impl Tool for SensitiveOutputTool {
         FunctionDecl::new(
             "sensitive_output",
             None,
-            JsonSchema::object(std::collections::BTreeMap::new(), vec![]),
+            serde_json::json!({ "type": "object", "properties": {} }),
         )
     }
 
@@ -514,12 +518,14 @@ async fn run_session_reconstructs_streamed_tool_calls_and_loops_until_done() {
                     id: Some("call_1".to_owned()),
                     name: Some("file_read".to_owned()),
                     arguments: Some("{\"path\":\"Car".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 0,
                     id: None,
                     name: None,
                     arguments: Some("go.toml\"}".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -612,6 +618,7 @@ async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
                     id: Some("call_bash".to_owned()),
                     name: Some("shell_exec".to_owned()),
                     arguments: Some(r#"{"command":"printf ws5-runtime"}"#.to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -681,6 +688,7 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
                     id: Some("call_bash".to_owned()),
                     name: Some("shell_exec".to_owned()),
                     arguments: Some(r#"{"command":"printf blocked"}"#.to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -750,6 +758,7 @@ async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_ac
                     id: Some("call_read".to_owned()),
                     name: Some("file_read".to_owned()),
                     arguments: Some(json!({ "path": outside_file_path }).to_string()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -811,6 +820,7 @@ async fn run_session_injects_unknown_tool_error_for_legacy_alias_after_cutover()
                     id: Some("legacy_call".to_owned()),
                     name: Some("read_file".to_owned()),
                     arguments: Some(r#"{"path":"Cargo.toml"}"#.to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -864,6 +874,7 @@ async fn run_session_scrubs_credential_like_tool_output_before_context_injection
                     id: Some("sensitive_call".to_owned()),
                     name: Some("sensitive_output".to_owned()),
                     arguments: Some("{}".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -1177,6 +1188,7 @@ async fn run_session_recovers_from_validation_error() {
                     name: Some("file_read".to_owned()),
                     // Missing "path" property, should trigger validation error
                     arguments: Some("{}".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -1190,12 +1202,16 @@ async fn run_session_recovers_from_validation_error() {
     );
 
     let mut tool = MockToolContract::new();
-    let mut properties = std::collections::BTreeMap::new();
-    properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
     tool.expect_schema().return_const(FunctionDecl::new(
         "file_read",
         None,
-        JsonSchema::object(properties, vec!["path".to_owned()]),
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": { "type": "string" }
+            }
+        }),
     ));
     tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
     // Execute should not be called because validation intercepts it!
@@ -1251,6 +1267,7 @@ async fn run_session_recovers_from_malformed_streamed_json_arguments() {
                     id: Some("call_1".to_owned()),
                     name: Some("file_read".to_owned()),
                     arguments: Some("{\"path\":\"Cargo.toml\"".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -1262,12 +1279,16 @@ async fn run_session_recovers_from_malformed_streamed_json_arguments() {
     );
 
     let mut tool = MockToolContract::new();
-    let mut properties = std::collections::BTreeMap::new();
-    properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
     tool.expect_schema().return_const(FunctionDecl::new(
         "file_read",
         None,
-        JsonSchema::object(properties, vec!["path".to_owned()]),
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": { "type": "string" }
+            }
+        }),
     ));
     tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
     tool.expect_execute().times(0);
@@ -1324,12 +1345,14 @@ async fn run_session_executes_readonly_tools_in_parallel() {
                     id: Some("call_1".to_owned()),
                     name: Some("slow_tool".to_owned()),
                     arguments: Some("{}".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::ToolCallDelta(ToolCallDelta {
                     index: 1,
                     id: Some("call_2".to_owned()),
                     name: Some("slow_tool".to_owned()),
                     arguments: Some("{}".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -1393,6 +1416,7 @@ async fn run_session_supports_mockall_tool_execution() {
                     id: Some("call_1".to_owned()),
                     name: Some("file_read".to_owned()),
                     arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                    metadata: None,
                 })),
                 Ok(StreamItem::FinishReason("tool_calls".to_owned())),
             ]),
@@ -1404,12 +1428,16 @@ async fn run_session_supports_mockall_tool_execution() {
     );
 
     let mut tool = MockToolContract::new();
-    let mut properties = std::collections::BTreeMap::new();
-    properties.insert("path".to_owned(), JsonSchema::new(JsonSchemaType::String));
     tool.expect_schema().return_const(FunctionDecl::new(
         "file_read",
         None,
-        JsonSchema::object(properties, vec!["path".to_owned()]),
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": { "type": "string" }
+            }
+        }),
     ));
     tool.expect_safety_tier().return_const(SafetyTier::ReadOnly);
     tool.expect_timeout().return_const(Duration::from_secs(1));
@@ -1551,6 +1579,7 @@ async fn run_session_errors_when_tool_stage_times_out() {
                 id: Some("call_1".to_owned()),
                 name: Some("slow_tool".to_owned()),
                 arguments: Some("{}".to_owned()),
+                metadata: None,
             })),
             Ok(StreamItem::FinishReason("tool_calls".to_owned())),
         ])],
@@ -1590,6 +1619,7 @@ async fn run_session_errors_when_max_turn_budget_is_exceeded() {
                 id: Some("call_1".to_owned()),
                 name: Some("file_read".to_owned()),
                 arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                metadata: None,
             })),
             Ok(StreamItem::FinishReason("tool_calls".to_owned())),
         ])],
@@ -2398,6 +2428,7 @@ fn streamed_tool_calls_accept_empty_argument_payload_as_object() {
         id: Some("call_1".to_owned()),
         name: Some("noop".to_owned()),
         arguments: None,
+        metadata: None,
     });
     let tool_calls = accumulator
         .build(&provider)
@@ -2415,6 +2446,7 @@ fn streamed_tool_calls_require_id_field() {
         id: None,
         name: Some("noop".to_owned()),
         arguments: Some("{}".to_owned()),
+        metadata: None,
     });
 
     let error = accumulator
@@ -2434,6 +2466,7 @@ fn streamed_tool_calls_require_function_name() {
         id: Some("call_1".to_owned()),
         name: None,
         arguments: Some("{}".to_owned()),
+        metadata: None,
     });
 
     let error = accumulator

@@ -94,13 +94,13 @@ fn anthropic_request_normalization_snapshot_is_stable() {
         tools: vec![FunctionDecl::new(
             "file_read",
             Some("Read UTF-8 text from a file".to_owned()),
-            JsonSchema::object(
-                std::collections::BTreeMap::from([(
-                    "path".to_owned(),
-                    JsonSchema::new(types::JsonSchemaType::String),
-                )]),
-                vec!["path".to_owned()],
-            ),
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
         )],
         messages: vec![
             Message {
@@ -122,6 +122,7 @@ fn anthropic_request_normalization_snapshot_is_stable() {
                     id: "call_1".to_owned(),
                     name: "file_read".to_owned(),
                     arguments: json!({"path": "Cargo.toml"}),
+                    metadata: None,
                 }],
                 tool_call_id: None,
             },
@@ -264,13 +265,13 @@ fn request_normalization_maps_messages_and_tools() {
         tools: vec![FunctionDecl::new(
             "file_read",
             Some("Read UTF-8 text from a file".to_owned()),
-            JsonSchema::object(
-                std::collections::BTreeMap::from([(
-                    "path".to_owned(),
-                    JsonSchema::new(types::JsonSchemaType::String),
-                )]),
-                vec!["path".to_owned()],
-            ),
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
         )],
         messages: vec![
             Message {
@@ -286,6 +287,7 @@ fn request_normalization_maps_messages_and_tools() {
                     id: "call_1".to_owned(),
                     name: "file_read".to_owned(),
                     arguments: json!({"path": "Cargo.toml"}),
+                    metadata: None,
                 }],
                 tool_call_id: None,
             },
@@ -392,6 +394,7 @@ fn stream_payload_normalization_maps_text_tool_usage_and_finish_reason() {
                 id: Some("call_1".to_owned()),
                 name: Some("file_read".to_owned()),
                 arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                metadata: None,
             }),
             StreamItem::FinishReason("tool_calls".to_owned()),
         ]
@@ -1195,6 +1198,7 @@ fn anthropic_stream_tool_call_accumulation() {
             id: Some("toolu_1".to_owned()),
             name: Some("get_weather".to_owned()),
             arguments: None,
+            metadata: None,
         })]
     );
 
@@ -1213,6 +1217,7 @@ fn anthropic_stream_tool_call_accumulation() {
             id: Some("toolu_1".to_owned()),
             name: Some("get_weather".to_owned()),
             arguments: Some(r#"{"loc"#.to_owned()),
+            metadata: None,
         })]
     );
 
@@ -1231,6 +1236,7 @@ fn anthropic_stream_tool_call_accumulation() {
             id: Some("toolu_1".to_owned()),
             name: Some("get_weather".to_owned()),
             arguments: Some(r#"ation":"NYC"}"#.to_owned()),
+            metadata: None,
         })]
     );
 }
@@ -1268,6 +1274,7 @@ fn anthropic_stream_tool_call_index_remapping() {
             id: Some("t1".to_owned()),
             name: Some("fn1".to_owned()),
             arguments: None,
+            metadata: None,
         })
     );
 
@@ -1286,6 +1293,7 @@ fn anthropic_stream_tool_call_index_remapping() {
             id: Some("t2".to_owned()),
             name: Some("fn2".to_owned()),
             arguments: None,
+            metadata: None,
         })
     );
 }
@@ -1332,6 +1340,7 @@ fn anthropic_stream_multiple_tools_interleaved_with_text() {
             id: Some("a".to_owned()),
             name: Some("read".to_owned()),
             arguments: Some(r#"{"p":1}"#.to_owned()),
+            metadata: None,
         })
     );
 
@@ -1349,6 +1358,7 @@ fn anthropic_stream_multiple_tools_interleaved_with_text() {
             id: Some("b".to_owned()),
             name: Some("write".to_owned()),
             arguments: Some(r#"{"q":2}"#.to_owned()),
+            metadata: None,
         })
     );
 }
@@ -1648,13 +1658,13 @@ fn gemini_request_serialization_snapshot() {
         tools: vec![FunctionDecl::new(
             "file_read",
             Some("Read UTF-8 text from a file".to_owned()),
-            JsonSchema::object(
-                std::collections::BTreeMap::from([(
-                    "path".to_owned(),
-                    JsonSchema::new(types::JsonSchemaType::String),
-                )]),
-                vec!["path".to_owned()],
-            ),
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
         )],
         messages: vec![
             Message {
@@ -1734,6 +1744,7 @@ fn gemini_response_normalization() {
                     text: Some("Hello world".to_owned()),
                     function_call: None,
                     function_response: None,
+                    thought_signature: None,
                 }],
             }),
             finish_reason: Some("STOP".to_owned()),
@@ -1809,6 +1820,7 @@ fn gemini_function_call_response_mapping() {
                         args: json!({"location": "NYC"}),
                     }),
                     function_response: None,
+                    thought_signature: None,
                 }],
             }),
             finish_reason: Some("STOP".to_owned()),
@@ -1887,6 +1899,7 @@ fn gemini_tool_result_encoding() {
                     id: "call_1".to_owned(),
                     name: "get_weather".to_owned(),
                     arguments: json!({"location": "NYC"}),
+                    metadata: None,
                 }],
                 tool_call_id: None,
             },
@@ -2044,13 +2057,13 @@ fn responses_request_serialization_snapshot() {
         tools: vec![FunctionDecl::new(
             "file_read",
             Some("Read UTF-8 text from a file".to_owned()),
-            JsonSchema::object(
-                std::collections::BTreeMap::from([(
-                    "path".to_owned(),
-                    JsonSchema::new(types::JsonSchemaType::String),
-                )]),
-                vec!["path".to_owned()],
-            ),
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
         )],
         messages: vec![
             Message {
@@ -2072,6 +2085,7 @@ fn responses_request_serialization_snapshot() {
                     id: "call_1".to_owned(),
                     name: "file_read".to_owned(),
                     arguments: json!({"path": "Cargo.toml"}),
+                    metadata: None,
                 }],
                 tool_call_id: None,
             },

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, JsonSchema, JsonSchemaType, Message, MessageRole, ModelCatalog,
+    Context, FunctionDecl, Message, MessageRole, ModelCatalog,
     Provider, ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall,
     ToolCallDelta, UsageUpdate,
 };
@@ -339,9 +339,15 @@ impl GeminiGenerateContentRequest {
                         parts.push(GeminiPart::text(text));
                     }
                     for tool_call in &message.tool_calls {
+                        let thought_signature = tool_call
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("thought_signature"))
+                            .and_then(|v| v.as_str());
                         parts.push(GeminiPart::function_call(
                             &tool_call.name,
                             &tool_call.arguments,
+                            thought_signature,
                         ));
                     }
                     if !parts.is_empty() {
@@ -363,8 +369,14 @@ impl GeminiGenerateContentRequest {
                         .content
                         .as_deref()
                         .and_then(|c| serde_json::from_str::<Value>(c).ok())
+                        .and_then(|v| v.is_object().then_some(v))
                         .unwrap_or_else(|| {
-                            Value::String(message.content.clone().unwrap_or_default())
+                            // Gemini requires functionResponse.response to be a JSON object
+                            // (google.protobuf.Struct). Wrap any non-object value — including
+                            // plain-text error messages — so the API never sees a bare string.
+                            serde_json::json!({
+                                "result": message.content.clone().unwrap_or_default()
+                            })
                         });
                     contents.push(GeminiContent {
                         role: "user".to_owned(),
@@ -426,6 +438,11 @@ pub(crate) struct GeminiPart {
     pub(crate) function_call: Option<GeminiFunctionCall>,
     #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
     pub(crate) function_response: Option<GeminiFunctionResponse>,
+    /// Opaque token included by Gemini 2.5 thinking models at the Part level.
+    /// Must be echoed back verbatim when replaying the conversation history or
+    /// Gemini returns HTTP 400 "missing thought_signature".
+    #[serde(rename = "thoughtSignature", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) thought_signature: Option<String>,
 }
 
 impl GeminiPart {
@@ -434,10 +451,11 @@ impl GeminiPart {
             text: Some(text.to_owned()),
             function_call: None,
             function_response: None,
+            thought_signature: None,
         }
     }
 
-    fn function_call(name: &str, args: &Value) -> Self {
+    fn function_call(name: &str, args: &Value, thought_signature: Option<&str>) -> Self {
         Self {
             text: None,
             function_call: Some(GeminiFunctionCall {
@@ -445,6 +463,7 @@ impl GeminiPart {
                 args: args.clone(),
             }),
             function_response: None,
+            thought_signature: thought_signature.map(ToOwned::to_owned),
         }
     }
 
@@ -456,6 +475,7 @@ impl GeminiPart {
                 name: name.to_owned(),
                 response,
             }),
+            thought_signature: None,
         }
     }
 }
@@ -482,33 +502,40 @@ struct GeminiFunctionDeclaration {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    parameters: JsonSchema,
+    parameters: serde_json::Value,
 }
 
 /// Recursively sanitize a schema for Gemini: strip `additionalProperties` because
 /// Gemini's function-calling API does not support that keyword.
-fn sanitize_schema_for_gemini(schema: &JsonSchema) -> JsonSchema {
-    let mut s = schema.clone();
-    if s.schema_type == JsonSchemaType::Object {
-        s.additional_properties = None;
-        s.properties = s
-            .properties
-            .iter()
-            .map(|(k, v)| (k.clone(), sanitize_schema_for_gemini(v)))
-            .collect();
+fn sanitize_schema_for_gemini(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    obj.remove("additionalProperties");
+
+    // Recurse into properties
+    if let Some(props) = obj.get_mut("properties")
+        && let Some(props_obj) = props.as_object_mut()
+    {
+        for v in props_obj.values_mut() {
+            sanitize_schema_for_gemini(v);
+        }
     }
-    if let Some(items) = &s.items {
-        s.items = Some(Box::new(sanitize_schema_for_gemini(items)));
+
+    // Recurse into array items
+    if let Some(items) = obj.get_mut("items") {
+        sanitize_schema_for_gemini(items);
     }
-    s
 }
 
 impl From<&FunctionDecl> for GeminiFunctionDeclaration {
     fn from(value: &FunctionDecl) -> Self {
+        let mut parameters = value.parameters.clone();
+        sanitize_schema_for_gemini(&mut parameters);
         Self {
             name: value.name.clone(),
             description: value.description.clone(),
-            parameters: sanitize_schema_for_gemini(&value.parameters),
+            parameters,
         }
     }
 }
@@ -596,10 +623,14 @@ pub(crate) fn normalize_gemini_response(
                 text_chunks.push(text.clone());
             }
             if let Some(fc) = &part.function_call {
+                let metadata = part.thought_signature.as_deref().map(|sig| {
+                    serde_json::json!({ "thought_signature": sig })
+                });
                 tool_calls.push(ToolCall {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: fc.name.clone(),
                     arguments: fc.args.clone(),
+                    metadata,
                 });
             }
         }
@@ -676,11 +707,15 @@ pub(crate) fn normalize_gemini_stream_chunk(
                 }
                 if let Some(fc) = &part.function_call {
                     let id = uuid::Uuid::new_v4().to_string();
+                    let metadata = part.thought_signature.as_deref().map(|sig| {
+                        serde_json::json!({ "thought_signature": sig })
+                    });
                     items.push(StreamItem::ToolCallDelta(ToolCallDelta {
                         index: tool_call_index,
                         id: Some(id),
                         name: Some(fc.name.clone()),
                         arguments: Some(serde_json::to_string(&fc.args).unwrap_or_default()),
+                        metadata,
                     }));
                     tool_call_index += 1;
                 }

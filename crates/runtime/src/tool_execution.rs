@@ -5,11 +5,11 @@ use super::{scrubbing::scrub_tool_output, *};
 fn strip_additional_properties(schema: &mut serde_json::Value) {
     if let Some(obj) = schema.as_object_mut() {
         obj.remove("additionalProperties");
-        if let Some(props) = obj.get_mut("properties") {
-            if let Some(props_obj) = props.as_object_mut() {
-                for v in props_obj.values_mut() {
-                    strip_additional_properties(v);
-                }
+        if let Some(props) = obj.get_mut("properties")
+            && let Some(props_obj) = props.as_object_mut()
+        {
+            for v in props_obj.values_mut() {
+                strip_additional_properties(v);
             }
         }
         if let Some(items) = obj.get_mut("items") {
@@ -73,8 +73,7 @@ impl AgentRuntime {
         }
 
         let schema_decl = tool.schema();
-        let mut schema_json =
-            serde_json::to_value(&schema_decl.parameters).map_err(ToolError::Serialization)?;
+        let mut schema_json = schema_decl.parameters.clone();
         strip_additional_properties(&mut schema_json);
 
         let mut validation_args = arguments.clone();
@@ -98,7 +97,7 @@ impl AgentRuntime {
             }));
         }
 
-        let arg_str = serde_json::to_string(arguments).map_err(ToolError::Serialization)?;
+        let arg_str = serde_json::to_string(&validation_args).map_err(ToolError::Serialization)?;
 
         tokio::select! {
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),

@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     env,
     path::PathBuf,
     process::Command,
@@ -24,9 +23,9 @@ use serde_json::{Value, json};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use types::{
-    FunctionDecl, JsonSchema, JsonSchemaType, RunnerBootstrapEnvelope, SafetyTier, SandboxTier,
-    ShellOutputStream, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
-    StartupStatusReport, Tool, ToolError,
+    FunctionDecl, RunnerBootstrapEnvelope, SafetyTier, SandboxTier, ShellOutputStream,
+    SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode, StartupStatusReport, Tool,
+    ToolError,
 };
 
 mod registry;
@@ -310,16 +309,16 @@ impl BashTool {
 #[async_trait]
 impl Tool for ReadTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("File path to read"),
-        );
-
         FunctionDecl::new(
             FILE_READ_TOOL_NAME,
             Some("Read the contents of a file and return its text. Path is relative to the working directory.".to_owned()),
-            JsonSchema::object(properties, vec!["path".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string", "description": "File path to read" }
+                }
+            }),
         )
     }
 
@@ -347,20 +346,17 @@ impl Tool for ReadTool {
 #[async_trait]
 impl Tool for SearchTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("Root path to search"),
-        );
-        properties.insert(
-            "query".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("Search query"),
-        );
-
         FunctionDecl::new(
             FILE_SEARCH_TOOL_NAME,
             Some("Search recursively for lines matching a text query. Returns matching lines with file paths and line numbers. Use for finding code, configuration, or text patterns.".to_owned()),
-            JsonSchema::object(properties, vec!["path".to_owned(), "query".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["path", "query"],
+                "properties": {
+                    "path":  { "type": "string", "description": "Root path to search" },
+                    "query": { "type": "string", "description": "Search query" }
+                }
+            }),
         )
     }
 
@@ -388,17 +384,15 @@ impl Tool for SearchTool {
 #[async_trait]
 impl Tool for ListTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Directory path to list; defaults to current directory"),
-        );
-
         FunctionDecl::new(
             FILE_LIST_TOOL_NAME,
             Some("List files and directories. Returns names with type indicators. Defaults to the current working directory if no path is given.".to_owned()),
-            JsonSchema::object(properties, Vec::new()),
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Directory path to list; defaults to current directory" }
+                }
+            }),
         )
     }
 
@@ -431,21 +425,17 @@ impl Tool for ListTool {
 #[async_trait]
 impl Tool for WriteTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("File path to write"),
-        );
-        properties.insert(
-            "content".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("UTF-8 file content to persist"),
-        );
-
         FunctionDecl::new(
             FILE_WRITE_TOOL_NAME,
             Some("Create or overwrite a file with the given content. Creates parent directories as needed. Path is relative to the working directory.".to_owned()),
-            JsonSchema::object(properties, vec!["path".to_owned(), "content".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["path", "content"],
+                "properties": {
+                    "path":    { "type": "string", "description": "File path to write" },
+                    "content": { "type": "string", "description": "UTF-8 file content to persist" }
+                }
+            }),
         )
     }
 
@@ -473,32 +463,18 @@ impl Tool for WriteTool {
 #[async_trait]
 impl Tool for EditTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("File path to edit"),
-        );
-        properties.insert(
-            "old_text".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Exact text snippet to replace"),
-        );
-        properties.insert(
-            "new_text".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("Replacement text"),
-        );
-
         FunctionDecl::new(
             FILE_EDIT_TOOL_NAME,
             Some("Edit a file by replacing an exact text snippet. old_text must match exactly one occurrence in the file. Use file_read first to see the current contents.".to_owned()),
-            JsonSchema::object(
-                properties,
-                vec![
-                    "path".to_owned(),
-                    "old_text".to_owned(),
-                    "new_text".to_owned(),
-                ],
-            ),
+            json!({
+                "type": "object",
+                "required": ["path", "old_text", "new_text"],
+                "properties": {
+                    "path":     { "type": "string", "description": "File path to edit" },
+                    "old_text": { "type": "string", "description": "Exact text snippet to replace" },
+                    "new_text": { "type": "string", "description": "Replacement text" }
+                }
+            }),
         )
     }
 
@@ -530,17 +506,16 @@ impl Tool for EditTool {
 #[async_trait]
 impl Tool for DeleteTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("File or directory path to delete"),
-        );
-
         FunctionDecl::new(
             FILE_DELETE_TOOL_NAME,
             Some("Delete a file or directory. Directories are removed recursively. Path is relative to the working directory.".to_owned()),
-            JsonSchema::object(properties, vec!["path".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string", "description": "File or directory path to delete" }
+                }
+            }),
         )
     }
 
@@ -568,16 +543,16 @@ impl Tool for DeleteTool {
 #[async_trait]
 impl Tool for WebFetchTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "url".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("URL to fetch"),
-        );
-
         FunctionDecl::new(
             WEB_FETCH_TOOL_NAME,
             Some("Fetch a URL over HTTP and return its content. Returns status, content type, and body. HTML is automatically converted to readable text. Binary content returns metadata only.".to_owned()),
-            JsonSchema::object(properties, vec!["url".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": { "type": "string", "description": "URL to fetch", "minLength": 1 }
+                }
+            }),
         )
     }
 
@@ -605,25 +580,32 @@ impl Tool for WebFetchTool {
 #[async_trait]
 impl Tool for WebSearchTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "query".to_owned(),
-            JsonSchema::new(JsonSchemaType::String).with_description("Search query"),
-        );
-        properties.insert(
-            "count".to_owned(),
-            JsonSchema::new(JsonSchemaType::Integer)
-                .with_description("Optional result count (1-10, default 5)"),
-        );
-        properties.insert(
-            "freshness".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Optional freshness filter: day, week, month, year"),
-        );
         FunctionDecl::new(
             WEB_SEARCH_TOOL_NAME,
             Some("Search the web and return a list of results with title, url, and snippet. Use web_fetch to retrieve full page content when needed.".to_owned()),
-            JsonSchema::object(properties, vec!["query".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                        "minLength": 1
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Optional result count (default 5)",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 5
+                    },
+                    "freshness": {
+                        "type": "string",
+                        "description": "Optional freshness filter",
+                        "enum": ["day", "week", "month", "year"]
+                    }
+                }
+            }),
         )
     }
 
@@ -655,25 +637,17 @@ impl Tool for WebSearchTool {
 #[async_trait]
 impl Tool for VaultCopyToTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "source_path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Vault source path to read from"),
-        );
-        properties.insert(
-            "destination_path".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Destination path in shared/tmp to write to"),
-        );
-
         FunctionDecl::new(
             VAULT_COPYTO_TOOL_NAME,
             Some("Copy a file from the vault into the shared workspace. source_path is within the vault; destination_path is within shared/tmp.".to_owned()),
-            JsonSchema::object(
-                properties,
-                vec!["source_path".to_owned(), "destination_path".to_owned()],
-            ),
+            json!({
+                "type": "object",
+                "required": ["source_path", "destination_path"],
+                "properties": {
+                    "source_path":      { "type": "string", "description": "Vault source path to read from" },
+                    "destination_path": { "type": "string", "description": "Destination path in shared/tmp to write to" }
+                }
+            }),
         )
     }
 
@@ -715,17 +689,16 @@ impl Tool for VaultCopyToTool {
 #[async_trait]
 impl Tool for BashTool {
     fn schema(&self) -> FunctionDecl {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "command".to_owned(),
-            JsonSchema::new(JsonSchemaType::String)
-                .with_description("Shell command executed through the active shell backend"),
-        );
-
         FunctionDecl::new(
             SHELL_EXEC_TOOL_NAME,
             Some("Execute a shell command and return its output. Returns combined stdout and stderr.".to_owned()),
-            JsonSchema::object(properties, vec!["command".to_owned()]),
+            json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command executed through the active shell backend" }
+                }
+            }),
         )
     }
 

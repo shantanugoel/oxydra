@@ -353,6 +353,9 @@ struct ToolCallAccumulatorEntry {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    /// First non-None metadata wins; used to carry thought_signature through
+    /// the streaming pipeline for Gemini thinking models.
+    metadata: Option<serde_json::Value>,
 }
 
 impl ToolCallAccumulator {
@@ -366,6 +369,9 @@ impl ToolCallAccumulator {
         }
         if let Some(arguments) = delta.arguments {
             entry.arguments.push_str(&arguments);
+        }
+        if entry.metadata.is_none() {
+            entry.metadata = delta.metadata;
         }
     }
 
@@ -404,6 +410,7 @@ impl ToolCallAccumulator {
                 id,
                 name,
                 arguments: parsed_arguments,
+                metadata: entry.metadata,
             });
         }
         Ok(tool_calls)

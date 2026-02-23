@@ -43,7 +43,7 @@ use responses::{
     ResponsesUsage, parse_responses_stream_event,
 };
 #[cfg(test)]
-use types::{Context, FunctionDecl, JsonSchema, Message, MessageRole, Response, ToolCall};
+use types::{Context, FunctionDecl, Message, MessageRole, Response, ToolCall};
 
 pub(crate) const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub(crate) const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";

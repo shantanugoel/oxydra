@@ -1,0 +1,25 @@
+# Workspace-level Cargo shortcuts.
+#
+# Usage:
+#   cargo server               → same as: cargo run -p runner
+#   cargo server -- --insecure → passes extra args to runner
+#   cargo tui                  → same as: cargo run -p tui
+#   cargo sdaemon              → same as: cargo run -p shell-daemon
+#
+# ARCHITECTURE — two separate processes, run each in its own terminal:
+#
+#   Terminal 1:  cargo server -- --insecure [--daemon]
+#   Terminal 2:  cargo tui -- <websocket-url>
+#
+# Dependency graph at build time:
+#   runner:       gateway + runtime + provider + tools + memory + sandbox + types
+#   tui:          types only  (connects to runner over WebSocket — no AI code)
+#   shell-daemon: types only  (shell execution helper for the shell tool)
+#
+# Conclusion: `cargo run -p runner` always recompiles ALL AI/provider/runtime
+# changes. There is no separate "compile step" needed.
+
+[alias]
+server  = "run -p runner"
+tui     = "run -p tui"
+sdaemon = "run -p shell-daemon"

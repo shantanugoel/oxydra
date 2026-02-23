@@ -597,6 +597,31 @@ Process tier (--insecure):
   Direct filesystem access. Works.
 ```
 
+### Why Per-User DB, Not a Shared Multi-User DB
+
+Two options exist for local storage:
+
+| Approach | Description |
+|----------|-------------|
+| **Shared DB** | Single `memory.db` outside any user workspace (e.g., `<workspace_root>/.oxydra/memory.db`). All users' data lives in one database, isolated only by the `memory:{user_id}` session convention. |
+| **Per-user DB** | Each user gets their own `memory.db` inside their workspace (e.g., `<workspace_root>/<user_id>/.oxydra/memory.db`). Physical file-level isolation. |
+
+**Decision: Per-user DB.** Rationale:
+
+1. **Security — defense in depth.** A shared DB means a single SQL injection, a bug in `json_extract` filtering, or a logic error in session ID construction could leak User A's memory to User B. A per-user DB makes this physically impossible — each user's `oxydra-vm` process can only open its own file.
+
+2. **Alignment with the workspace model.** The runner already provisions per-user workspaces (`<workspace_root>/<user_id>/`). Each user's `oxydra-vm` + `shell-vm` pair runs in isolation scoped to that workspace. The memory DB is a per-user artifact and belongs inside the user's workspace, not in a cross-user location.
+
+3. **Mount isolation in Container/MicroVM tiers.** Each guest pair only sees its own user's workspace. A shared DB would need to be mounted into every user's guest, creating a cross-user shared file — the exact thing the sandbox model is designed to prevent.
+
+4. **Simpler backup and lifecycle.** Deleting a user's workspace cleanly removes all their data, including memory. No need to selectively purge rows from a shared database.
+
+5. **No concurrency complications.** SQLite handles concurrent readers well but concurrent writers from multiple processes can cause contention. Per-user DBs eliminate cross-user write contention entirely.
+
+6. **Feasibility.** The memory subsystem already accepts a `db_path` in `MemoryConfig`. No architectural changes needed — each `oxydra-vm` instance already opens its own DB connection. The only change is where the path resolves to.
+
+The `memory:{user_id}` session prefix inside each per-user DB is still useful — it separates note storage from conversation sessions within the same user's database. But it no longer serves as the cross-user isolation boundary.
+
 ### Problem in Container/MicroVM Tiers
 
 In Container and MicroVM tiers, `oxydra-vm` runs inside an isolated guest. The workspace directories (`shared/`, `tmp/`, `vault/`) are bind-mounted from the host into the guest (see Chapter 8). But `.oxydra/memory.db` is **not** inside any of those well-known workspace subdirectories — it sits at the workspace root level.
@@ -608,74 +633,166 @@ Several issues arise:
 The runner's workspace layout is:
 ```
 <workspace_root>/<user_id>/
-  ├── shared/    (persistent user data)
+  ├── shared/    (persistent user data — tool-accessible)
   ├── tmp/       (ephemeral, IPC markers)
-  └── vault/     (credentials, restricted access)
+  ├── vault/     (credentials, restricted access)
+  ├── logs/      (log files)
+  └── ipc/       (gateway endpoint markers, daemon sockets)
 ```
 
-The memory DB at `.oxydra/memory.db` (relative to CWD) would need to be at `<workspace_root>/<user_id>/.oxydra/memory.db` on the host, and then bind-mounted into the guest. Currently, the runner doesn't provision or mount this path.
+The memory DB at `.oxydra/memory.db` (relative to CWD) would resolve to `<workspace_root>/<user_id>/.oxydra/memory.db` on the host. Currently, the runner doesn't provision this directory or mount it into guests.
 
 #### Issue 2: Security — LLM Tools Can Access the Memory DB File
 
-In Process tier, the memory DB file lives on the host filesystem alongside the workspace. Any tool with filesystem access (file_read, shell_exec) could potentially read or corrupt the raw SQLite database. In Container/MicroVM tiers, if the DB is bind-mounted, the same tools could access it unless the mount is specifically excluded from tool mount policies.
+If the memory DB lives inside `shared/` (which is mounted into both `oxydra-vm` and `shell-vm` and is tool-accessible via WASM mount policies), any tool with filesystem access could read or corrupt the raw SQLite database. The LLM could `file_read shared/.oxydra/memory.db` and see raw data, or `shell_exec "sqlite3 shared/.oxydra/memory.db 'SELECT * FROM conversation_events'"` to dump everything.
 
-The LLM-callable memory tools provide a safe, scoped API for memory access. Direct file-level access to the database bypasses all of that — the LLM could `file_read .oxydra/memory.db` and see raw data from all sessions, or `shell_exec "sqlite3 .oxydra/memory.db 'SELECT * FROM conversation_events'"` to dump everything.
+The LLM-callable memory tools provide a safe, scoped API for memory access. Direct file-level access to the database bypasses all of that.
+
+**Critical insight:** The DB must **not** live inside `shared/`, `tmp/`, or `vault/` — all of these are tool-accessible. It needs its own directory that is:
+- Mounted only into the `oxydra-vm` container (not `shell-vm`)
+- Not included in any WASM tool mount policy
+- Not accessible via the security policy's file access checks
 
 #### Issue 3: Multi-Channel Shared State
 
-Per-user memory must survive across sessions and channels. In Container/MicroVM tiers where guests are ephemeral, the DB must be on a persistent volume that survives container restarts. The current relative-path default doesn't express this requirement — it works only because Process tier guests are long-lived host processes.
+Per-user memory must survive across sessions and channels. In Container/MicroVM tiers where guests may be recreated, the DB must be on a persistent host-side path that survives container restarts. The current relative-path default works only because Process tier guests are long-lived host processes.
 
 #### Issue 4: Remote Memory Mode
 
-`MemoryConfig` already supports `remote_url` + `auth_token` for connecting to a remote libSQL instance (e.g., Turso). In this mode, the DB path is irrelevant — the guest connects over the network. This avoids all mount/access issues but introduces network latency and a dependency on an external service.
+`MemoryConfig` already supports `remote_url` + `auth_token` for connecting to a remote libSQL instance (e.g., Turso). In this mode, the DB path is irrelevant — the guest connects over the network. This avoids all mount/access issues but introduces network latency and a dependency on an external service. This is the cleanest option for production but not required — local mode should also work correctly.
 
-### Resolution Plan
+### Resolution Plan (Finalized)
 
-#### Phase A: Correct Placement of Local Memory DB (Required for Container/MicroVM)
+#### Phase A: Per-User DB in a Dedicated `.oxydra/` Workspace Directory
 
-1. **Move the default DB path** from `.oxydra/memory.db` (workspace-root-relative) to `shared/.oxydra/memory.db` (inside the `shared/` subdirectory). The `shared/` directory is already bind-mounted into guests and is designed for persistent data that survives container restarts.
+**Goal:** Each user's memory DB lives at `<workspace_root>/<user_id>/.oxydra/memory.db`, inside a directory that is provisioned by the runner and mounted exclusively for `oxydra-vm`.
 
-2. **Update the runner's workspace provisioning** to create `shared/.oxydra/` during workspace setup.
+**Changes:**
 
-3. **Update `ConnectionStrategy::from_config`** to resolve the `db_path` relative to the workspace root when running inside a guest (the workspace root is available from the bootstrap envelope's `workspace_root` field).
+1. **Add `.oxydra/` to the workspace layout.** Update `provision_user_workspace()` in `crates/runner/src/lib.rs` to create a `.oxydra/` directory alongside `shared/`, `tmp/`, `vault/`, `logs/`, `ipc/`. Add an `internal` (or `oxydra_internal`) field to `UserWorkspace` pointing to this directory.
 
-4. **Migration path**: If an existing `.oxydra/memory.db` exists at the old location and no DB exists at the new location, move it during first startup. Log a warning about the migration.
+   ```
+   <workspace_root>/<user_id>/
+     ├── .oxydra/   (internal — memory DB, config cache, model catalog)
+     ├── shared/    (persistent user data — tool-accessible)
+     ├── tmp/       (ephemeral, IPC markers)
+     ├── vault/     (credentials, restricted access)
+     ├── logs/      (log files)
+     └── ipc/       (gateway endpoint markers, daemon sockets)
+   ```
 
-#### Phase B: Protect the Memory DB from Tool Access (Required)
+2. **Change the default `db_path`** in `default_memory_db_path()` from `.oxydra/memory.db` to a sentinel value (e.g., empty string or `"auto"`). When the path is `"auto"` or empty:
+   - In `oxydra-vm`, resolve to `<workspace_root>/.oxydra/memory.db` using the `--workspace-root` argument already available.
+   - This keeps `agent.toml` configuration optional — the default just works. Users can still override with an explicit absolute path or a path relative to the workspace root.
 
-1. **Add `.oxydra/` to the security policy's path denial list.** The existing `SecurityPolicy::check_file_access()` should reject any path that resolves into the `.oxydra/` directory (or wherever the DB is stored). This prevents `file_read`, `file_write`, `file_edit`, and `file_delete` from touching the database.
+3. **Resolve `db_path` relative to the user's workspace root.** Update the memory backend initialization in `bootstrap_vm_runtime_with_paths()` or the `oxydra-vm` binary to resolve relative `db_path` values against the workspace root from CLI args. This way, `agent.toml` can say `db_path = ".oxydra/memory.db"` and it resolves to `<workspace_root>/<user_id>/.oxydra/memory.db`.
 
-2. **Add `shared/.oxydra/` to the shell command path restriction.** The shell allowlist/blocklist should prevent `shell_exec` from accessing the database directory.
+4. **Migration path**: If an existing `.oxydra/memory.db` exists at the old CWD-relative location and no DB exists at the new workspace-relative location, move it during first startup. Log a `tracing::warn!` about the migration.
 
-3. **In Container/MicroVM tiers**, mount the DB directory as a separate read-write volume that is **not** included in any tool's WASM mount policy. Tools see `shared/` but the `.oxydra/` subdirectory is excluded from their preopened directories. This is the strongest isolation — the DB is accessible to the `oxydra-vm` process but invisible to sandboxed tool execution.
+#### Phase B: Role-Differentiated Container Mounts
 
-#### Phase C: Prefer Remote Memory in Production Tiers (Recommended)
+**Goal:** Mount `.oxydra/` into `oxydra-vm` only — not into `shell-vm`. This gives hardware-level isolation: the shell daemon and all tools executed via it physically cannot see the memory DB.
 
-For production Container/MicroVM deployments:
+**Changes:**
 
-1. **Recommend remote libSQL (Turso or self-hosted sqld)** as the default for non-Process tiers. Remote mode eliminates all mount/access/persistence concerns — the guest connects over the network, and the database lives outside the guest's filesystem entirely.
+1. **Differentiate bind mounts by guest role** in `launch_docker_container_async()`. Currently, both `OxydraVm` and `ShellVm` receive identical bind mounts (`workspace.root`, `mounts.shared`, `mounts.tmp`, `mounts.vault`). Change this so:
 
-2. **Auto-detect and warn** if local memory mode is used with Container/MicroVM tiers. The bootstrap sequence should log a warning: "Local memory DB in Container/MicroVM tier — ensure the DB path is on a persistent volume and excluded from tool mounts."
+   - **`OxydraVm`** gets: `workspace.root` (which includes `.oxydra/`), `shared`, `tmp`, `vault`
+   - **`ShellVm`** gets: `shared`, `tmp`, `ipc` (for the daemon socket) — **no** `workspace.root`, **no** `.oxydra/`, **no** `vault`
 
-3. **Document the trade-offs:**
-   - Local mode: zero external dependencies, lowest latency, but requires careful mount management and security exclusions.
-   - Remote mode: slight network latency, requires a running sqld/Turso instance, but cleanly separates storage from compute and avoids all mount concerns.
+   The `role` field is already passed into `DockerContainerLaunchParams` and available in the mount-building code. This is a targeted change to the `binds` construction.
 
-#### Phase D: Encrypt the Memory DB at Rest (Future Enhancement)
+2. **Update `EffectiveMountPaths`** (or add a role-aware wrapper) to express the `.oxydra/` path as a separate mount, so the runner can include it only for `OxydraVm`.
 
-For additional defense in depth:
+#### Phase C: Security Policy Denials for Process Tier
+
+**Goal:** In Process tier (where there's no container boundary), prevent LLM tools from accessing the memory DB via the existing security policy.
+
+**Changes:**
+
+1. **Add `.oxydra/` to the security policy's path denial list.** Update `SecurityPolicy::check_file_access()` to reject any canonical path that falls within the `.oxydra/` directory under the workspace root. This blocks `file_read`, `file_write`, `file_edit`, `file_delete`, and `file_search` from touching the database or any other internal files.
+
+2. **WASM mount exclusion.** When WASM sandboxing lands (currently simulated), ensure the `.oxydra/` directory is never included in any tool's preopened directory list. The mount policies already restrict tools to `shared/`, `tmp/`, and `vault/` — the `.oxydra/` directory is naturally excluded as long as it's not nested inside any of those.
+
+3. **Shell command awareness.** The existing shell allowlist/blocklist should be reviewed to ensure commands like `sqlite3 .oxydra/memory.db` don't bypass file policy. Since shell commands execute inside `shell-vm` (which won't have the `.oxydra/` mount per Phase B), this is handled at the container level for Container/MicroVM tiers. For Process tier, the security policy path check covers `file_*` tools; shell commands need a separate path guard or rely on the Landlock/Seatbelt best-effort restrictions already in place.
+
+#### Phase D: Recommend Remote Memory for Production (Advisory)
+
+**Goal:** Document that remote libSQL is the recommended mode for production Container/MicroVM deployments.
+
+**Changes:**
+
+1. **Auto-detect and warn** if local memory mode is used with Container/MicroVM tiers. The bootstrap sequence should log: `"Local memory DB in Container/MicroVM tier — ensure the DB path is on a persistent volume."` This is advisory, not blocking.
+
+2. **Document the trade-offs** in the guidebook:
+   - **Local mode**: zero external dependencies, lowest latency, per-user file isolation, but requires careful mount management.
+   - **Remote mode**: slight network latency, requires a running sqld/Turso instance, but cleanly separates storage from compute, survives guest recreation trivially, and avoids all mount concerns.
+
+#### Phase E: Encrypt the Memory DB at Rest (Future Enhancement)
+
+For additional defense in depth (not required for current needs):
 
 1. **SQLCipher or libSQL encryption** for the local database file. Even if a tool manages to read the raw file, the contents are encrypted.
 
-2. **Key management**: The encryption key would be delivered via the bootstrap envelope (alongside `auth_token`) and never written to the filesystem.
+2. **Key management**: The encryption key would be delivered via the bootstrap envelope (alongside `auth_token`) and never written to the guest filesystem.
 
-This is a future enhancement — Phases A and B provide sufficient protection for current needs.
+### Finalized Workspace Layout
+
+```
+<workspace_root>/<user_id>/
+  ├── .oxydra/                    ← NEW: internal, oxydra-vm only
+  │   ├── memory.db               ← per-user memory database
+  │   └── model_catalog.json      ← (existing, also moves here)
+  ├── shared/                     ← tool-accessible (file_read/write, shell)
+  ├── tmp/                        ← ephemeral, IPC markers
+  ├── vault/                      ← credentials, restricted
+  ├── logs/                       ← log files
+  └── ipc/                        ← gateway endpoint, daemon sockets
+```
+
+Mount visibility by guest role:
+
+| Directory | `oxydra-vm` | `shell-vm` |
+|-----------|:-----------:|:----------:|
+| `.oxydra/` | ✅ read-write | ❌ not mounted |
+| `shared/` | ✅ read-write | ✅ read-write |
+| `tmp/` | ✅ read-write | ✅ read-write |
+| `vault/` | ✅ read-only | ❌ not mounted |
+| `ipc/` | ✅ read-write | ✅ read-write |
+| `logs/` | ✅ read-write | ✅ read-write |
+
+Tool visibility (WASM mount policies):
+
+| Directory | `file_read` | `file_write` | `shell_exec` |
+|-----------|:-----------:|:------------:|:------------:|
+| `.oxydra/` | ❌ denied | ❌ denied | ❌ denied (not mounted in shell-vm) |
+| `shared/` | ✅ | ✅ | ✅ |
+| `tmp/` | ✅ | ✅ | ✅ |
+| `vault/` | ✅ read-only | ❌ | ❌ |
 
 ### Summary
 
 | Tier | Current State | Required Action |
 |------|--------------|-----------------|
-| **Process** | Works (direct filesystem access) | Add security policy denials for `.oxydra/` paths (Phase B) |
-| **Container** | Broken (DB path not mounted) | Move DB to `shared/.oxydra/` + mount (Phase A) + security exclusions (Phase B) |
-| **MicroVM** | Broken (DB path not mounted) | Same as Container (Phase A + B) |
-| **Remote mode** | Works (network access, no file) | No changes needed; recommend as default for production (Phase C) |
+| **Process** | Works (direct filesystem access) | Move DB to `<workspace>/.oxydra/` (Phase A) + security policy denials (Phase C) |
+| **Container** | Broken (DB path not provisioned or mounted) | Per-user `.oxydra/` dir (Phase A) + role-differentiated mounts (Phase B) + security policy (Phase C) |
+| **MicroVM** | Broken (same as Container) | Same as Container (Phase A + B + C) |
+| **Remote mode** | Works (network access, no file) | No changes needed; recommend as default for production (Phase D) |
+
+### Implementation Order
+
+```
+Phase A (per-user DB placement)
+    │
+    ├──► Phase B (role-differentiated mounts) ── requires Phase A for the new path
+    │
+    └──► Phase C (security policy denials) ── can parallel with B
+              │
+              ▼
+         Phase D (advisory docs + warnings) ── independent
+              │
+              ▼
+         Phase E (encryption) ── future, independent
+```
+
+Phase A is the prerequisite. Phases B and C can be done in parallel after A. Phase D is advisory documentation. Phase E is a future enhancement.

@@ -115,21 +115,40 @@ If a path fails any check, the tool call is blocked with `SecurityPolicyViolatio
 
 Shell commands are validated in two stages:
 
-**Syntax scrubbing** — commands containing these operators are rejected:
+**Syntax scrubbing** — by default, commands containing these operators are rejected:
 - `&&`, `||`, `;` (command chaining)
 - `|` (pipes)
 - `>`, `<` (redirection)
 - `$()`, backticks (subshell expansion)
 - Newlines (multi-line commands)
 
-**Executable allowlist** — only these binaries are permitted:
+This can be relaxed by setting `allow_operators = true` in the shell config (see below).
+
+**Executable allowlist** — a built-in set of common commands is permitted by default:
 ```
-awk, cat, cargo, cp, curl, diff, du, find, git, grep, head, jq,
-ls, make, mkdir, mv, node, npm, pnpm, python, python3, rm, rg,
-sed, sort, tail, tar, tee, touch, tree, uniq, wc, wget, xargs, yarn
+awk, cat, cargo, cp, cut, echo, env, find, git, go, grep, head,
+ls, mkdir, mv, node, printf, pwd, python, python3, rustc, sed,
+sort, stat, tail, touch, tr, uniq, wc, which
 ```
 
 Any command not matching the allowlist or containing blocked syntax is rejected before execution.
+
+#### Configurable Shell Allowlist
+
+The default allowlist can be extended or replaced via `[tools.shell]` in `agent.toml`:
+
+```toml
+[tools.shell]
+allow = ["npm", "npx", "curl", "docker", "rg"]   # Add to defaults
+deny = ["rm"]                                       # Remove from defaults
+# replace_defaults = false                          # If true, only `allow` commands are permitted
+# allow_operators = false                           # If true, shell operators are allowed
+```
+
+- **`allow`** — commands or glob patterns to add. Supports `*` as prefix/suffix: `cargo-*` matches `cargo-fmt`, `*test*` matches `pytest`.
+- **`deny`** — commands or glob patterns to remove from the allowlist (including defaults).
+- **`replace_defaults`** — when `true`, the built-in allowlist is cleared and only `allow` entries are permitted.
+- **`allow_operators`** — when `true`, shell operators (`&&`, `|`, etc.) are permitted in commands.
 
 ## SSRF Protection
 
@@ -163,11 +182,16 @@ Two modes are supported:
 - **`DefaultSafe`** — blocks internal IPs, allows all external destinations
 - **`StrictAllowlistProxy`** — only allows specific domains via a mandatory proxy
 
-## Credential Scrubbing
+## Output Scrubbing
 
-**File:** `runtime/src/scrubbing.rs`
+**File:** `runtime/src/scrubbing.rs`, `runtime/src/tool_execution.rs`
 
-All tool output passes through `scrub_tool_output` before reaching the LLM or being stored in memory.
+All tool output passes through two scrubbing phases before reaching the LLM or being stored in memory:
+
+1. **Host path scrubbing** (`scrub_host_paths`) — replaces host filesystem paths with virtual path equivalents (e.g., `/Users/alice/.oxydra/workspaces/bob/shared` → `/shared`)
+2. **Credential scrubbing** (`scrub_tool_output`) — redacts secrets via keyword matching and entropy analysis
+
+Host path scrubbing runs first so that long filesystem paths are shortened before the entropy-based detector sees them (long paths with mixed characters can otherwise trigger false-positive redaction).
 
 ### Keyword-Based Redaction
 
@@ -184,10 +208,11 @@ For unlabeled secrets:
 1. **Length filter** — string must be 24-512 characters
 2. **Character diversity** — must contain a mix of character types (not pure hex, which could be a hash)
 3. **Shannon entropy** — must be ≥ 3.8 bits per character
+4. **Exemptions** — known internal identifiers (e.g., `note-{uuid}`) and filesystem paths (strings starting with `/` containing 3+ path separators) are not redacted
 
-Detected strings are redacted as `[REDACTED:high-entropy]`.
+Detected strings are redacted as `[REDACTED]`.
 
-This two-layer approach catches both labeled credentials (environment variable dumps, config files) and unlabeled ones (API keys in tool output, JWTs, base64-encoded secrets).
+This multi-layer approach catches both labeled credentials (environment variable dumps, config files) and unlabeled ones (API keys in tool output, JWTs, base64-encoded secrets) while avoiding false positives on filesystem paths and internal identifiers.
 
 ## Tool Execution Security Flow
 
@@ -198,14 +223,15 @@ The complete security pipeline for a single tool call:
 2. Safety gate check (ReadOnly/SideEffecting/Privileged)
 3. SecurityPolicy enforcement:
    a. For file tools: canonicalize path → check against allowed roots
-   b. For shell tools: check syntax → check allowlist
+   b. For shell tools: check syntax → check allowlist (configurable)
    c. For web tools: validate URL → resolve IPs → check against blocklist
-4. Capability profile selection → mount policy enforcement (currently host-based, planned WASM)
+4. Capability profile selection → mount policy enforcement (WASM isolation)
 5. Timeout enforcement (tokio::time::timeout)
 6. Tool execution
 7. Output truncation (max 16KB)
-8. Credential scrubbing (keyword + entropy)
-9. Result returned to runtime
+8. Host path scrubbing (replace host paths with virtual paths)
+9. Credential scrubbing (keyword + entropy detection)
+10. Result returned to runtime
 ```
 
 Every step is logged via `tracing` spans for auditability.

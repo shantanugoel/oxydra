@@ -149,10 +149,15 @@ The shell daemon runs inside `shell-vm` and provides an RPC interface for shell 
 In container/MicroVM tiers, the runner launches the `shell-vm` container with:
 ```
 ENTRYPOINT ["/usr/local/bin/shell-daemon"]
-CMD ["--socket", "<workspace>/tmp/shell-daemon.sock"]
+CMD ["--socket", "/ipc/shell-daemon.sock"]
 ```
 
-The socket path lives inside the bind-mounted workspace `tmp` directory, so the `oxydra-vm` container can reach it without any network configuration.
+The ShellVm container uses virtual mount paths instead of host paths:
+- Host workspace `shared/` → mounted at `/shared` (also the working directory)
+- Host workspace `tmp/` → mounted at `/tmp`
+- Host workspace IPC directory → mounted at `/ipc`
+
+This means commands like `pwd` return `/shared` rather than the host path, preventing host filesystem details from leaking to the LLM. The shell-daemon socket at `/ipc/shell-daemon.sock` maps to the same physical file as the host-side path via the bind mount, so the `oxydra-vm` container can reach it without any network configuration.
 
 ### Protocol
 
@@ -198,11 +203,11 @@ Both the Container and macOS MicroVM tiers use the same `launch_docker_container
 2. **Pulls** the image if it isn't present locally
 3. **Computes entrypoint and cmd** based on the guest role:
    - `OxydraVm` → `ENTRYPOINT ["/usr/local/bin/oxydra-vm"]` with `CMD ["--user-id", "<id>", "--workspace-root", "<path>", "--bootstrap-file", "/run/oxydra/bootstrap"]`
-   - `ShellVm` → `ENTRYPOINT ["/usr/local/bin/shell-daemon"]` with `CMD ["--socket", "<workspace>/tmp/shell-daemon.sock"]`
+   - `ShellVm` → `ENTRYPOINT ["/usr/local/bin/shell-daemon"]` with `CMD ["--socket", "/ipc/shell-daemon.sock"]`
 4. **Creates** the container with:
    - Host networking (`network_mode: "host"`) — the gateway binds `127.0.0.1:0` inside the container, reachable from the host; the shell-daemon socket is in a bind-mounted directory
-   - Workspace and mount bind-mounts (deduplicated)
-   - Bootstrap file bind-mounted read-only at `/run/oxydra/bootstrap`
+   - Bind mounts — `OxydraVm` uses host paths directly; `ShellVm` uses virtual container paths (`/shared`, `/tmp`, `/ipc`) to prevent host path leakage
+   - Bootstrap file bind-mounted read-only at `/run/oxydra/bootstrap` (OxydraVm only)
    - Resource limits (CPU, memory, PID)
    - Proxy environment variables for sandboxd-managed VMs
 5. **Starts** the container

@@ -161,6 +161,39 @@ Each `ProviderRegistryEntry` supports optional capability fields used when `skip
 | `max_output_tokens` | `Option<u32>` | Override max output tokens (default: 16384) |
 | `max_context_tokens` | `Option<u32>` | Override max context tokens (default: 128000) |
 
+### `ToolsConfig`
+
+Controls tool-specific behavior:
+
+```rust
+pub struct ToolsConfig {
+    pub web_search: Option<WebSearchConfig>,
+    pub shell: Option<ShellConfig>,
+}
+```
+
+### `ShellConfig`
+
+Configures the shell command allowlist and operator policy:
+
+```rust
+pub struct ShellConfig {
+    pub allow: Option<Vec<String>>,       // Commands to add (supports glob patterns)
+    pub deny: Option<Vec<String>>,        // Commands to remove (supports glob patterns)
+    pub replace_defaults: Option<bool>,   // Replace default allowlist entirely (default: false)
+    pub allow_operators: Option<bool>,    // Allow shell operators &&, ||, | etc. (default: false)
+}
+```
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `allow` | (none) | Additional commands or glob patterns (e.g., `npm*`, `cargo-*`) to add to the allowlist |
+| `deny` | (none) | Commands or glob patterns to remove from the allowlist |
+| `replace_defaults` | `false` | If `true`, `allow` replaces the built-in defaults entirely |
+| `allow_operators` | `false` | If `true`, shell operators (`&&`, `\|\|`, `\|`, `;`, `>`, `<`, etc.) are permitted |
+
+Glob patterns support `*` as prefix, suffix, or both: `npm*` matches `npm`, `npmrc`; `*test*` matches `pytest`, `testing`.
+
 ### `ReliabilityConfig`
 
 ```rust
@@ -322,6 +355,14 @@ provider_type = "anthropic"
 # base_url = "https://llm-proxy.corp.internal/v1"
 # api_key_env = "CORP_LLM_KEY"
 # catalog_provider = "openai"  # validate models against OpenAI catalog
+
+# --- Shell command allowlist ---
+
+# [tools.shell]
+# allow = ["npm", "npx", "curl", "wget", "jq", "make", "docker", "rg"]
+# deny = ["rm"]
+# replace_defaults = false
+# allow_operators = false
 
 # --- Catalog settings ---
 

@@ -38,16 +38,9 @@ impl ConnectionStrategy {
             }));
         }
 
-        let db_path = config.db_path.trim();
-        if db_path.is_empty() {
-            return Err(initialization_error(
-                "local memory mode requires a non-empty db_path".to_owned(),
-            ));
-        }
-
-        Ok(Some(Self::Local {
-            db_path: db_path.to_owned(),
-        }))
+        // No remote_url — caller is responsible for providing a local db_path
+        // via `ConnectionStrategy::Local { .. }` directly.
+        Ok(None)
     }
 }
 

@@ -81,6 +81,10 @@ pub struct CliOverrides {
     pub reliability: Option<ReliabilityOverrides>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogOverrides>,
+    /// Workspace root path used to resolve relative memory DB paths.
+    /// Not serialized into the config — used only at bootstrap time.
+    #[serde(skip)]
+    pub workspace_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -101,8 +105,6 @@ pub struct RuntimeOverrides {
 pub struct MemoryOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -397,12 +399,45 @@ pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, Bootstr
     Ok(Box::new(build_reliable_provider(config)?))
 }
 
+/// Well-known filename for the local memory database inside the `.oxydra/`
+/// internal directory.  The full path is:
+/// `<workspace_root>/.oxydra/memory.db`
+const MEMORY_DB_FILENAME: &str = "memory.db";
+
 pub async fn build_memory_backend(
     config: &AgentConfig,
+    workspace_root: Option<&Path>,
 ) -> Result<Option<Arc<dyn MemoryRetrieval>>, BootstrapError> {
     config.validate()?;
-    let backend = LibsqlMemory::from_config(&config.memory).await?;
-    Ok(backend.map(|memory| Arc::new(memory) as Arc<dyn MemoryRetrieval>))
+
+    // Remote mode — handled entirely by `from_config`.
+    if let Some(backend) = LibsqlMemory::from_config(&config.memory).await? {
+        return Ok(Some(Arc::new(backend) as Arc<dyn MemoryRetrieval>));
+    }
+
+    // Local mode — construct the DB path from the workspace root convention.
+    if LibsqlMemory::needs_local_db(&config.memory) {
+        let db_path = match workspace_root {
+            Some(root) => root
+                .join(super::INTERNAL_DIR_NAME)
+                .join(MEMORY_DB_FILENAME),
+            None => {
+                // Fallback for Process tier without --workspace-root:
+                // resolve against CWD (backward compatibility).
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                cwd.join(super::INTERNAL_DIR_NAME).join(MEMORY_DB_FILENAME)
+            }
+        };
+        tracing::debug!(
+            db_path = %db_path.display(),
+            "using local memory database"
+        );
+        let backend = LibsqlMemory::new_local(db_path.to_string_lossy()).await?;
+        return Ok(Some(Arc::new(backend) as Arc<dyn MemoryRetrieval>));
+    }
+
+    // Memory is disabled.
+    Ok(None)
 }
 
 pub fn runtime_limits(config: &AgentConfig) -> RuntimeLimits {
@@ -445,12 +480,18 @@ pub async fn bootstrap_vm_runtime_with_paths(
     let bootstrap = bootstrap_frame
         .map(RunnerBootstrapEnvelope::from_length_prefixed_json)
         .transpose()?;
+    // Determine the workspace root for the local memory database convention.
+    // Priority: CLI override > bootstrap envelope > None (falls back to CWD).
+    let workspace_root = cli_overrides
+        .workspace_root
+        .clone()
+        .or_else(|| bootstrap.as_ref().map(|b| PathBuf::from(&b.workspace_root)));
     let config = load_agent_config_with_paths(paths, profile, cli_overrides)?;
     if let Some(ws_config) = config.tools.web_search.as_ref() {
         apply_web_search_config(ws_config);
     }
     let provider = build_provider(&config)?;
-    let memory = build_memory_backend(&config).await?;
+    let memory = build_memory_backend(&config, workspace_root.as_deref()).await?;
     let runtime_limits = runtime_limits(&config);
     let RuntimeToolsBootstrap {
         mut registry,
@@ -877,7 +918,7 @@ remote_url = "libsql://example-org.turso.io"
 
     #[tokio::test]
     async fn build_memory_backend_returns_none_when_memory_is_disabled() {
-        let backend = build_memory_backend(&AgentConfig::default())
+        let backend = build_memory_backend(&AgentConfig::default(), None)
             .await
             .expect("disabled memory config should not fail");
         assert!(backend.is_none());

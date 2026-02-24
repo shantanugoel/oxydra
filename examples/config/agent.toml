@@ -20,7 +20,7 @@ model    = "gpt-4o-mini"
 # --- Runtime limits ---
 [runtime]
 turn_timeout_secs = 60   # Max seconds per LLM call
-max_turns         = 8    # Max agentic loop iterations
+max_turns         = 25    # Max agentic loop iterations
 # max_cost        = 1000.0  # Optional cumulative cost cap (provider-reported units)
 
 # Context window management — triggers summarization when usage exceeds trigger_ratio.
@@ -37,7 +37,6 @@ min_turns    = 6    # Minimum turns before summarization is eligible
 # --- Memory (libSQL-backed persistence) ---
 [memory]
 enabled = false
-db_path = ".oxydra/memory.db"         # Local SQLite/libSQL path
 # remote_url = "libsql://your-database.turso.io"  # Optional Turso remote
 # auth_token = "set-me-or-use-OXYDRA__MEMORY__AUTH_TOKEN"  # Required when remote_url is set
 

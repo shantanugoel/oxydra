@@ -94,7 +94,10 @@ async fn run() -> Result<(), VmError> {
         None
     };
     let bootstrap =
-        bootstrap_vm_runtime(bootstrap_frame.as_deref(), None, CliOverrides::default()).await?;
+        bootstrap_vm_runtime(bootstrap_frame.as_deref(), None, CliOverrides {
+            workspace_root: Some(args.workspace_root.clone()),
+            ..CliOverrides::default()
+        }).await?;
     let provider_id = bootstrap.config.selection.provider.clone();
     let model_id = bootstrap.config.selection.model.clone();
     let startup_status = bootstrap.startup_status.clone();

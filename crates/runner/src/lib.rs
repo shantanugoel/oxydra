@@ -62,6 +62,7 @@ const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
 const LOGS_DIR_NAME: &str = "logs";
 const IPC_DIR_NAME: &str = "ipc";
+const INTERNAL_DIR_NAME: &str = ".oxydra";
 pub const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
 
 const FIRECRACKER_BINARY: &str = "firecracker";
@@ -352,6 +353,7 @@ pub fn provision_user_workspace(
         VAULT_DIR_NAME,
         LOGS_DIR_NAME,
         IPC_DIR_NAME,
+        INTERNAL_DIR_NAME,
     ] {
         let path = root.join(dir_name);
         fs::create_dir_all(&path)
@@ -367,6 +369,7 @@ pub fn provision_user_workspace(
     let vault = root.join(VAULT_DIR_NAME);
     let logs = root.join(LOGS_DIR_NAME);
     let ipc = root.join(IPC_DIR_NAME);
+    let internal = root.join(INTERNAL_DIR_NAME);
 
     Ok(UserWorkspace {
         root,
@@ -375,6 +378,7 @@ pub fn provision_user_workspace(
         vault,
         logs,
         ipc,
+        internal,
     })
 }
 
@@ -698,6 +702,9 @@ pub struct UserWorkspace {
     pub vault: PathBuf,
     pub logs: PathBuf,
     pub ipc: PathBuf,
+    /// Internal directory for oxydra-vm only (memory DB, config cache).
+    /// Not accessible to LLM tools or shell-vm.
+    pub internal: PathBuf,
 }
 
 #[derive(Debug)]
@@ -1353,18 +1360,38 @@ async fn launch_docker_container_async(
         }
     };
 
-    let mut binds: Vec<String> = [
-        params.workspace.root,
-        params.mounts.shared,
-        params.mounts.tmp,
-        params.mounts.vault,
-    ]
-    .into_iter()
-    .map(|path| path.to_string_lossy().into_owned())
-    .collect::<std::collections::BTreeSet<_>>()
-    .into_iter()
-    .map(|path| format!("{path}:{path}"))
-    .collect();
+    let mut binds: Vec<String> = match params.role {
+        RunnerGuestRole::OxydraVm => {
+            // OxydraVm gets the full workspace root (includes .oxydra/ internal dir)
+            [
+                params.workspace.root,
+                params.mounts.shared,
+                params.mounts.tmp,
+                params.mounts.vault,
+            ]
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|path| format!("{path}:{path}"))
+            .collect()
+        }
+        RunnerGuestRole::ShellVm => {
+            // ShellVm gets only shared, tmp, and ipc — no workspace root,
+            // no .oxydra/ internal dir, and no vault.
+            [
+                params.mounts.shared,
+                params.mounts.tmp,
+                params.workspace.ipc,
+            ]
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|path| format!("{path}:{path}"))
+            .collect()
+        }
+    };
 
     let mut env = Vec::new();
     if matches!(params.endpoint, DockerEndpoint::UnixSocket(_)) {

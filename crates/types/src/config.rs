@@ -211,30 +211,16 @@ impl SummarizationConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_memory_db_path")]
-    pub db_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
     #[serde(default)]
     pub retrieval: RetrievalConfig,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            db_path: default_memory_db_path(),
-            remote_url: None,
-            auth_token: None,
-            retrieval: RetrievalConfig::default(),
-        }
-    }
 }
 
 impl MemoryConfig {
@@ -262,10 +248,6 @@ impl MemoryConfig {
                 });
             }
             return Ok(());
-        }
-
-        if self.db_path.trim().is_empty() {
-            return Err(ConfigError::InvalidMemoryDatabasePath);
         }
 
         Ok(())
@@ -586,8 +568,6 @@ pub enum ConfigError {
         "invalid reliability backoff bounds base={base_ms}ms max={max_ms}ms (both must be >0 and base<=max)"
     )]
     InvalidReliabilityBackoff { base_ms: u64, max_ms: u64 },
-    #[error("memory database path must not be empty when memory is enabled in local mode")]
-    InvalidMemoryDatabasePath,
     #[error("memory remote mode requires an auth token for `{remote_url}`")]
     MissingMemoryAuthToken { remote_url: String },
 }
@@ -707,10 +687,6 @@ fn default_summarization_target_ratio() -> f64 {
 
 fn default_summarization_min_turns() -> usize {
     6
-}
-
-fn default_memory_db_path() -> String {
-    ".oxydra/memory.db".to_owned()
 }
 
 fn default_max_turns() -> usize {

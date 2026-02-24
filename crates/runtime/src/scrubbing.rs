@@ -92,8 +92,30 @@ fn redact_high_entropy_tokens(input: &str) -> String {
         .into_owned()
 }
 
+/// Returns `true` for tokens that match known non-secret identifier patterns.
+///
+/// Some internal identifiers (e.g., memory note IDs like `note-{uuid4}`) are
+/// high-entropy by construction but are NOT secrets.  We exempt them from
+/// redaction so downstream consumers (including the LLM) can reference them.
+fn is_known_internal_identifier(token: &str) -> bool {
+    static NOTE_ID_PATTERN: OnceLock<Regex> = OnceLock::new();
+    let pattern = NOTE_ID_PATTERN.get_or_init(|| {
+        // Matches `note-{uuid4}` where uuid4 is 8-4-4-4-12 hex digits.
+        Regex::new(r"^note-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+            .expect("note ID pattern should compile")
+    });
+    pattern.is_match(token)
+}
+
 fn looks_like_secret_token(token: &str) -> bool {
     if token.len() < MIN_ENTROPY_TOKEN_LENGTH || token.len() > MAX_ENTROPY_TOKEN_LENGTH {
+        return false;
+    }
+
+    // Exempt well-known internal identifier patterns (e.g., memory note IDs)
+    // from high-entropy redaction.  These are `note-{uuid4}` strings that look
+    // random but are safe to expose.
+    if is_known_internal_identifier(token) {
         return false;
     }
 
@@ -163,5 +185,48 @@ Authorization: Bearer very-secret-token
     fn scrubber_preserves_non_sensitive_normal_output() {
         let output = "status=ok commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         assert_eq!(scrub_tool_output(output), output);
+    }
+
+    #[test]
+    fn scrubber_preserves_memory_note_ids() {
+        // Test a variety of note IDs to ensure none are redacted.
+        // UUID v4 values have high entropy by design, and the regex
+        // [A-Za-z0-9+/_-]{24,512} matches the full "note-{uuid}" string
+        // (42 chars, hyphens included in the character class).
+        let note_ids = [
+            "note-f67a40ad-16d5-476a-a8a4-eb85e8817705",
+            "note-a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            "note-12345678-abcd-4ef0-9876-fedcba987654",
+            "note-aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee",
+            "note-0f1e2d3c-4b5a-4697-8899-aabbccddeeff",
+            "note-deadbeef-cafe-4bad-babe-f00ddeadbeef",
+        ];
+        for note_id in note_ids {
+            let output = format!(
+                r#"[
+  {{
+    "note_id": "{}",
+    "text": "The user's name is Shaan.",
+    "score": 0.95,
+    "source": "user_memory"
+  }}
+]"#,
+                note_id
+            );
+            let scrubbed = scrub_tool_output(&output);
+            assert!(
+                scrubbed.contains(note_id),
+                "note_id `{note_id}` should NOT be redacted but got:\n{scrubbed}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrubber_still_redacts_actual_secrets_that_look_like_note_ids() {
+        // A high-entropy token that does NOT match the note-{uuid} pattern
+        // should still be redacted.
+        let token = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2";
+        let scrubbed = scrub_tool_output(format!("key={token}").as_str());
+        assert_eq!(scrubbed, "key=[REDACTED]");
     }
 }

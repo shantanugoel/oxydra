@@ -61,11 +61,29 @@ struct MergedHybridCandidate {
 }
 
 impl LibsqlMemory {
+    /// Build a memory backend from config.
+    ///
+    /// For remote mode (remote_url + auth_token set), this constructs the
+    /// connection directly.  For local mode (enabled but no remote_url), this
+    /// returns `Ok(None)` — the caller must supply the db path via
+    /// [`new_local`](Self::new_local).  When memory is disabled, returns
+    /// `Ok(None)`.
     pub async fn from_config(config: &MemoryConfig) -> Result<Option<Self>, MemoryError> {
         let Some(strategy) = ConnectionStrategy::from_config(config)? else {
             return Ok(None);
         };
         Self::open(strategy).await.map(Some)
+    }
+
+    /// Returns `true` when memory is enabled but no remote URL is configured,
+    /// meaning the caller must supply a local db path.
+    pub fn needs_local_db(config: &MemoryConfig) -> bool {
+        config.enabled
+            && config
+                .remote_url
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
     }
 
     pub async fn new_local(db_path: impl Into<String>) -> Result<Self, MemoryError> {

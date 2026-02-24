@@ -172,6 +172,7 @@ fn workspace_provisioning_creates_expected_directories() {
     assert!(workspace.tmp.is_dir());
     assert!(workspace.vault.is_dir());
     assert!(workspace.ipc.is_dir());
+    assert!(workspace.internal.is_dir());
 
     let _ = fs::remove_dir_all(root);
 }

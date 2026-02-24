@@ -813,6 +813,7 @@ fn workspace_security_policy(
                     &runtime_policy.mounts.shared,
                     &runtime_policy.mounts.tmp,
                     &runtime_policy.mounts.vault,
+                    Vec::new(),
                 )
             } else {
                 WorkspaceSecurityPolicy::for_bootstrap_workspace(&bootstrap.workspace_root)

@@ -33,7 +33,6 @@ async fn from_config_returns_none_when_memory_is_disabled() {
 async fn remote_connection_strategy_requires_auth_token() {
     let config = MemoryConfig {
         enabled: true,
-        db_path: ".oxydra/memory.db".to_owned(),
         remote_url: Some("libsql://example-org.turso.io".to_owned()),
         auth_token: None,
         retrieval: types::RetrievalConfig::default(),
@@ -55,12 +54,10 @@ async fn enabled_local_memory_initializes_with_missing_parent_directory() {
         std::process::id()
     ));
     let db_path = root.join("nested").join("memory.db");
-    let config = local_memory_config(db_path.to_string_lossy().as_ref());
 
-    let backend = LibsqlMemory::from_config(&config)
+    let backend = LibsqlMemory::new_local(db_path.to_string_lossy())
         .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+        .expect("local memory should initialize");
     backend
         .store(MemoryStoreRequest {
             session_id: "session-local-default".to_owned(),
@@ -76,12 +73,7 @@ async fn enabled_local_memory_initializes_with_missing_parent_directory() {
 #[tokio::test]
 async fn store_recall_and_forget_are_durable_across_restarts() {
     let db_path = temp_db_path("roundtrip");
-    let config = local_memory_config(&db_path);
-
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
     backend
         .store(MemoryStoreRequest {
             session_id: "session-1".to_owned(),
@@ -100,10 +92,9 @@ async fn store_recall_and_forget_are_durable_across_restarts() {
         .expect("second message should store");
     drop(backend);
 
-    let reopened = LibsqlMemory::from_config(&config)
+    let reopened = LibsqlMemory::new_local(&db_path)
         .await
-        .expect("reopen should succeed")
-        .expect("memory should remain enabled");
+        .expect("reopen should succeed");
     let records = reopened
         .recall(MemoryRecallRequest {
             session_id: "session-1".to_owned(),
@@ -145,11 +136,7 @@ async fn store_recall_and_forget_are_durable_across_restarts() {
 #[tokio::test]
 async fn list_sessions_returns_recent_first_and_honors_limit() {
     let db_path = temp_db_path("session-list");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
     backend
         .store(MemoryStoreRequest {
             session_id: "session-a".to_owned(),
@@ -202,11 +189,7 @@ async fn list_sessions_returns_recent_first_and_honors_limit() {
 #[tokio::test]
 async fn store_indexes_message_content_into_chunks_and_vectors() {
     let db_path = temp_db_path("store-indexes-message");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     let payload = serde_json::to_value(Message {
         role: MessageRole::Assistant,
@@ -291,11 +274,7 @@ async fn store_indexes_message_content_into_chunks_and_vectors() {
 #[tokio::test]
 async fn store_deduplicates_reindexing_by_chunk_hash() {
     let db_path = temp_db_path("dedupe-indexing");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     for sequence in [1_u64, 2_u64] {
         backend
@@ -370,11 +349,7 @@ async fn store_deduplicates_reindexing_by_chunk_hash() {
 #[tokio::test]
 async fn store_rejects_non_monotonic_sequence_for_session() {
     let db_path = temp_db_path("non-monotonic-sequence");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     backend
         .store(MemoryStoreRequest {
@@ -411,7 +386,6 @@ async fn store_rejects_non_monotonic_sequence_for_session() {
 #[tokio::test]
 async fn initialization_applies_pending_migrations_and_verifies_schema() {
     let db_path = temp_db_path("migrations");
-    let config = local_memory_config(&db_path);
 
     let db = Builder::new_local(db_path.clone())
         .build()
@@ -436,10 +410,9 @@ async fn initialization_applies_pending_migrations_and_verifies_schema() {
     drop(conn);
     drop(db);
 
-    let backend = LibsqlMemory::from_config(&config)
+    let backend = LibsqlMemory::new_local(&db_path)
         .await
-        .expect("runtime migration pass should succeed")
-        .expect("memory should be enabled");
+        .expect("runtime migration pass should succeed");
     let conn = backend
         .connect()
         .expect("backend should connect for verification");
@@ -484,7 +457,6 @@ async fn initialization_applies_pending_migrations_and_verifies_schema() {
 #[tokio::test]
 async fn legacy_database_migrates_to_hybrid_schema_without_data_loss() {
     let db_path = temp_db_path("legacy-schema-migration-continuity");
-    let config = local_memory_config(&db_path);
 
     let db = Builder::new_local(db_path.clone())
         .build()
@@ -551,10 +523,9 @@ async fn legacy_database_migrates_to_hybrid_schema_without_data_loss() {
     drop(conn);
     drop(db);
 
-    let backend = LibsqlMemory::from_config(&config)
+    let backend = LibsqlMemory::new_local(&db_path)
         .await
-        .expect("hybrid-schema migration pass should succeed")
-        .expect("memory should be enabled");
+        .expect("hybrid-schema migration pass should succeed");
 
     let recalled = backend
         .recall(MemoryRecallRequest {
@@ -642,11 +613,7 @@ async fn legacy_database_migrates_to_hybrid_schema_without_data_loss() {
 #[tokio::test]
 async fn chunks_fts_triggers_keep_index_synchronized() {
     let db_path = temp_db_path("chunks-fts-sync");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     backend
         .store(MemoryStoreRequest {
@@ -712,11 +679,7 @@ async fn chunks_fts_triggers_keep_index_synchronized() {
 #[tokio::test]
 async fn hybrid_query_merges_vector_and_fts_with_weighted_rank() {
     let db_path = temp_db_path("hybrid-query-merge");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
     let conn = backend.connect().expect("backend should connect");
     insert_test_session(&conn, "session-hybrid").await;
     insert_chunk_with_embedding(
@@ -789,11 +752,7 @@ async fn hybrid_query_merges_vector_and_fts_with_weighted_rank() {
 #[tokio::test]
 async fn hybrid_query_breaks_ties_by_recency_then_chunk_id() {
     let db_path = temp_db_path("hybrid-query-tie-break");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
     let conn = backend.connect().expect("backend should connect");
     insert_test_session(&conn, "session-hybrid-tie").await;
     insert_chunk_with_embedding(
@@ -856,11 +815,7 @@ async fn hybrid_query_breaks_ties_by_recency_then_chunk_id() {
 #[tokio::test]
 async fn summary_state_write_uses_epoch_compare_and_swap() {
     let db_path = temp_db_path("summary-state-cas");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     backend
         .store(MemoryStoreRequest {
@@ -948,11 +903,7 @@ async fn summary_state_write_uses_epoch_compare_and_swap() {
 #[tokio::test]
 async fn store_preserves_existing_summary_state_in_session_state() {
     let db_path = temp_db_path("summary-state-preserve");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     backend
         .store(MemoryStoreRequest {
@@ -1075,14 +1026,14 @@ async fn migration_failures_are_surfaced_without_silent_success() {
     let _ = fs::remove_file(db_path);
 }
 
-fn local_memory_config(db_path: &str) -> MemoryConfig {
-    MemoryConfig {
-        enabled: true,
-        db_path: db_path.to_owned(),
-        remote_url: None,
-        auth_token: None,
-        retrieval: types::RetrievalConfig::default(),
-    }
+/// Create a local `LibsqlMemory` instance for testing.
+///
+/// Memory crate tests use `new_local` directly — the `db_path` is no longer
+/// part of `MemoryConfig` (it's a runner-level convention).
+async fn local_memory_backend(db_path: &str) -> LibsqlMemory {
+    LibsqlMemory::new_local(db_path)
+        .await
+        .expect("local memory backend should initialize")
 }
 
 fn temp_db_path(label: &str) -> String {
@@ -1184,11 +1135,7 @@ fn assert_approx_eq(left: f64, right: f64) {
 #[tokio::test]
 async fn store_note_creates_chunks_with_note_id_in_metadata() {
     let db_path = temp_db_path("store-note-metadata");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     MemoryRetrieval::store_note(&backend, "memory:alice", "note-abc123", "User likes chocolate")
         .await
@@ -1230,11 +1177,7 @@ async fn store_note_creates_chunks_with_note_id_in_metadata() {
 #[tokio::test]
 async fn store_note_creates_searchable_conversation_event() {
     let db_path = temp_db_path("store-note-event");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     MemoryRetrieval::store_note(&backend, "memory:alice", "note-ev1", "User prefers dark mode")
         .await
@@ -1268,11 +1211,7 @@ async fn store_note_creates_searchable_conversation_event() {
 #[tokio::test]
 async fn delete_note_removes_chunks_and_event() {
     let db_path = temp_db_path("delete-note");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     MemoryRetrieval::store_note(
         &backend,
@@ -1350,11 +1289,7 @@ async fn delete_note_removes_chunks_and_event() {
 #[tokio::test]
 async fn delete_note_returns_false_for_nonexistent_note() {
     let db_path = temp_db_path("delete-note-missing");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     let found =
         MemoryRetrieval::delete_note(&backend, "memory:alice", "note-nonexistent")
@@ -1368,11 +1303,7 @@ async fn delete_note_returns_false_for_nonexistent_note() {
 #[tokio::test]
 async fn note_save_search_update_delete_roundtrip() {
     let db_path = temp_db_path("note-roundtrip");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     // Save
     MemoryRetrieval::store_note(
@@ -1471,11 +1402,7 @@ async fn note_save_search_update_delete_roundtrip() {
 #[tokio::test]
 async fn note_user_scoping_isolates_across_users() {
     let db_path = temp_db_path("note-user-isolation");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     // User A saves a note
     MemoryRetrieval::store_note(
@@ -1547,11 +1474,7 @@ async fn note_user_scoping_isolates_across_users() {
 #[tokio::test]
 async fn store_note_multiple_notes_in_same_session_coexist() {
     let db_path = temp_db_path("note-multiple-coexist");
-    let config = local_memory_config(&db_path);
-    let backend = LibsqlMemory::from_config(&config)
-        .await
-        .expect("local memory should initialize")
-        .expect("memory should be enabled");
+    let backend = local_memory_backend(&db_path).await;
 
     MemoryRetrieval::store_note(&backend, "memory:carol", "note-m1", "Favorite color is green")
         .await

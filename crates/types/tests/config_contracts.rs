@@ -93,17 +93,6 @@ fn validation_rejects_invalid_reliability_bounds() {
 }
 
 #[test]
-fn validation_rejects_enabled_local_memory_with_empty_database_path() {
-    let mut config = AgentConfig::default();
-    config.memory.enabled = true;
-    config.memory.db_path = "  ".to_owned();
-    let error = config
-        .validate()
-        .expect_err("empty local db path should fail validation");
-    assert_eq!(error, ConfigError::InvalidMemoryDatabasePath);
-}
-
-#[test]
 fn validation_rejects_enabled_remote_memory_without_auth_token() {
     let mut config = AgentConfig::default();
     config.memory.enabled = true;

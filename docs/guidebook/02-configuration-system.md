@@ -71,7 +71,6 @@ Controls persistence and retrieval:
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `enabled` | false | Whether memory persistence is active |
-| `db_path` | `".oxydra/memory.db"` | Local libSQL database file path |
 | `remote_url` | (none) | Optional Turso remote URL |
 | `auth_token` | (none) | Required if `remote_url` is set |
 | `retrieval.top_k` | 8 | Number of retrieval results per query |
@@ -273,7 +272,8 @@ min_turns    = 6
 
 [memory]
 enabled = true
-db_path = ".oxydra/memory.db"
+# Local DB is stored at <workspace>/.oxydra/memory.db by convention.
+# For remote mode, set remote_url and auth_token instead.
 
 [memory.retrieval]
 top_k         = 8

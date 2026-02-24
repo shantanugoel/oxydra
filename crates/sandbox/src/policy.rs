@@ -10,6 +10,7 @@ use types::SafetyTier;
 const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
 const VAULT_DIR_NAME: &str = "vault";
+const INTERNAL_DIR_NAME: &str = ".oxydra";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityPolicyViolationReason {
@@ -47,6 +48,7 @@ pub trait SecurityPolicy: Send + Sync {
 pub struct WorkspaceSecurityPolicy {
     read_only_roots: Vec<PathBuf>,
     read_write_roots: Vec<PathBuf>,
+    denied_roots: Vec<PathBuf>,
     shell_command_allowlist: BTreeSet<String>,
 }
 
@@ -63,6 +65,7 @@ impl WorkspaceSecurityPolicy {
             workspace_root.join(SHARED_DIR_NAME),
             workspace_root.join(TMP_DIR_NAME),
             workspace_root.join(VAULT_DIR_NAME),
+            vec![workspace_root.join(INTERNAL_DIR_NAME)],
         )
     }
 
@@ -70,22 +73,36 @@ impl WorkspaceSecurityPolicy {
         shared: impl AsRef<Path>,
         tmp: impl AsRef<Path>,
         vault: impl AsRef<Path>,
+        denied: Vec<PathBuf>,
     ) -> Self {
         let shared = shared.as_ref().to_path_buf();
         let tmp = tmp.as_ref().to_path_buf();
         let vault = vault.as_ref().to_path_buf();
-        Self::new(vec![shared.clone(), tmp.clone(), vault], vec![shared, tmp])
+        Self::new(
+            vec![shared.clone(), tmp.clone(), vault],
+            vec![shared, tmp],
+            denied,
+        )
     }
 
     pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Self {
         let workspace_root = workspace_root.as_ref().to_path_buf();
-        Self::new(vec![workspace_root.clone()], vec![workspace_root])
+        Self::new(
+            vec![workspace_root.clone()],
+            vec![workspace_root.clone()],
+            vec![workspace_root.join(INTERNAL_DIR_NAME)],
+        )
     }
 
-    fn new(read_only_roots: Vec<PathBuf>, read_write_roots: Vec<PathBuf>) -> Self {
+    fn new(
+        read_only_roots: Vec<PathBuf>,
+        read_write_roots: Vec<PathBuf>,
+        denied_roots: Vec<PathBuf>,
+    ) -> Self {
         Self {
             read_only_roots: canonicalize_roots(read_only_roots),
             read_write_roots: canonicalize_roots(read_write_roots),
+            denied_roots: canonicalize_roots(denied_roots),
             shell_command_allowlist: default_shell_command_allowlist(),
         }
     }
@@ -97,6 +114,24 @@ impl WorkspaceSecurityPolicy {
     ) -> Result<(), SecurityPolicyViolation> {
         let canonical_target =
             canonicalize_target_path(path, access_mode == FileAccessMode::ReadWrite)?;
+
+        // Deny-list takes precedence: reject paths inside denied roots
+        // (e.g., .oxydra/ internal directory) before checking allow-lists.
+        if self
+            .denied_roots
+            .iter()
+            .any(|root| canonical_target == *root || canonical_target.starts_with(root))
+        {
+            return Err(SecurityPolicyViolation::new(
+                SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                format!(
+                    "path `{}` resolved to `{}` which is inside a restricted internal directory",
+                    path,
+                    canonical_target.display()
+                ),
+            ));
+        }
+
         let allowed_roots = match access_mode {
             FileAccessMode::ReadOnly => &self.read_only_roots,
             FileAccessMode::ReadWrite => &self.read_write_roots,
@@ -452,6 +487,93 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
+    #[test]
+    fn direct_policy_denies_access_to_internal_directory() {
+        let workspace = unique_temp_workspace("policy-deny-internal-direct");
+        let internal_file = workspace.join(INTERNAL_DIR_NAME).join("memory.db");
+        fs::write(&internal_file, "secret data").expect("internal file should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_direct_workspace(&workspace);
+
+        let read_result = policy.enforce(
+            "file_read",
+            SafetyTier::ReadOnly,
+            &json!({ "path": internal_file.to_string_lossy() }),
+        );
+        assert!(
+            matches!(
+                read_result,
+                Err(SecurityPolicyViolation {
+                    reason: SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                    ..
+                })
+            ),
+            "direct workspace policy should deny reads inside .oxydra/"
+        );
+
+        let write_result = policy.enforce(
+            "file_write",
+            SafetyTier::SideEffecting,
+            &json!({ "path": internal_file.to_string_lossy(), "content": "x" }),
+        );
+        assert!(
+            matches!(
+                write_result,
+                Err(SecurityPolicyViolation {
+                    reason: SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                    ..
+                })
+            ),
+            "direct workspace policy should deny writes inside .oxydra/"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn bootstrap_policy_denies_access_to_internal_directory() {
+        let workspace = unique_temp_workspace("policy-deny-internal-bootstrap");
+        let internal_file = workspace.join(INTERNAL_DIR_NAME).join("memory.db");
+        fs::write(&internal_file, "secret data").expect("internal file should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+
+        let result = policy.enforce(
+            "file_read",
+            SafetyTier::ReadOnly,
+            &json!({ "path": internal_file.to_string_lossy() }),
+        );
+        // Bootstrap policy already doesn't include .oxydra/ in allowed roots,
+        // but the deny-list provides defense in depth.
+        assert!(
+            result.is_err(),
+            "bootstrap workspace policy should deny reads inside .oxydra/"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn direct_policy_allows_normal_files_outside_internal_directory() {
+        let workspace = unique_temp_workspace("policy-allow-non-internal");
+        let normal_file = workspace.join("readme.txt");
+        fs::write(&normal_file, "ok").expect("normal file should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_direct_workspace(&workspace);
+
+        let result = policy.enforce(
+            "file_read",
+            SafetyTier::ReadOnly,
+            &json!({ "path": normal_file.to_string_lossy() }),
+        );
+        assert!(
+            result.is_ok(),
+            "direct workspace policy should allow reads of normal files"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
     fn unique_temp_workspace(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -461,9 +583,11 @@ mod tests {
         let shared = root.join(SHARED_DIR_NAME);
         let tmp = root.join(TMP_DIR_NAME);
         let vault = root.join(VAULT_DIR_NAME);
+        let internal = root.join(INTERNAL_DIR_NAME);
         fs::create_dir_all(&shared).expect("shared dir should be created");
         fs::create_dir_all(&tmp).expect("tmp dir should be created");
         fs::create_dir_all(&vault).expect("vault dir should be created");
+        fs::create_dir_all(&internal).expect("internal dir should be created");
         root
     }
 }

@@ -184,12 +184,13 @@ pub struct RuntimeToolsBootstrap {
 
 pub async fn bootstrap_runtime_tools(
     bootstrap: Option<&RunnerBootstrapEnvelope>,
+    shell_config: Option<&ShellConfig>,
 ) -> RuntimeToolsBootstrap {
     let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
     let wasm_runner = runtime_wasm_runner(bootstrap);
     let mut registry = ToolRegistry::default();
     register_runtime_tools(&mut registry, wasm_runner, bash_tool);
-    registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap)));
+    registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap, shell_config)));
     let availability = ToolAvailability {
         shell: shell_status,
         browser: browser_status,

@@ -5,7 +5,7 @@ use std::{
 };
 
 use serde_json::Value;
-use types::SafetyTier;
+use types::{SafetyTier, ShellConfig};
 
 const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
@@ -50,6 +50,9 @@ pub struct WorkspaceSecurityPolicy {
     read_write_roots: Vec<PathBuf>,
     denied_roots: Vec<PathBuf>,
     shell_command_allowlist: BTreeSet<String>,
+    /// Glob patterns for the allowlist (e.g., `npm*`, `cargo-*`).
+    shell_command_allow_globs: Vec<String>,
+    allow_shell_operators: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +98,54 @@ impl WorkspaceSecurityPolicy {
             read_write_roots: canonicalize_roots(read_write_roots),
             denied_roots: canonicalize_roots(denied_roots),
             shell_command_allowlist: default_shell_command_allowlist(),
+            shell_command_allow_globs: Vec::new(),
+            allow_shell_operators: false,
         }
+    }
+
+    /// Applies shell configuration overrides (allow/deny lists, glob
+    /// patterns, operator policy).
+    pub fn with_shell_config(mut self, config: Option<&ShellConfig>) -> Self {
+        let Some(config) = config else {
+            return self;
+        };
+
+        let replace = config.replace_defaults.unwrap_or(false);
+        if replace {
+            self.shell_command_allowlist.clear();
+            self.shell_command_allow_globs.clear();
+        }
+
+        if let Some(ref allow) = config.allow {
+            for entry in allow {
+                if entry.contains('*') {
+                    self.shell_command_allow_globs.push(entry.to_ascii_lowercase());
+                } else {
+                    self.shell_command_allowlist.insert(entry.to_ascii_lowercase());
+                }
+            }
+        }
+
+        if let Some(ref deny) = config.deny {
+            for entry in deny {
+                if entry.contains('*') {
+                    // Remove any exact matches that the glob would cover.
+                    let pattern = entry.to_ascii_lowercase();
+                    self.shell_command_allowlist
+                        .retain(|cmd| !glob_matches(&pattern, cmd));
+                    // Also store as a deny-glob so future glob-allow matches
+                    // can be rejected at enforcement time.
+                    // We prepend "!" to distinguish deny-globs from allow-globs.
+                    self.shell_command_allow_globs
+                        .retain(|g| !glob_matches(&pattern, g.trim_start_matches('!')));
+                } else {
+                    self.shell_command_allowlist.remove(&entry.to_ascii_lowercase());
+                }
+            }
+        }
+
+        self.allow_shell_operators = config.allow_operators.unwrap_or(false);
+        self
     }
 
     fn enforce_file_path(
@@ -151,21 +201,26 @@ impl WorkspaceSecurityPolicy {
     }
 
     fn enforce_shell_command(&self, command: &str) -> Result<(), SecurityPolicyViolation> {
-        let command_name = parse_command_name(command)?;
+        let command_name = parse_command_name(command, self.allow_shell_operators)?;
         if self.shell_command_allowlist.contains(&command_name) {
-            Ok(())
-        } else {
-            let allowed = self
-                .shell_command_allowlist
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(SecurityPolicyViolation::new(
-                SecurityPolicyViolationReason::CommandNotAllowed,
-                format!("command `{command_name}` is not in shell allowlist [{allowed}]"),
-            ))
+            return Ok(());
         }
+        if self
+            .shell_command_allow_globs
+            .iter()
+            .any(|pattern| glob_matches(pattern, &command_name))
+        {
+            return Ok(());
+        }
+        let mut allowed: Vec<_> = self.shell_command_allowlist.iter().cloned().collect();
+        allowed.extend(self.shell_command_allow_globs.iter().cloned());
+        Err(SecurityPolicyViolation::new(
+            SecurityPolicyViolationReason::CommandNotAllowed,
+            format!(
+                "command `{command_name}` is not in shell allowlist [{}]",
+                allowed.join(", ")
+            ),
+        ))
     }
 }
 
@@ -299,7 +354,10 @@ fn normalize_absolute(path: PathBuf) -> PathBuf {
     }
 }
 
-fn parse_command_name(command: &str) -> Result<String, SecurityPolicyViolation> {
+fn parse_command_name(
+    command: &str,
+    allow_operators: bool,
+) -> Result<String, SecurityPolicyViolation> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err(SecurityPolicyViolation::new(
@@ -307,7 +365,7 @@ fn parse_command_name(command: &str) -> Result<String, SecurityPolicyViolation> 
             "command argument must not be empty",
         ));
     }
-    if contains_disallowed_shell_syntax(trimmed) {
+    if !allow_operators && contains_disallowed_shell_syntax(trimmed) {
         return Err(SecurityPolicyViolation::new(
             SecurityPolicyViolationReason::CommandNotAllowed,
             "command contains shell control operators; only a single allowlisted command is permitted",
@@ -332,6 +390,33 @@ fn parse_command_name(command: &str) -> Result<String, SecurityPolicyViolation> 
         ));
     }
     Ok(command_name)
+}
+
+/// Simple glob matching: supports `*` as prefix, suffix, or both.
+///
+/// Examples: `npm*` matches `npm`, `npx`; `cargo-*` matches `cargo-fmt`;
+/// `*test*` matches `pytest`.
+fn glob_matches(pattern: &str, candidate: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let starts = pattern.starts_with('*');
+    let ends = pattern.ends_with('*');
+    match (starts, ends) {
+        (true, true) => {
+            let inner = &pattern[1..pattern.len() - 1];
+            candidate.contains(inner)
+        }
+        (true, false) => {
+            let suffix = &pattern[1..];
+            candidate.ends_with(suffix)
+        }
+        (false, true) => {
+            let prefix = &pattern[..pattern.len() - 1];
+            candidate.starts_with(prefix)
+        }
+        (false, false) => candidate == pattern,
+    }
 }
 
 fn contains_disallowed_shell_syntax(command: &str) -> bool {
@@ -563,6 +648,152 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    // ─── Shell config tests ───
+
+    #[test]
+    fn shell_config_allow_extends_defaults() {
+        let workspace = unique_temp_workspace("shell-cfg-allow");
+        let config = ShellConfig {
+            allow: Some(vec!["npm".to_owned(), "curl".to_owned()]),
+            deny: None,
+            replace_defaults: None,
+            allow_operators: None,
+        };
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+
+        // Default command still allowed
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
+        assert!(result.is_ok(), "default command 'ls' should still be allowed");
+
+        // Newly added command allowed
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "npm install"}));
+        assert!(result.is_ok(), "added command 'npm' should be allowed");
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "curl https://example.com"}));
+        assert!(result.is_ok(), "added command 'curl' should be allowed");
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_config_deny_removes_from_defaults() {
+        let workspace = unique_temp_workspace("shell-cfg-deny");
+        let config = ShellConfig {
+            allow: None,
+            deny: Some(vec!["ls".to_owned()]),
+            replace_defaults: None,
+            allow_operators: None,
+        };
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
+        assert!(result.is_err(), "'ls' should be denied after deny config");
+
+        // Other defaults still allowed
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "pwd"}));
+        assert!(result.is_ok(), "'pwd' should still be allowed");
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_config_replace_defaults_replaces_entirely() {
+        let workspace = unique_temp_workspace("shell-cfg-replace");
+        let config = ShellConfig {
+            allow: Some(vec!["npm".to_owned(), "curl".to_owned()]),
+            deny: None,
+            replace_defaults: Some(true),
+            allow_operators: None,
+        };
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+
+        // Default commands should no longer work
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
+        assert!(result.is_err(), "'ls' should not be allowed when defaults are replaced");
+
+        // Only explicitly allowed commands work
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "npm install"}));
+        assert!(result.is_ok(), "'npm' should be allowed");
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_config_glob_pattern_matching() {
+        let workspace = unique_temp_workspace("shell-cfg-glob");
+        let config = ShellConfig {
+            allow: Some(vec!["cargo-*".to_owned(), "*test*".to_owned()]),
+            deny: None,
+            replace_defaults: None,
+            allow_operators: None,
+        };
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "cargo-fmt"}));
+        assert!(result.is_ok(), "'cargo-fmt' should match glob 'cargo-*'");
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "pytest foo.py"}));
+        assert!(result.is_ok(), "'pytest' should match glob '*test*'");
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_config_allow_operators() {
+        let workspace = unique_temp_workspace("shell-cfg-operators");
+        let config = ShellConfig {
+            allow: None,
+            deny: None,
+            replace_defaults: None,
+            allow_operators: Some(true),
+        };
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared && pwd"}));
+        assert!(result.is_ok(), "'&&' should be allowed when allow_operators=true");
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "echo foo | grep foo"}));
+        assert!(result.is_ok(), "'|' should be allowed when allow_operators=true");
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shell_config_none_preserves_defaults() {
+        let workspace = unique_temp_workspace("shell-cfg-none");
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(None);
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
+        assert!(result.is_ok(), "default 'ls' should be allowed with None config");
+
+        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls && pwd"}));
+        assert!(result.is_err(), "operators should be denied with None config");
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn glob_matches_basic_patterns() {
+        assert!(glob_matches("npm*", "npm"));
+        assert!(glob_matches("npm*", "npmrc"));
+        assert!(!glob_matches("npm*", "npx"));
+        assert!(glob_matches("cargo-*", "cargo-fmt"));
+        assert!(!glob_matches("cargo-*", "cargo"));
+        assert!(glob_matches("*test*", "pytest"));
+        assert!(glob_matches("*test*", "testing"));
+        assert!(glob_matches("*test", "pytest"));
+        assert!(!glob_matches("*test", "testing"));
+        assert!(glob_matches("*", "anything"));
+        assert!(!glob_matches("npm", "npx"));
+        assert!(glob_matches("npm", "npm"));
     }
 
     fn unique_temp_workspace(prefix: &str) -> PathBuf {

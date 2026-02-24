@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use types::{
-    FunctionDecl, RunnerBootstrapEnvelope, SafetyTier, SandboxTier, ShellOutputStream,
+    FunctionDecl, RunnerBootstrapEnvelope, SafetyTier, SandboxTier, ShellConfig, ShellOutputStream,
     SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode, StartupStatusReport, Tool,
     ToolError, ToolExecutionContext,
 };
@@ -849,8 +849,9 @@ fn runtime_wasm_runner(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Arc<dyn W
 
 fn workspace_security_policy(
     bootstrap: Option<&RunnerBootstrapEnvelope>,
+    shell_config: Option<&ShellConfig>,
 ) -> WorkspaceSecurityPolicy {
-    match bootstrap {
+    let policy = match bootstrap {
         Some(bootstrap) => {
             if let Some(runtime_policy) = bootstrap.runtime_policy.as_ref() {
                 WorkspaceSecurityPolicy::for_mount_roots(
@@ -867,7 +868,8 @@ fn workspace_security_policy(
             let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             WorkspaceSecurityPolicy::for_bootstrap_workspace(workspace_root)
         }
-    }
+    };
+    policy.with_shell_config(shell_config)
 }
 
 async fn bootstrap_bash_tool(

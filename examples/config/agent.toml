@@ -98,6 +98,16 @@ jitter          = false # Add randomized jitter to backoff
 # categories = "general"                      # SearxNG categories
 # safesearch = 1                              # SearxNG safesearch level (0-2)
 
+# --- Shell command allowlist ---
+# Configure which commands the LLM is allowed to execute via shell_exec.
+# By default, a built-in allowlist of ~30 common commands is used.
+
+# [tools.shell]
+# allow = ["npm", "npx", "curl", "wget", "jq", "make", "docker", "rg"]  # Add to defaults
+# deny = ["rm"]                      # Remove from defaults
+# replace_defaults = false           # If true, `allow` replaces the default list entirely
+# allow_operators = false            # If true, allow shell operators (&&, ||, |, etc.)
+
 # --- Catalog resolution and validation ---
 [catalog]
 skip_catalog_validation = false  # Set true to allow models not in the catalog

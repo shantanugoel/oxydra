@@ -234,7 +234,7 @@ async fn bootstrap_runtime_tools_without_bootstrap_disables_shell() {
     let RuntimeToolsBootstrap {
         registry,
         availability,
-    } = bootstrap_runtime_tools(None).await;
+    } = bootstrap_runtime_tools(None, None).await;
 
     assert!(!availability.shell.is_ready());
     assert!(!availability.browser.is_ready());
@@ -282,7 +282,7 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
     let RuntimeToolsBootstrap {
         registry,
         availability,
-    } = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
 
     let output = registry
         .execute(SHELL_EXEC_TOOL_NAME, r#"{"command":"printf ws5-sidecar"}"#)
@@ -425,7 +425,7 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
         runtime_policy: None,
         startup_status: None,
     };
-    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
     let args = json!({ "path": outside.to_string_lossy() }).to_string();
     let denied = registry
         .execute(FILE_READ_TOOL_NAME, &args)
@@ -469,7 +469,7 @@ async fn bootstrap_registry_honors_runtime_policy_mount_overrides() {
         }),
         startup_status: None,
     };
-    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
 
     let allowed_result = registry
         .execute(
@@ -528,7 +528,7 @@ async fn registry_denies_shell_commands_not_in_allowlist() {
 
 #[tokio::test]
 async fn bootstrap_registry_rejects_legacy_tool_name_aliases() {
-    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None).await;
+    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None, None).await;
     for legacy_name in ["read_file", "write_file", "edit_file", "bash"] {
         let error = registry
             .execute(legacy_name, "{}")
@@ -544,7 +544,7 @@ async fn bootstrap_registry_rejects_legacy_tool_name_aliases() {
 
 #[tokio::test]
 async fn bootstrap_registry_exposes_runtime_tool_surface_only() {
-    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None).await;
+    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(None, None).await;
     let exposed = registry
         .schemas()
         .into_iter()

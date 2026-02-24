@@ -1369,23 +1369,24 @@ async fn launch_docker_container_async(
             (vec!["/usr/local/bin/oxydra-vm".to_owned()], cmd_args)
         }
         RunnerGuestRole::ShellVm => {
-            let socket_path = params
-                .workspace
-                .ipc
-                .join("shell-daemon.sock")
-                .to_string_lossy()
-                .into_owned();
+            // ShellVm uses virtual container paths (e.g., /shared, /tmp),
+            // so the socket path is relative to the container namespace.
             (
                 vec!["/usr/local/bin/shell-daemon".to_owned()],
-                vec!["--socket".to_owned(), socket_path],
+                vec!["--socket".to_owned(), "/ipc/shell-daemon.sock".to_owned()],
             )
         }
     };
 
-    // Compute working_dir before workspace.root is moved into binds.
-    // Setting working_dir to the workspace root allows ConfigSearchPaths::discover()
-    // inside the container to resolve CWD/.oxydra/ to the internal config dir.
-    let working_dir = Some(params.workspace.root.to_string_lossy().into_owned());
+    // OxydraVm: working_dir is the host workspace root so that
+    // ConfigSearchPaths::discover() can resolve CWD/.oxydra/.
+    // ShellVm: working_dir is /shared (container-virtual path).
+    let working_dir = match params.role {
+        RunnerGuestRole::OxydraVm => {
+            Some(params.workspace.root.to_string_lossy().into_owned())
+        }
+        RunnerGuestRole::ShellVm => Some("/shared".to_owned()),
+    };
 
     let mut binds: Vec<String> = match params.role {
         RunnerGuestRole::OxydraVm => {
@@ -1404,19 +1405,13 @@ async fn launch_docker_container_async(
             .collect()
         }
         RunnerGuestRole::ShellVm => {
-            // ShellVm gets only shared, tmp, and ipc — no workspace root,
-            // no .oxydra/ internal dir, and no vault.
-            [
-                params.mounts.shared,
-                params.mounts.tmp,
-                params.workspace.ipc,
+            // ShellVm uses virtual container paths so that shell output
+            // does not leak host filesystem details to the LLM.
+            vec![
+                format!("{}:/shared", params.mounts.shared.to_string_lossy()),
+                format!("{}:/tmp", params.mounts.tmp.to_string_lossy()),
+                format!("{}:/ipc", params.workspace.ipc.to_string_lossy()),
             ]
-            .into_iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .map(|path| format!("{path}:{path}"))
-            .collect()
         }
     };
 

@@ -20,7 +20,7 @@ pub use config::{
     AgentConfig, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
     ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig,
     RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SummarizationConfig, ToolsConfig,
-    UnknownModelCaps, WebSearchConfig, validate_config_version,
+    ShellConfig, UnknownModelCaps, WebSearchConfig, validate_config_version,
 };
 pub use error::{ChannelError, MemoryError, ProviderError, RuntimeError, ToolError};
 pub use memory::{

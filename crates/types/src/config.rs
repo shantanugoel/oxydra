@@ -473,6 +473,34 @@ pub struct CatalogConfig {
 pub struct ToolsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_search: Option<WebSearchConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellConfig>,
+}
+
+/// Shell tool security policy configuration.
+///
+/// Controls which commands the LLM is allowed to execute via `shell_exec`.
+/// By default a built-in allowlist is used; `allow` extends and `deny`
+/// removes entries from it. Set `replace_defaults = true` to ignore the
+/// built-in list entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellConfig {
+    /// Additional commands to add to the allowlist.
+    /// Supports glob patterns (e.g., `"npm*"`, `"cargo-*"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// Commands to remove from the allowlist (deny takes precedence over allow).
+    /// Supports glob patterns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<Vec<String>>,
+    /// If `true`, replaces the default allowlist entirely with `allow`.
+    /// Default: `false` (extends the built-in list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_defaults: Option<bool>,
+    /// If `true`, allow shell control operators (`&&`, `||`, `|`, etc.).
+    /// Default: `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_operators: Option<bool>,
 }
 
 /// Web search provider configuration.

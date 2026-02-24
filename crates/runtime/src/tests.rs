@@ -681,7 +681,7 @@ async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
         runtime_policy: None,
         startup_status: None,
     };
-    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap), None).await;
     assert!(bootstrap_tools.availability.shell.is_ready());
     let runtime = AgentRuntime::new(
         Box::new(provider),
@@ -741,7 +741,7 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
         runtime_policy: None,
         startup_status: None,
     };
-    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap), None).await;
     assert!(!bootstrap_tools.availability.shell.is_ready());
     let runtime = AgentRuntime::new(
         Box::new(provider),
@@ -808,7 +808,7 @@ async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_ac
         runtime_policy: None,
         startup_status: None,
     };
-    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap)).await;
+    let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap), None).await;
     let runtime = AgentRuntime::new(
         Box::new(provider),
         bootstrap_tools.registry,
@@ -862,7 +862,7 @@ async fn run_session_injects_unknown_tool_error_for_legacy_alias_after_cutover()
             ]),
         ],
     );
-    let bootstrap_tools = bootstrap_runtime_tools(None).await;
+    let bootstrap_tools = bootstrap_runtime_tools(None, None).await;
     let runtime = AgentRuntime::new(
         Box::new(provider),
         bootstrap_tools.registry,

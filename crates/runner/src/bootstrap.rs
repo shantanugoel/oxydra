@@ -498,7 +498,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
     let RuntimeToolsBootstrap {
         mut registry,
         availability,
-    } = bootstrap_runtime_tools(bootstrap.as_ref()).await;
+    } = bootstrap_runtime_tools(bootstrap.as_ref(), config.tools.shell.as_ref()).await;
 
     if let Some(ref memory_retrieval) = memory {
         register_memory_tools(

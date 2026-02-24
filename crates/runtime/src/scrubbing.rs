@@ -69,15 +69,9 @@ pub(crate) fn translate_tool_arg_paths(
             translate_field(&mut translated, "source_path", mappings);
             translate_field(&mut translated, "destination_path", mappings);
         }
-        "shell_exec" => {
-            // For shell commands, translate path prefixes embedded in the
-            // command string.  This is best-effort since shell quoting makes
-            // exact parsing impossible.
-            if let Some(cmd) = translated.get("command").and_then(|v| v.as_str()) {
-                let resolved = resolve_virtual_prefixes_in_text(cmd, mappings);
-                translated["command"] = serde_json::Value::String(resolved);
-            }
-        }
+        // shell_exec: no path translation needed — the ShellVm container
+        // mounts directories at virtual paths (/shared, /tmp) so commands
+        // already use the correct container-local paths.
         _ => {}
     }
 
@@ -115,33 +109,7 @@ fn resolve_virtual_prefix(input: &str, mappings: &[PathScrubMapping]) -> String 
     input.to_owned()
 }
 
-/// Replaces all occurrences of virtual-path prefixes within free-form text
-/// (such as a shell command) with their host equivalents.  Matches at path
-/// boundaries to minimise false positives.
-fn resolve_virtual_prefixes_in_text(input: &str, mappings: &[PathScrubMapping]) -> String {
-    let mut sorted: Vec<&PathScrubMapping> = mappings
-        .iter()
-        .filter(|m| !m.virtual_path.is_empty())
-        .collect();
-    sorted.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
 
-    let mut result = input.to_owned();
-    for mapping in &sorted {
-        // Replace occurrences like "/shared/" with "/host/.../shared/".
-        let virtual_with_slash = format!("{}/", mapping.virtual_path);
-        let host_with_slash = format!("{}/", mapping.host_prefix);
-        result = result.replace(&virtual_with_slash, &host_with_slash);
-
-        // Also handle " /shared" at end-of-string (without trailing slash).
-        let virtual_at_end = format!(" {}", mapping.virtual_path);
-        let host_at_end = format!(" {}", mapping.host_prefix);
-        if result.ends_with(&virtual_at_end) {
-            let prefix_len = result.len() - virtual_at_end.len();
-            result = format!("{}{host_at_end}", &result[..prefix_len]);
-        }
-    }
-    result
-}
 const HIGH_ENTROPY_THRESHOLD: f64 = 3.8;
 
 pub(crate) fn scrub_tool_output(output: &str) -> String {
@@ -241,6 +209,10 @@ fn is_known_internal_identifier(token: &str) -> bool {
     pattern.is_match(token)
 }
 
+fn looks_like_filesystem_path(token: &str) -> bool {
+    token.starts_with('/') && token.matches('/').count() >= 3
+}
+
 fn looks_like_secret_token(token: &str) -> bool {
     if token.len() < MIN_ENTROPY_TOKEN_LENGTH || token.len() > MAX_ENTROPY_TOKEN_LENGTH {
         return false;
@@ -250,6 +222,12 @@ fn looks_like_secret_token(token: &str) -> bool {
     // from high-entropy redaction.  These are `note-{uuid4}` strings that look
     // random but are safe to expose.
     if is_known_internal_identifier(token) {
+        return false;
+    }
+
+    // Exempt filesystem paths: tokens starting with "/" that contain 3+
+    // path separators are almost certainly paths, not secrets.
+    if looks_like_filesystem_path(token) {
         return false;
     }
 
@@ -362,6 +340,28 @@ Authorization: Bearer very-secret-token
         let token = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2";
         let scrubbed = scrub_tool_output(format!("key={token}").as_str());
         assert_eq!(scrubbed, "key=[REDACTED]");
+    }
+
+    #[test]
+    fn scrubber_preserves_filesystem_paths() {
+        // Long filesystem paths should not be redacted by the entropy scrubber,
+        // even though they match the high-entropy candidate regex.
+        let path = "/Users/shantanugoel/dev/oxydra-home/oxydra/.oxydra/workspaces/shaan";
+        let output = format!("pwd output: {path}");
+        let scrubbed = scrub_tool_output(&output);
+        assert!(
+            scrubbed.contains(path),
+            "filesystem path should NOT be redacted but got:\n{scrubbed}"
+        );
+    }
+
+    #[test]
+    fn scrubber_redacts_non_path_high_entropy_tokens_still() {
+        // Ensure that exempting filesystem paths doesn't prevent redaction
+        // of actual high-entropy tokens.
+        let token = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2";
+        let scrubbed = scrub_tool_output(format!("val={token}").as_str());
+        assert_eq!(scrubbed, "val=[REDACTED]");
     }
 
     #[test]
@@ -478,7 +478,7 @@ Authorization: Bearer very-secret-token
     }
 
     #[test]
-    fn translate_shell_command_virtual_paths() {
+    fn translate_shell_exec_passes_through_unchanged() {
         let mappings = vec![
             PathScrubMapping {
                 host_prefix: "/host/ws/shared".to_owned(),
@@ -490,9 +490,11 @@ Authorization: Bearer very-secret-token
             },
         ];
 
+        // shell_exec should NOT translate paths — the ShellVm container
+        // mounts at virtual paths directly so no translation is needed.
         let args = serde_json::json!({ "command": "ls /shared/subdir" });
         let translated = translate_tool_arg_paths("shell_exec", &args, &mappings);
-        assert_eq!(translated["command"], "ls /host/ws/shared/subdir");
+        assert_eq!(translated["command"], "ls /shared/subdir");
     }
 
     #[test]

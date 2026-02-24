@@ -146,8 +146,10 @@ impl AgentRuntime {
             }
             Err(e) => return Err(e),
         };
-        let output = scrub_tool_output(&output);
+        // Scrub host paths first so the entropy scrubber does not
+        // false-positive on long filesystem path segments.
         let output = scrub_host_paths(&output, &self.path_scrub_mappings);
+        let output = scrub_tool_output(&output);
 
         Ok(Message {
             role: MessageRole::Tool,

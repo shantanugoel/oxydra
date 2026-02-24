@@ -12,12 +12,14 @@ use figment::{
 };
 use memory::LibsqlMemory;
 use provider::{ReliableProvider, RetryPolicy};
-use runtime::{ContextBudgetLimits, RetrievalLimits, RuntimeLimits, SummarizationLimits};
+use runtime::{
+    ContextBudgetLimits, PathScrubMapping, RetrievalLimits, RuntimeLimits, SummarizationLimits,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tools::{
-    RuntimeToolsBootstrap, ToolAvailability, ToolRegistry,
-    bootstrap_runtime_tools, register_memory_tools,
+    RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
+    register_memory_tools,
 };
 use types::{
     AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
@@ -63,6 +65,8 @@ pub struct VmBootstrapRuntime {
     pub tool_registry: ToolRegistry,
     pub tool_availability: ToolAvailability,
     pub startup_status: StartupStatusReport,
+    pub path_scrub_mappings: Vec<PathScrubMapping>,
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -418,9 +422,7 @@ pub async fn build_memory_backend(
     // Local mode — construct the DB path from the workspace root convention.
     if LibsqlMemory::needs_local_db(&config.memory) {
         let db_path = match workspace_root {
-            Some(root) => root
-                .join(super::INTERNAL_DIR_NAME)
-                .join(MEMORY_DB_FILENAME),
+            Some(root) => root.join(super::INTERNAL_DIR_NAME).join(MEMORY_DB_FILENAME),
             None => {
                 // Fallback for Process tier without --workspace-root:
                 // resolve against CWD (backward compatibility).
@@ -508,6 +510,8 @@ pub async fn bootstrap_vm_runtime_with_paths(
     }
 
     let startup_status = availability.startup_status(bootstrap.as_ref());
+    let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());
+    let system_prompt = build_system_prompt(paths, bootstrap.as_ref());
 
     Ok(VmBootstrapRuntime {
         bootstrap,
@@ -518,6 +522,8 @@ pub async fn bootstrap_vm_runtime_with_paths(
         tool_registry: registry,
         tool_availability: availability,
         startup_status,
+        path_scrub_mappings,
+        system_prompt,
     })
 }
 
@@ -594,6 +600,135 @@ fn apply_web_search_config(config: &WebSearchConfig) {
             &safesearch.to_string(),
         );
     }
+}
+
+const SYSTEM_MD_FILE: &str = "SYSTEM.md";
+const SHARED_PATH_NAME: &str = "shared";
+const TMP_PATH_NAME: &str = "tmp";
+const VAULT_PATH_NAME: &str = "vault";
+
+/// Constructs host-path → virtual-path scrub mappings from the bootstrap
+/// envelope so that tool output and error messages never leak host filesystem
+/// details to the LLM.
+fn build_path_scrub_mappings(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Vec<PathScrubMapping> {
+    let mut mappings = Vec::new();
+
+    let (shared, tmp, vault, workspace_root) = match bootstrap {
+        Some(b) => {
+            if let Some(policy) = b.runtime_policy.as_ref() {
+                (
+                    PathBuf::from(&policy.mounts.shared),
+                    PathBuf::from(&policy.mounts.tmp),
+                    PathBuf::from(&policy.mounts.vault),
+                    PathBuf::from(&b.workspace_root),
+                )
+            } else {
+                let ws = PathBuf::from(&b.workspace_root);
+                (
+                    ws.join(SHARED_PATH_NAME),
+                    ws.join(TMP_PATH_NAME),
+                    ws.join(VAULT_PATH_NAME),
+                    ws,
+                )
+            }
+        }
+        None => {
+            let ws = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            (
+                ws.join(SHARED_PATH_NAME),
+                ws.join(TMP_PATH_NAME),
+                ws.join(VAULT_PATH_NAME),
+                ws,
+            )
+        }
+    };
+
+    // Canonicalize where possible; fall back to the raw path for mappings that
+    // may not exist yet (e.g., workspace directories created lazily).
+    let canonicalize_or_raw = |path: PathBuf| -> String {
+        std::fs::canonicalize(&path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    // Add mount-specific mappings (most specific first is not required here
+    // since scrub_host_paths sorts by length, but listed for clarity).
+    mappings.push(PathScrubMapping {
+        host_prefix: canonicalize_or_raw(shared),
+        virtual_path: "/shared".to_owned(),
+    });
+    mappings.push(PathScrubMapping {
+        host_prefix: canonicalize_or_raw(tmp),
+        virtual_path: "/tmp".to_owned(),
+    });
+    mappings.push(PathScrubMapping {
+        host_prefix: canonicalize_or_raw(vault),
+        virtual_path: "/vault".to_owned(),
+    });
+    // Map the workspace root itself so any leftover references are scrubbed.
+    mappings.push(PathScrubMapping {
+        host_prefix: canonicalize_or_raw(workspace_root),
+        virtual_path: "".to_owned(),
+    });
+
+    mappings
+}
+
+/// Builds the system prompt injected at conversation start.
+///
+/// The default prompt describes the workspace layout. If a `SYSTEM.md` file
+/// exists in the config search paths (e.g., `.oxydra/SYSTEM.md`), its contents
+/// are appended to the default prompt.
+fn build_system_prompt(
+    paths: &ConfigSearchPaths,
+    bootstrap: Option<&RunnerBootstrapEnvelope>,
+) -> Option<String> {
+    let sandbox_tier = bootstrap.map_or(types::SandboxTier::Process, |b| b.sandbox_tier);
+    let shell_note = if sandbox_tier == types::SandboxTier::Process {
+        "\n\nNote: Shell and browser tools are disabled in the current environment."
+    } else {
+        ""
+    };
+
+    let default_prompt = format!(
+        "You are Oxydra - an AI assistant with access to a sandboxed workspace.\n\n\
+         ## File System\n\n\
+         Your workspace contains three directories:\n\
+         - `/shared` — persistent working directory for reading and writing files\n\
+         - `/tmp` — temporary scratch space (may be cleared between sessions)\n\
+         - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
+         When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
+         always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}"
+    );
+
+    // Look for a SYSTEM.md override/append file in the config search paths.
+    // Check workspace config first (.oxydra/SYSTEM.md), then user config,
+    // then system config.
+    let system_md_content = Some(paths.workspace_dir.join(SYSTEM_MD_FILE))
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            paths
+                .user_dir
+                .as_ref()
+                .map(|dir| dir.join(SYSTEM_MD_FILE))
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            let path = paths.system_dir.join(SYSTEM_MD_FILE);
+            path.is_file().then_some(path)
+        })
+        .and_then(|path| std::fs::read_to_string(&path).ok());
+
+    let prompt = match system_md_content {
+        Some(custom) if !custom.trim().is_empty() => {
+            format!("{default_prompt}\n\n---\n\n{}", custom.trim())
+        }
+        _ => default_prompt,
+    };
+
+    Some(prompt)
 }
 
 fn merge_directory(mut figment: Figment, directory: &Path, selected_profile: &str) -> Figment {

@@ -1,4 +1,4 @@
-use super::{scrubbing::scrub_tool_output, *};
+use super::{scrubbing::{scrub_host_paths, scrub_tool_output, translate_tool_arg_paths}, *};
 
 /// Recursively strip `additionalProperties` from every object node in a JSON Schema value
 /// so the runtime validator accepts extra properties the LLM may have injected.
@@ -97,6 +97,11 @@ impl AgentRuntime {
             }));
         }
 
+        // Translate virtual paths (e.g. /shared/notes.txt) to host paths
+        // before the tool and security policy see them.
+        let validation_args =
+            translate_tool_arg_paths(name, &validation_args, &self.path_scrub_mappings);
+
         let arg_str = serde_json::to_string(&validation_args).map_err(ToolError::Serialization)?;
         let context = self.tool_execution_context.lock().await.clone();
 
@@ -139,6 +144,7 @@ impl AgentRuntime {
             Err(e) => return Err(e),
         };
         let output = scrub_tool_output(&output);
+        let output = scrub_host_paths(&output, &self.path_scrub_mappings);
 
         Ok(Message {
             role: MessageRole::Tool,

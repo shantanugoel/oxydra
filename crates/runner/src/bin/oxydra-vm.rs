@@ -131,7 +131,11 @@ async fn run() -> Result<(), VmError> {
         bootstrap.provider,
         bootstrap.tool_registry,
         bootstrap.runtime_limits,
-    );
+    )
+    .with_path_scrub_mappings(bootstrap.path_scrub_mappings);
+    if let Some(prompt) = bootstrap.system_prompt {
+        runtime = runtime.with_system_prompt(prompt);
+    }
     if let Some(memory) = bootstrap.memory {
         runtime = runtime.with_memory_retrieval(memory);
     }

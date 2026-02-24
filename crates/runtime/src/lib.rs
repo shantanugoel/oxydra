@@ -23,6 +23,8 @@ mod provider_response;
 mod scrubbing;
 mod tool_execution;
 
+pub use scrubbing::PathScrubMapping;
+
 #[cfg(test)]
 mod tests;
 
@@ -88,6 +90,7 @@ impl Default for RuntimeLimits {
     }
 }
 
+
 pub struct AgentRuntime {
     provider: Box<dyn Provider>,
     tool_registry: ToolRegistry,
@@ -96,6 +99,8 @@ pub struct AgentRuntime {
     memory: Option<Arc<dyn Memory>>,
     memory_retrieval: Option<Arc<dyn MemoryRetrieval>>,
     tool_execution_context: std::sync::Arc<tokio::sync::Mutex<ToolExecutionContext>>,
+    path_scrub_mappings: Vec<PathScrubMapping>,
+    system_prompt: Option<String>,
 }
 
 impl AgentRuntime {
@@ -114,6 +119,8 @@ impl AgentRuntime {
             tool_execution_context: std::sync::Arc::new(tokio::sync::Mutex::new(
                 ToolExecutionContext::default(),
             )),
+            path_scrub_mappings: Vec::new(),
+            system_prompt: None,
         }
     }
 
@@ -134,6 +141,25 @@ impl AgentRuntime {
 
     pub fn with_stream_buffer_size(mut self, stream_buffer_size: usize) -> Self {
         self.stream_buffer_size = stream_buffer_size.max(1);
+        self
+    }
+
+    /// Set the host-path-to-virtual-path mappings used to scrub tool output
+    /// before injecting it into the LLM context.
+    ///
+    /// For example, mapping the host path
+    /// `/Users/alice/.oxydra/workspaces/bob/shared` → `/shared` ensures the
+    /// LLM never sees host-specific filesystem details in tool results or
+    /// security policy error messages.
+    pub fn with_path_scrub_mappings(mut self, mappings: Vec<PathScrubMapping>) -> Self {
+        self.path_scrub_mappings = mappings;
+        self
+    }
+
+    /// Set the system prompt injected at the start of the conversation if
+    /// no `MessageRole::System` message is already present in the context.
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = Some(prompt);
         self
     }
 
@@ -219,6 +245,28 @@ impl AgentRuntime {
         if context.tools.is_empty() {
             context.tools = self.tool_registry.schemas();
         }
+
+        // Inject the system prompt if one is configured and the context does
+        // not already contain a system message (to allow callers to provide
+        // their own).
+        if let Some(ref prompt) = self.system_prompt {
+            let has_system = context
+                .messages
+                .iter()
+                .any(|m| m.role == MessageRole::System);
+            if !has_system {
+                context.messages.insert(
+                    0,
+                    Message {
+                        role: MessageRole::System,
+                        content: Some(prompt.clone()),
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                    },
+                );
+            }
+        }
+
         let mut next_memory_sequence = self.next_memory_sequence(session_id).await?;
         self.persist_context_tail_if_needed(session_id, &mut next_memory_sequence, context)
             .await?;

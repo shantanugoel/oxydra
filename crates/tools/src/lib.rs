@@ -322,12 +322,12 @@ impl Tool for ReadTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             FILE_READ_TOOL_NAME,
-            Some("Read the contents of a file and return its text. Path is relative to the working directory.".to_owned()),
+            Some("Read the contents of a file and return its text. Paths must be within /shared, /tmp, or /vault.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": { "type": "string", "description": "File path to read" }
+                    "path": { "type": "string", "description": "File path to read (e.g. /shared/notes.txt, /vault/data.csv)" }
                 }
             }),
         )
@@ -359,12 +359,12 @@ impl Tool for SearchTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             FILE_SEARCH_TOOL_NAME,
-            Some("Search recursively for lines matching a text query. Returns matching lines with file paths and line numbers. Use for finding code, configuration, or text patterns.".to_owned()),
+            Some("Search recursively for lines matching a text query. Returns matching lines with file paths and line numbers. Paths must be within /shared, /tmp, or /vault.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["path", "query"],
                 "properties": {
-                    "path":  { "type": "string", "description": "Root path to search" },
+                    "path":  { "type": "string", "description": "Root directory to search (e.g. /shared)" },
                     "query": { "type": "string", "description": "Search query" }
                 }
             }),
@@ -397,11 +397,11 @@ impl Tool for ListTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             FILE_LIST_TOOL_NAME,
-            Some("List files and directories. Returns names with type indicators. Defaults to the current working directory if no path is given.".to_owned()),
+            Some("List files and directories within /shared, /tmp, or /vault. Returns names with type indicators.".to_owned()),
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Directory path to list; defaults to current directory" }
+                    "path": { "type": "string", "description": "Directory path to list (e.g. /shared, /tmp); defaults to /shared" }
                 }
             }),
         )
@@ -438,12 +438,12 @@ impl Tool for WriteTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             FILE_WRITE_TOOL_NAME,
-            Some("Create or overwrite a file with the given content. Creates parent directories as needed. Path is relative to the working directory.".to_owned()),
+            Some("Create or overwrite a file with the given content. Creates parent directories as needed. Paths must be within /shared or /tmp.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["path", "content"],
                 "properties": {
-                    "path":    { "type": "string", "description": "File path to write" },
+                    "path":    { "type": "string", "description": "File path to write (e.g. /shared/output.txt)" },
                     "content": { "type": "string", "description": "UTF-8 file content to persist" }
                 }
             }),
@@ -476,12 +476,12 @@ impl Tool for EditTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             FILE_EDIT_TOOL_NAME,
-            Some("Edit a file by replacing an exact text snippet. old_text must match exactly one occurrence in the file. Use file_read first to see the current contents.".to_owned()),
+            Some("Edit a file by replacing an exact text snippet. old_text must match exactly one occurrence in the file. Paths must be within /shared or /tmp. Use file_read first to see the current contents.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["path", "old_text", "new_text"],
                 "properties": {
-                    "path":     { "type": "string", "description": "File path to edit" },
+                    "path":     { "type": "string", "description": "File path to edit (e.g. /shared/config.txt)" },
                     "old_text": { "type": "string", "description": "Exact text snippet to replace" },
                     "new_text": { "type": "string", "description": "Replacement text" }
                 }
@@ -519,12 +519,12 @@ impl Tool for DeleteTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             FILE_DELETE_TOOL_NAME,
-            Some("Delete a file or directory. Directories are removed recursively. Path is relative to the working directory.".to_owned()),
+            Some("Delete a file or directory. Directories are removed recursively. Paths must be within /shared or /tmp.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": { "type": "string", "description": "File or directory path to delete" }
+                    "path": { "type": "string", "description": "File or directory path to delete (e.g. /shared/old-file.txt)" }
                 }
             }),
         )
@@ -654,13 +654,13 @@ impl Tool for VaultCopyToTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             VAULT_COPYTO_TOOL_NAME,
-            Some("Copy a file from the vault into the shared workspace. source_path is within the vault; destination_path is within shared/tmp.".to_owned()),
+            Some("Copy a file from the read-only /vault into /shared or /tmp so it can be read or modified.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["source_path", "destination_path"],
                 "properties": {
-                    "source_path":      { "type": "string", "description": "Vault source path to read from" },
-                    "destination_path": { "type": "string", "description": "Destination path in shared/tmp to write to" }
+                    "source_path":      { "type": "string", "description": "Source path within /vault (e.g. /vault/data.csv)" },
+                    "destination_path": { "type": "string", "description": "Destination path in /shared or /tmp (e.g. /shared/data.csv)" }
                 }
             }),
         )
@@ -706,12 +706,12 @@ impl Tool for BashTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             SHELL_EXEC_TOOL_NAME,
-            Some("Execute a shell command and return its output. Returns combined stdout and stderr.".to_owned()),
+            Some("Execute a shell command and return its output. Returns combined stdout and stderr. The working directory is the workspace root; files are in /shared, /tmp, and /vault.".to_owned()),
             json!({
                 "type": "object",
                 "required": ["command"],
                 "properties": {
-                    "command": { "type": "string", "description": "Shell command executed through the active shell backend" }
+                    "command": { "type": "string", "description": "Shell command to execute (e.g. 'ls /shared' or 'cat /shared/notes.txt')" }
                 }
             }),
         )

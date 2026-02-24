@@ -8,6 +8,144 @@ use regex::{Captures, Regex, RegexSet};
 const REDACTION_MARKER: &str = "[REDACTED]";
 const MIN_ENTROPY_TOKEN_LENGTH: usize = 24;
 const MAX_ENTROPY_TOKEN_LENGTH: usize = 512;
+
+/// A mapping from a host path prefix to a virtual path visible to the LLM.
+///
+/// For example, mapping `/Users/alice/.oxydra/workspaces/bob/shared` → `/shared`
+/// ensures the LLM never sees host-specific filesystem details.
+#[derive(Debug, Clone)]
+pub struct PathScrubMapping {
+    /// Host path prefix to find (must be a canonical absolute path).
+    pub host_prefix: String,
+    /// Virtual path to replace it with.
+    pub virtual_path: String,
+}
+
+/// Replaces host path prefixes in `output` with their virtual path equivalents.
+///
+/// Mappings are applied longest-first to avoid partial replacements (e.g.,
+/// `/a/b/shared` is replaced before `/a/b`).
+pub(crate) fn scrub_host_paths(output: &str, mappings: &[PathScrubMapping]) -> String {
+    if mappings.is_empty() || output.is_empty() {
+        return output.to_owned();
+    }
+
+    // Sort by descending host prefix length so more-specific paths match first.
+    let mut sorted: Vec<&PathScrubMapping> = mappings.iter().collect();
+    sorted.sort_by(|a, b| b.host_prefix.len().cmp(&a.host_prefix.len()));
+
+    let mut result = output.to_owned();
+    for mapping in sorted {
+        result = result.replace(&mapping.host_prefix, &mapping.virtual_path);
+    }
+    result
+}
+
+/// Translates virtual path prefixes in tool arguments to host paths.
+///
+/// This is the reverse of [`scrub_host_paths`]: it converts LLM-facing virtual
+/// paths (e.g., `/shared/notes.txt`) into host filesystem paths (e.g.,
+/// `/Users/alice/.oxydra/workspaces/bob/shared/notes.txt`) so that the
+/// security policy and file operations resolve correctly.
+///
+/// Only known path-bearing argument fields are translated to avoid corrupting
+/// non-path values (e.g., file content that happens to contain `/shared`).
+pub(crate) fn translate_tool_arg_paths(
+    tool_name: &str,
+    args: &serde_json::Value,
+    mappings: &[PathScrubMapping],
+) -> serde_json::Value {
+    if mappings.is_empty() {
+        return args.clone();
+    }
+
+    let mut translated = args.clone();
+
+    match tool_name {
+        "file_read" | "file_search" | "file_list" | "file_write" | "file_edit" | "file_delete" => {
+            translate_field(&mut translated, "path", mappings);
+        }
+        "vault_copyto" => {
+            translate_field(&mut translated, "source_path", mappings);
+            translate_field(&mut translated, "destination_path", mappings);
+        }
+        "shell_exec" => {
+            // For shell commands, translate path prefixes embedded in the
+            // command string.  This is best-effort since shell quoting makes
+            // exact parsing impossible.
+            if let Some(cmd) = translated.get("command").and_then(|v| v.as_str()) {
+                let resolved = resolve_virtual_prefixes_in_text(cmd, mappings);
+                translated["command"] = serde_json::Value::String(resolved);
+            }
+        }
+        _ => {}
+    }
+
+    translated
+}
+
+/// Replaces the value of a single JSON object field if it starts with a
+/// virtual path prefix.
+fn translate_field(
+    args: &mut serde_json::Value,
+    field: &str,
+    mappings: &[PathScrubMapping],
+) {
+    if let Some(value) = args.get(field).and_then(|v| v.as_str()) {
+        let resolved = resolve_virtual_prefix(value, mappings);
+        args[field] = serde_json::Value::String(resolved);
+    }
+}
+
+/// Replaces the leading virtual-path prefix in a single path value with its
+/// host equivalent.  Only matches at the very start of the string and at a
+/// path boundary.  Longer virtual prefixes are matched first.
+fn resolve_virtual_prefix(input: &str, mappings: &[PathScrubMapping]) -> String {
+    let mut sorted: Vec<&PathScrubMapping> = mappings
+        .iter()
+        .filter(|m| !m.virtual_path.is_empty())
+        .collect();
+    sorted.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
+
+    for mapping in &sorted {
+        if input.starts_with(&mapping.virtual_path) {
+            let remainder = &input[mapping.virtual_path.len()..];
+            if remainder.is_empty() || remainder.starts_with('/') {
+                return format!("{}{remainder}", mapping.host_prefix);
+            }
+        }
+    }
+
+    input.to_owned()
+}
+
+/// Replaces all occurrences of virtual-path prefixes within free-form text
+/// (such as a shell command) with their host equivalents.  Matches at path
+/// boundaries to minimise false positives.
+fn resolve_virtual_prefixes_in_text(input: &str, mappings: &[PathScrubMapping]) -> String {
+    let mut sorted: Vec<&PathScrubMapping> = mappings
+        .iter()
+        .filter(|m| !m.virtual_path.is_empty())
+        .collect();
+    sorted.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
+
+    let mut result = input.to_owned();
+    for mapping in &sorted {
+        // Replace occurrences like "/shared/" with "/host/.../shared/".
+        let virtual_with_slash = format!("{}/", mapping.virtual_path);
+        let host_with_slash = format!("{}/", mapping.host_prefix);
+        result = result.replace(&virtual_with_slash, &host_with_slash);
+
+        // Also handle " /shared" at end-of-string (without trailing slash).
+        let virtual_at_end = format!(" {}", mapping.virtual_path);
+        let host_at_end = format!(" {}", mapping.host_prefix);
+        if result.ends_with(&virtual_at_end) {
+            let prefix_len = result.len() - virtual_at_end.len();
+            result = format!("{}{host_at_end}", &result[..prefix_len]);
+        }
+    }
+    result
+}
 const HIGH_ENTROPY_THRESHOLD: f64 = 3.8;
 
 pub(crate) fn scrub_tool_output(output: &str) -> String {
@@ -160,7 +298,7 @@ fn shannon_entropy(token: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::scrub_tool_output;
+    use super::{scrub_tool_output, PathScrubMapping, scrub_host_paths, translate_tool_arg_paths};
 
     #[test]
     fn scrubber_redacts_keyword_value_pairs() {
@@ -228,5 +366,195 @@ Authorization: Bearer very-secret-token
         let token = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2";
         let scrubbed = scrub_tool_output(format!("key={token}").as_str());
         assert_eq!(scrubbed, "key=[REDACTED]");
+    }
+
+    #[test]
+    fn path_scrubbing_replaces_host_paths_with_virtual_paths() {
+        let mappings = vec![
+            PathScrubMapping {
+                host_prefix: "/Users/alice/.oxydra/workspaces/bob/shared".to_owned(),
+                virtual_path: "/shared".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/Users/alice/.oxydra/workspaces/bob/tmp".to_owned(),
+                virtual_path: "/tmp".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/Users/alice/.oxydra/workspaces/bob/vault".to_owned(),
+                virtual_path: "/vault".to_owned(),
+            },
+        ];
+        let input = "path `/Users/alice/.oxydra/workspaces/bob/shared/foo.txt` is readable";
+        let scrubbed = scrub_host_paths(input, &mappings);
+        assert_eq!(scrubbed, "path `/shared/foo.txt` is readable");
+    }
+
+    #[test]
+    fn path_scrubbing_applies_longest_match_first() {
+        let mappings = vec![
+            PathScrubMapping {
+                host_prefix: "/home/user/workspace".to_owned(),
+                virtual_path: "/workspace".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/home/user/workspace/shared".to_owned(),
+                virtual_path: "/shared".to_owned(),
+            },
+        ];
+        // The more-specific path should be replaced first, not the shorter one.
+        let input = "allowed roots [/home/user/workspace/shared, /home/user/workspace/tmp]";
+        let scrubbed = scrub_host_paths(input, &mappings);
+        assert_eq!(scrubbed, "allowed roots [/shared, /workspace/tmp]");
+    }
+
+    #[test]
+    fn path_scrubbing_is_noop_for_empty_mappings() {
+        let input = "path `/some/host/path` is blocked";
+        assert_eq!(scrub_host_paths(input, &[]), input);
+    }
+
+    #[test]
+    fn path_scrubbing_is_noop_for_empty_output() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host".to_owned(),
+            virtual_path: "/virtual".to_owned(),
+        }];
+        assert_eq!(scrub_host_paths("", &mappings), "");
+    }
+
+    #[test]
+    fn translate_file_read_virtual_path_to_host_path() {
+        let mappings = vec![
+            PathScrubMapping {
+                host_prefix: "/Users/alice/.oxydra/workspaces/bob/shared".to_owned(),
+                virtual_path: "/shared".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/Users/alice/.oxydra/workspaces/bob/tmp".to_owned(),
+                virtual_path: "/tmp".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/Users/alice/.oxydra/workspaces/bob/vault".to_owned(),
+                virtual_path: "/vault".to_owned(),
+            },
+        ];
+
+        let args = serde_json::json!({ "path": "/shared/notes.txt" });
+        let translated = translate_tool_arg_paths("file_read", &args, &mappings);
+        assert_eq!(
+            translated["path"],
+            "/Users/alice/.oxydra/workspaces/bob/shared/notes.txt"
+        );
+    }
+
+    #[test]
+    fn translate_file_list_virtual_root_directory() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host/workspace/shared".to_owned(),
+            virtual_path: "/shared".to_owned(),
+        }];
+
+        let args = serde_json::json!({ "path": "/shared" });
+        let translated = translate_tool_arg_paths("file_list", &args, &mappings);
+        assert_eq!(translated["path"], "/host/workspace/shared");
+    }
+
+    #[test]
+    fn translate_vault_copyto_both_paths() {
+        let mappings = vec![
+            PathScrubMapping {
+                host_prefix: "/host/ws/vault".to_owned(),
+                virtual_path: "/vault".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/host/ws/shared".to_owned(),
+                virtual_path: "/shared".to_owned(),
+            },
+        ];
+
+        let args = serde_json::json!({
+            "source_path": "/vault/data.csv",
+            "destination_path": "/shared/data.csv"
+        });
+        let translated = translate_tool_arg_paths("vault_copyto", &args, &mappings);
+        assert_eq!(translated["source_path"], "/host/ws/vault/data.csv");
+        assert_eq!(translated["destination_path"], "/host/ws/shared/data.csv");
+    }
+
+    #[test]
+    fn translate_shell_command_virtual_paths() {
+        let mappings = vec![
+            PathScrubMapping {
+                host_prefix: "/host/ws/shared".to_owned(),
+                virtual_path: "/shared".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/host/ws/tmp".to_owned(),
+                virtual_path: "/tmp".to_owned(),
+            },
+        ];
+
+        let args = serde_json::json!({ "command": "ls /shared/subdir" });
+        let translated = translate_tool_arg_paths("shell_exec", &args, &mappings);
+        assert_eq!(translated["command"], "ls /host/ws/shared/subdir");
+    }
+
+    #[test]
+    fn translate_skips_empty_virtual_path_mappings() {
+        let mappings = vec![
+            PathScrubMapping {
+                host_prefix: "/host/workspace".to_owned(),
+                virtual_path: "".to_owned(),
+            },
+            PathScrubMapping {
+                host_prefix: "/host/workspace/shared".to_owned(),
+                virtual_path: "/shared".to_owned(),
+            },
+        ];
+
+        // The empty virtual_path should not match "/shared/foo.txt".
+        let args = serde_json::json!({ "path": "/shared/foo.txt" });
+        let translated = translate_tool_arg_paths("file_read", &args, &mappings);
+        assert_eq!(translated["path"], "/host/workspace/shared/foo.txt");
+    }
+
+    #[test]
+    fn translate_preserves_already_host_paths() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host/ws/shared".to_owned(),
+            virtual_path: "/shared".to_owned(),
+        }];
+
+        // If the path is already a host path, don't change it.
+        let args = serde_json::json!({ "path": "/host/ws/shared/file.txt" });
+        let translated = translate_tool_arg_paths("file_read", &args, &mappings);
+        assert_eq!(translated["path"], "/host/ws/shared/file.txt");
+    }
+
+    #[test]
+    fn translate_ignores_unknown_tool_names() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host/ws/shared".to_owned(),
+            virtual_path: "/shared".to_owned(),
+        }];
+
+        let args = serde_json::json!({ "path": "/shared/file.txt" });
+        let translated = translate_tool_arg_paths("web_fetch", &args, &mappings);
+        // Unknown tool — args should pass through unchanged.
+        assert_eq!(translated["path"], "/shared/file.txt");
+    }
+
+    #[test]
+    fn translate_respects_path_boundary() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host/ws/tmp".to_owned(),
+            virtual_path: "/tmp".to_owned(),
+        }];
+
+        // "/tmpfile.txt" should NOT match "/tmp" because "file.txt" doesn't
+        // start with "/" — it's not a path boundary.
+        let args = serde_json::json!({ "path": "/tmpfile.txt" });
+        let translated = translate_tool_arg_paths("file_read", &args, &mappings);
+        assert_eq!(translated["path"], "/tmpfile.txt");
     }
 }

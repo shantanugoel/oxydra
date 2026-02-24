@@ -16,7 +16,7 @@ use axum::{
     response::Response as AxumResponse,
     routing::get,
 };
-use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use futures_util::{FutureExt, SinkExt, StreamExt, stream::SplitSink};
 use runtime::{AgentRuntime, RuntimeStreamEventSender};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -372,89 +372,120 @@ impl GatewayServer {
             );
             tokio::pin!(runtime_future);
 
-            loop {
-                tokio::select! {
-                    maybe_item = delta_rx.recv() => {
-                        match maybe_item {
-                            Some(StreamItem::Text(delta)) => {
-                                session.publish(GatewayServerFrame::AssistantDelta(GatewayAssistantDelta {
-                                    request_id: send_turn.request_id.clone(),
-                                    session: session.gateway_session(),
-                                    turn: running_turn.clone(),
-                                    delta,
-                                }));
+            // Run the streaming + turn execution loop inside a
+            // catch_unwind so that panics in the runtime are surfaced
+            // as error frames instead of silently killing the spawned
+            // task and leaving the user with no feedback.
+            let inner_result: Result<Result<Response, RuntimeError>, _> =
+                std::panic::AssertUnwindSafe(async {
+                    loop {
+                        tokio::select! {
+                            maybe_item = delta_rx.recv() => {
+                                match maybe_item {
+                                    Some(StreamItem::Text(delta)) => {
+                                        session.publish(GatewayServerFrame::AssistantDelta(GatewayAssistantDelta {
+                                            request_id: send_turn.request_id.clone(),
+                                            session: session.gateway_session(),
+                                            turn: running_turn.clone(),
+                                            delta,
+                                        }));
+                                    }
+                                    Some(StreamItem::Progress(progress)) => {
+                                        session.publish(GatewayServerFrame::TurnProgress(GatewayTurnProgress {
+                                            request_id: send_turn.request_id.clone(),
+                                            session: session.gateway_session(),
+                                            turn: running_turn.clone(),
+                                            progress,
+                                        }));
+                                    }
+                                    _ => {}
+                                }
                             }
-                            Some(StreamItem::Progress(progress)) => {
-                                session.publish(GatewayServerFrame::TurnProgress(GatewayTurnProgress {
-                                    request_id: send_turn.request_id.clone(),
-                                    session: session.gateway_session(),
-                                    turn: running_turn.clone(),
-                                    progress,
-                                }));
+                            result = &mut runtime_future => {
+                                return result;
                             }
-                            _ => {}
                         }
                     }
-                    result = &mut runtime_future => {
-                        let terminal_frame = match result {
-                            Ok(response) => {
-                                tracing::info!(turn_id = %send_turn.turn_id, "turn completed");
-                                GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
-                                    request_id: send_turn.request_id.clone(),
-                                    session: session.gateway_session(),
-                                    turn: GatewayTurnStatus {
-                                        turn_id: send_turn.turn_id.clone(),
-                                        state: GatewayTurnState::Completed,
-                                    },
-                                    response,
-                                })
-                            }
-                            Err(RuntimeError::Cancelled) => {
-                                tracing::info!(turn_id = %send_turn.turn_id, "turn cancelled");
-                                GatewayServerFrame::TurnCancelled(
-                                    GatewayTurnCancelled {
-                                        request_id: send_turn.request_id.clone(),
-                                        session: session.gateway_session(),
-                                        turn: GatewayTurnStatus {
-                                            turn_id: send_turn.turn_id.clone(),
-                                            state: GatewayTurnState::Cancelled,
-                                        },
-                                    },
-                                )
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    turn_id = %send_turn.turn_id,
-                                    %error,
-                                    "turn failed"
-                                );
-                                GatewayServerFrame::Error(GatewayErrorFrame {
-                                    request_id: Some(send_turn.request_id.clone()),
-                                    session: Some(session.gateway_session()),
-                                    turn: Some(GatewayTurnStatus {
-                                        turn_id: send_turn.turn_id.clone(),
-                                        state: GatewayTurnState::Failed,
-                                    }),
-                                    message: error.to_string(),
-                                })
-                            }
-                        };
+                })
+                .catch_unwind()
+                .await;
 
-                        {
-                            let mut active_turn = session.active_turn.lock().await;
-                            if active_turn
-                                .as_ref()
-                                .is_some_and(|turn| turn.turn_id == send_turn.turn_id)
-                            {
-                                *active_turn = None;
-                            }
-                        }
-                        *session.latest_terminal_frame.lock().await = Some(terminal_frame.clone());
-                        session.publish(terminal_frame);
-                        break;
-                    }
+            let terminal_frame = match inner_result {
+                Ok(Ok(response)) => {
+                    tracing::info!(turn_id = %send_turn.turn_id, "turn completed");
+                    GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
+                        request_id: send_turn.request_id.clone(),
+                        session: session.gateway_session(),
+                        turn: GatewayTurnStatus {
+                            turn_id: send_turn.turn_id.clone(),
+                            state: GatewayTurnState::Completed,
+                        },
+                        response,
+                    })
+                }
+                Ok(Err(RuntimeError::Cancelled)) => {
+                    tracing::info!(turn_id = %send_turn.turn_id, "turn cancelled");
+                    GatewayServerFrame::TurnCancelled(GatewayTurnCancelled {
+                        request_id: send_turn.request_id.clone(),
+                        session: session.gateway_session(),
+                        turn: GatewayTurnStatus {
+                            turn_id: send_turn.turn_id.clone(),
+                            state: GatewayTurnState::Cancelled,
+                        },
+                    })
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        turn_id = %send_turn.turn_id,
+                        %error,
+                        "turn failed"
+                    );
+                    GatewayServerFrame::Error(GatewayErrorFrame {
+                        request_id: Some(send_turn.request_id.clone()),
+                        session: Some(session.gateway_session()),
+                        turn: Some(GatewayTurnStatus {
+                            turn_id: send_turn.turn_id.clone(),
+                            state: GatewayTurnState::Failed,
+                        }),
+                        message: error.to_string(),
+                    })
+                }
+                Err(panic_payload) => {
+                    let panic_message = panic_payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    tracing::error!(
+                        turn_id = %send_turn.turn_id,
+                        panic = %panic_message,
+                        "turn panicked"
+                    );
+                    GatewayServerFrame::Error(GatewayErrorFrame {
+                        request_id: Some(send_turn.request_id.clone()),
+                        session: Some(session.gateway_session()),
+                        turn: Some(GatewayTurnStatus {
+                            turn_id: send_turn.turn_id.clone(),
+                            state: GatewayTurnState::Failed,
+                        }),
+                        message: format!(
+                            "internal error: turn panicked: {panic_message}"
+                        ),
+                    })
+                }
+            };
+
+            {
+                let mut active_turn = session.active_turn.lock().await;
+                if active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.turn_id == send_turn.turn_id)
+                {
+                    *active_turn = None;
                 }
             }
+            *session.latest_terminal_frame.lock().await = Some(terminal_frame.clone());
+            session.publish(terminal_frame);
         });
 
         None

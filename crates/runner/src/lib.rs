@@ -12,7 +12,7 @@ use std::{
 use bollard::{
     API_DEFAULT_VERSION, Docker,
     errors::Error as BollardError,
-    models::{ContainerCreateBody, HostConfig},
+    models::{ContainerCreateBody, HostConfig, RestartPolicy, RestartPolicyNameEnum},
     query_parameters::{
         CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
         StopContainerOptionsBuilder,
@@ -204,6 +204,13 @@ impl Runner {
                 }
             }
         }
+
+        // Remove any stale gateway endpoint marker left by a previous run
+        // so that the CLI (or any external poller) does not pick up the old
+        // value before the freshly-launched guest has a chance to write the
+        // new one.
+        let stale_marker = workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
+        let _ = fs::remove_file(&stale_marker);
 
         let mut launch = self.backend.launch(SandboxLaunchRequest {
             user_id: user_id.clone(),
@@ -1473,6 +1480,10 @@ async fn launch_docker_container_async(
                 .max_memory_mib
                 .map(|max_memory_mib| (max_memory_mib as i64) * 1024 * 1024),
             pids_limit: params.resource_limits.max_processes.map(i64::from),
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::ON_FAILURE),
+                maximum_retry_count: Some(5),
+            }),
             ..HostConfig::default()
         }),
         ..ContainerCreateBody::default()

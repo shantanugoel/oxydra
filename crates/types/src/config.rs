@@ -501,6 +501,19 @@ pub struct ShellConfig {
     /// Default: `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_operators: Option<bool>,
+    /// Environment variable names to forward into the shell container.
+    ///
+    /// Each entry is a bare env var name (e.g. `"MY_TOKEN"`). If the variable
+    /// is set in the runner's own environment, it is injected as `KEY=VALUE`
+    /// into the shell-vm container. API keys referenced by the agent config
+    /// are **not** forwarded to the shell container by default — only keys
+    /// listed here are.
+    ///
+    /// Additionally, CLI `--env` / `--env-file` entries whose key starts with
+    /// `SHELL_` are forwarded to the shell container with the prefix stripped
+    /// (e.g. `SHELL_NPM_TOKEN` becomes `NPM_TOKEN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_keys: Option<Vec<String>>,
 }
 
 /// Web search provider configuration.

@@ -660,6 +660,7 @@ mod tests {
             deny: None,
             replace_defaults: None,
             allow_operators: None,
+            env_keys: None,
         };
         let policy =
             WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
@@ -686,6 +687,7 @@ mod tests {
             deny: Some(vec!["ls".to_owned()]),
             replace_defaults: None,
             allow_operators: None,
+            env_keys: None,
         };
         let policy =
             WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
@@ -708,6 +710,7 @@ mod tests {
             deny: None,
             replace_defaults: Some(true),
             allow_operators: None,
+            env_keys: None,
         };
         let policy =
             WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
@@ -731,6 +734,7 @@ mod tests {
             deny: None,
             replace_defaults: None,
             allow_operators: None,
+            env_keys: None,
         };
         let policy =
             WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
@@ -752,6 +756,7 @@ mod tests {
             deny: None,
             replace_defaults: None,
             allow_operators: Some(true),
+            env_keys: None,
         };
         let policy =
             WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));

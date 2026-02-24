@@ -442,7 +442,10 @@ impl CrateSandboxBackend {
             resource_limits: request.resource_limits.clone(),
             labels,
             bootstrap_file: request.bootstrap_file.clone(),
-            extra_env: request.extra_env.clone(),
+            extra_env: match role {
+                RunnerGuestRole::OxydraVm => request.extra_env.clone(),
+                RunnerGuestRole::ShellVm => request.shell_env.clone(),
+            },
         }))?;
 
         Ok(RunnerGuestHandle::for_docker(

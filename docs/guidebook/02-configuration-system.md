@@ -182,6 +182,7 @@ pub struct ShellConfig {
     pub deny: Option<Vec<String>>,        // Commands to remove (supports glob patterns)
     pub replace_defaults: Option<bool>,   // Replace default allowlist entirely (default: false)
     pub allow_operators: Option<bool>,    // Allow shell operators &&, ||, | etc. (default: false)
+    pub env_keys: Option<Vec<String>>,    // Env var names to forward into the shell container
 }
 ```
 
@@ -191,6 +192,7 @@ pub struct ShellConfig {
 | `deny` | (none) | Commands or glob patterns to remove from the allowlist |
 | `replace_defaults` | `false` | If `true`, `allow` replaces the built-in defaults entirely |
 | `allow_operators` | `false` | If `true`, shell operators (`&&`, `\|\|`, `\|`, `;`, `>`, `<`, etc.) are permitted |
+| `env_keys` | (none) | Environment variable names to forward into the shell-vm container. API keys from the agent config are **not** forwarded to the shell by default — only keys listed here are. Additionally, CLI `--env` / `--env-file` entries with a `SHELL_` prefix are forwarded with the prefix stripped (e.g. `SHELL_NPM_TOKEN` → `NPM_TOKEN`). |
 
 Glob patterns support `*` as prefix, suffix, or both: `npm*` matches `npm`, `npmrc`; `*test*` matches `pytest`, `testing`.
 
@@ -363,6 +365,7 @@ provider_type = "anthropic"
 # deny = ["rm"]
 # replace_defaults = false
 # allow_operators = false
+# env_keys = ["NPM_TOKEN", "GH_TOKEN"]  # Forward these env vars into the shell container
 
 # --- Catalog settings ---
 

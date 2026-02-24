@@ -180,14 +180,30 @@ impl Runner {
 
         // Copy host agent config into the workspace internal directory so the
         // guest container can discover it. Also collect env vars referenced by
-        // the config (api_key_env, etc.) to forward into the container.
-        let mut extra_env = if sandbox_tier != SandboxTier::Process {
+        // the config (api_key_env, etc.) to forward into the oxydra-vm container.
+        // Shell-vm gets a separate set of env vars to avoid leaking API keys.
+        let (mut extra_env, mut shell_env) = if sandbox_tier != SandboxTier::Process {
             copy_agent_config_to_workspace(&workspace)?;
-            collect_config_env_vars()
+            let config_env = collect_config_env_vars();
+            let shell_config_env = collect_shell_config_env_keys();
+            (config_env, shell_config_env)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        extra_env.extend(request.extra_env);
+
+        // Split CLI/file env vars: SHELL_-prefixed entries go to shell-vm
+        // (with the prefix stripped), everything else goes to oxydra-vm.
+        for entry in request.extra_env {
+            if let Some((key, value)) = entry.split_once('=') {
+                if let Some(stripped) = key.strip_prefix("SHELL_") {
+                    if !stripped.is_empty() {
+                        shell_env.push(format!("{stripped}={value}"));
+                    }
+                } else {
+                    extra_env.push(entry);
+                }
+            }
+        }
 
         let mut launch = self.backend.launch(SandboxLaunchRequest {
             user_id: user_id.clone(),
@@ -202,6 +218,7 @@ impl Runner {
             requested_browser: capabilities.browser,
             bootstrap_file,
             extra_env,
+            shell_env,
         })?;
 
         let sidecar_endpoint = if launch.shell_available || launch.browser_available {
@@ -964,9 +981,13 @@ pub struct SandboxLaunchRequest {
     pub requested_browser: bool,
     /// Path to the bootstrap envelope JSON file, pre-written for Container/MicroVM tiers.
     pub bootstrap_file: Option<PathBuf>,
-    /// Extra environment variables to inject into the guest container.
-    /// Each entry is `KEY=VALUE`.
+    /// Extra environment variables to inject into the oxydra-vm container (`KEY=VALUE`).
+    /// Contains config-referenced API keys and non-`SHELL_`-prefixed CLI env vars.
     pub extra_env: Vec<String>,
+    /// Extra environment variables to inject into the shell-vm container (`KEY=VALUE`).
+    /// Contains `[tools.shell.env_keys]`-resolved vars and `SHELL_`-prefixed CLI
+    /// env vars (with the prefix stripped).
+    pub shell_env: Vec<String>,
 }
 
 impl SandboxLaunchRequest {
@@ -1315,6 +1336,7 @@ struct DockerContainerLaunchParams {
     labels: HashMap<String, String>,
     bootstrap_file: Option<PathBuf>,
     /// Extra environment variables to inject into the container (`KEY=VALUE`).
+    /// For OxydraVm this includes API keys; for ShellVm only shell-specific vars.
     extra_env: Vec<String>,
 }
 
@@ -1973,6 +1995,39 @@ fn collect_config_env_vars() -> Vec<String> {
     // Resolve each env var name against the runner's own environment.
     let mut result = Vec::new();
     for var_name in &env_var_names {
+        if let Ok(value) = std::env::var(var_name)
+            && !value.is_empty()
+        {
+            result.push(format!("{var_name}={value}"));
+        }
+    }
+    result
+}
+
+/// Collect environment variables specified in `[tools.shell.env_keys]` from
+/// the agent config. For each listed key name that is set in the runner's own
+/// environment, returns a `KEY=VALUE` pair for injection into the shell-vm
+/// container.
+fn collect_shell_config_env_keys() -> Vec<String> {
+    let agent_config = match load_agent_config(None, CliOverrides::default()) {
+        Ok(config) => config,
+        Err(_) => return Vec::new(),
+    };
+
+    let env_keys = match agent_config.tools.shell {
+        Some(ref shell) => match shell.env_keys {
+            Some(ref keys) => keys,
+            None => return Vec::new(),
+        },
+        None => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for var_name in env_keys {
+        let var_name = var_name.trim();
+        if var_name.is_empty() {
+            continue;
+        }
         if let Ok(value) = std::env::var(var_name)
             && !value.is_empty()
         {

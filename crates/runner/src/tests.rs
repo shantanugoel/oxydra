@@ -1295,6 +1295,81 @@ fn container_tier_launch_request_includes_extra_env() {
         "extra_env should contain CLI-provided env var; got: {:?}",
         launches[0].extra_env
     );
+    // Non-SHELL_-prefixed vars should NOT be in shell_env.
+    assert!(
+        !launches[0]
+            .shell_env
+            .contains(&"MY_KEY=my_value".to_owned()),
+        "shell_env should not contain non-SHELL_ env var; got: {:?}",
+        launches[0].shell_env
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shell_prefixed_env_vars_forwarded_to_shell_env_with_prefix_stripped() {
+    let root = temp_dir("shell-prefix-env");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+
+    let _startup = runner
+        .start_user_for_host(
+            RunnerStartRequest {
+                user_id: "alice".to_owned(),
+                insecure: false,
+                extra_env: vec![
+                    "SHELL_NPM_TOKEN=tok123".to_owned(),
+                    "REGULAR_KEY=val456".to_owned(),
+                ],
+            },
+            "linux",
+        )
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+
+    // SHELL_NPM_TOKEN should appear in shell_env as NPM_TOKEN (prefix stripped).
+    assert!(
+        launches[0]
+            .shell_env
+            .contains(&"NPM_TOKEN=tok123".to_owned()),
+        "shell_env should contain stripped SHELL_ env var; got: {:?}",
+        launches[0].shell_env
+    );
+
+    // SHELL_NPM_TOKEN should NOT appear in extra_env (oxydra-vm).
+    assert!(
+        !launches[0]
+            .extra_env
+            .iter()
+            .any(|e| e.contains("NPM_TOKEN")),
+        "extra_env should not contain SHELL_-prefixed env var; got: {:?}",
+        launches[0].extra_env
+    );
+
+    // REGULAR_KEY should be in extra_env (oxydra-vm).
+    assert!(
+        launches[0]
+            .extra_env
+            .contains(&"REGULAR_KEY=val456".to_owned()),
+        "extra_env should contain regular env var; got: {:?}",
+        launches[0].extra_env
+    );
+
+    // REGULAR_KEY should NOT be in shell_env.
+    assert!(
+        !launches[0]
+            .shell_env
+            .contains(&"REGULAR_KEY=val456".to_owned()),
+        "shell_env should not contain regular env var; got: {:?}",
+        launches[0].shell_env
+    );
 
     let _ = fs::remove_dir_all(root);
 }

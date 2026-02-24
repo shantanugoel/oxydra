@@ -107,6 +107,11 @@ jitter          = false # Add randomized jitter to backoff
 # deny = ["rm"]                      # Remove from defaults
 # replace_defaults = false           # If true, `allow` replaces the default list entirely
 # allow_operators = false            # If true, allow shell operators (&&, ||, |, etc.)
+# env_keys = ["NPM_TOKEN", "GH_TOKEN"]  # Env vars to forward into the shell container
+# Note: API keys from the agent config are NOT forwarded to the shell.
+# Use env_keys for shell-specific secrets. CLI --env entries prefixed
+# with SHELL_ are also forwarded with the prefix stripped
+# (e.g. --env SHELL_NPM_TOKEN=xxx becomes NPM_TOKEN in the shell).
 
 # --- Catalog resolution and validation ---
 [catalog]

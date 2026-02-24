@@ -28,9 +28,12 @@ The runner (`oxydra-runner`) is the host-side entry point for Oxydra. Its single
 │  └──────────────┘           └──────────────┘        │
 │                                                      │
 │  Workspace: <root>/<user_id>/                        │
-│    ├── shared/   (persistent data)                   │
-│    ├── tmp/      (temporary + gateway-endpoint)      │
-│    └── vault/    (sensitive credentials)             │
+│    ├── shared/     (persistent data)                 │
+│    ├── tmp/        (temporary + gateway-endpoint)    │
+│    ├── vault/      (sensitive credentials)           │
+│    ├── ipc/        (sockets, bootstrap files)        │
+│    ├── logs/       (guest process logs)              │
+│    └── internal/   (oxydra-vm only: DB, config)      │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -41,7 +44,7 @@ When you run `oxydra-runner`:
 1. **CLI parsing** — reads `--config`, `--user`, `--insecure`, `--tui` flags
 2. **Global config loading** — reads `runner.toml` (workspace root, user registrations, default tier, guest images)
 3. **User resolution** — if `--user` is omitted and exactly one user is configured, auto-selects; otherwise requires explicit `--user`
-4. **Workspace provisioning** — creates `<workspace_root>/<user_id>/{shared,tmp,vault}` if they don't exist
+4. **Workspace provisioning** — creates `<workspace_root>/<user_id>/{shared,tmp,vault,ipc,logs,internal}` if they don't exist
 5. **Backend selection** — based on `SandboxTier` (or `Process` if `--insecure`):
    - `MicroVm` → provisions via platform-specific VM backend
    - `Container` → provisions via Docker/OCI API (`bollard`)
@@ -210,6 +213,7 @@ Both the Container and macOS MicroVM tiers use the same `launch_docker_container
    - Bootstrap file bind-mounted read-only at `/run/oxydra/bootstrap` (OxydraVm only)
    - Resource limits (CPU, memory, PID)
    - Proxy environment variables for sandboxd-managed VMs
+   - Environment variables (see [Environment Variable Forwarding](#environment-variable-forwarding) below)
 5. **Starts** the container
 
 Container names follow the pattern `oxydra-{tier}-{user}-{role}` (e.g. `oxydra-container-alice-oxydra-vm`).
@@ -242,6 +246,18 @@ Uses `bollard` (Docker API) to connect to the local Docker daemon and launch con
 ### macOS (MicroVM Tier)
 
 Interacts with `docker-sandboxd` via a Unix socket to provision Docker-managed VMs, which host the guest containers. This adds an extra layer of indirection on macOS where native VM support differs from Linux. Guest images are transferred into the sandboxd VM via `docker save | docker --host unix://vm-socket load`.
+
+### Environment Variable Forwarding
+
+The runner collects environment variables from two sources and injects them into the **`oxydra-vm` container only**:
+
+1. **Config-referenced keys** — The runner scans the agent config for `api_key_env` fields in provider registry entries and `api_key_env`/`engine_id_env` in `[tools.web_search]`. For each referenced env var name that is set in the runner's own environment, a `KEY=VALUE` pair is forwarded. This is how provider API keys (e.g. `OPENAI_API_KEY`, `GEMINI_API_KEY`) reach the guest.
+
+2. **CLI-supplied env vars** — The `--env KEY=VALUE` (`-e`) and `--env-file <PATH>` flags inject additional variables. CLI values override file values on conflict.
+
+The **`shell-vm` container does not receive API keys or config-referenced env vars** to prevent credential exposure in shell output. Shell-specific env vars can be forwarded via the `[shell.env_keys]` config section or by using the `SHELL_` prefix convention with `--env`/`--env-file` (see Chapter 2 for details).
+
+Additionally, sandboxd-managed VMs (macOS MicroVM tier) receive HTTP/HTTPS proxy environment variables to route traffic through the sandbox daemon's proxy.
 
 ## Startup Status Reporting
 

@@ -92,6 +92,54 @@ fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> usize {
         .sum()
 }
 
+/// Compute the number of visual lines a raw string occupies when rendered
+/// with character-level wrapping at `inner_width` columns.
+///
+/// Each logical line (separated by `\n`) occupies at least one visual line.
+/// Lines wider than `inner_width` wrap into `ceil(display_width / inner_width)` rows.
+fn visual_line_count_for_text(content: &str, inner_width: usize) -> usize {
+    if inner_width == 0 {
+        return 1;
+    }
+    content
+        .split('\n')
+        .map(|line| {
+            let w = UnicodeWidthStr::width(line);
+            if w == 0 { 1 } else { w.div_ceil(inner_width) }
+        })
+        .sum()
+}
+
+/// Compute the visual row of the cursor within input content.
+///
+/// This accounts for both logical newlines and visual wrapping of lines
+/// that exceed `inner_width`. Each logical line before the cursor's line
+/// contributes `ceil(display_width / inner_width)` visual rows (minimum 1).
+/// The cursor's own logical line contributes `display_col / inner_width`
+/// additional rows (integer division, since the cursor sits at a specific
+/// column within the current visual row).
+fn cursor_visual_row(content: &str, cursor_byte_position: usize, inner_width: usize) -> usize {
+    if inner_width == 0 {
+        return 0;
+    }
+    let prefix = &content[..cursor_byte_position];
+    let logical_lines: Vec<&str> = prefix.split('\n').collect();
+
+    // Visual rows from complete logical lines (all except the last).
+    let mut visual_row: usize = 0;
+    for line in &logical_lines[..logical_lines.len() - 1] {
+        let w = UnicodeWidthStr::width(*line);
+        visual_row += if w == 0 { 1 } else { w.div_ceil(inner_width) };
+    }
+
+    // Wrapped row offset within the last (current) logical line.
+    let last_line = logical_lines.last().copied().unwrap_or("");
+    let display_col = UnicodeWidthStr::width(last_line);
+    visual_row += display_col / inner_width;
+
+    visual_row
+}
+
 /// Build styled [`Line`]s from the message history.
 ///
 /// Messages are separated by blank lines for readability. A trailing `|`
@@ -194,6 +242,9 @@ pub struct InputBar<'a> {
     /// running, e.g. `"[1/8] Executing tools: file_read"`.  When `None`
     /// and a turn is active, the title falls back to `" Waiting... "`.
     activity_message: Option<&'a str>,
+    /// Vertical scroll offset (in visual lines) applied to the input content
+    /// so the cursor line is always visible within the clamped height.
+    input_scroll: u16,
 }
 
 impl<'a> InputBar<'a> {
@@ -203,6 +254,7 @@ impl<'a> InputBar<'a> {
         is_disabled: bool,
         has_active_turn: bool,
         activity_message: Option<&'a str>,
+        input_scroll: u16,
     ) -> Self {
         Self {
             content,
@@ -210,6 +262,7 @@ impl<'a> InputBar<'a> {
             is_disabled,
             has_active_turn,
             activity_message,
+            input_scroll,
         }
     }
 
@@ -219,7 +272,10 @@ impl<'a> InputBar<'a> {
     /// Returns `None` when input is disabled (the cursor should be hidden).
     ///
     /// For multi-line content, the method accounts for logical newlines and
-    /// for visual line-wrapping within the inner widget width.
+    /// for visual line-wrapping within the inner widget width. Lines before
+    /// the cursor's logical line that wrap into multiple visual rows are
+    /// counted correctly. The result is adjusted by `input_scroll` so the
+    /// cursor stays within the visible portion of the input area.
     pub fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
         if self.is_disabled {
             return None;
@@ -229,19 +285,16 @@ impl<'a> InputBar<'a> {
             return None;
         }
 
+        let visual_row = cursor_visual_row(self.content, self.cursor_byte_position, inner_width);
+
+        // Cursor column within the current visual row.
         let prefix = &self.content[..self.cursor_byte_position];
-
-        // Split on logical newlines to find cursor row and column.
-        let lines: Vec<&str> = prefix.split('\n').collect();
-        let logical_row = lines.len() - 1;
-        let last_line = lines.last().copied().unwrap_or("");
-        let display_col = UnicodeWidthStr::width(last_line);
-
-        // Account for visual wrapping within the inner area width.
-        let wrapped_row_offset = display_col / inner_width;
+        let last_logical_line = prefix.rsplit('\n').next().unwrap_or("");
+        let display_col = UnicodeWidthStr::width(last_logical_line);
         let cursor_col_on_screen = display_col % inner_width;
 
-        let total_row = logical_row + wrapped_row_offset;
+        // Adjust for input scroll offset.
+        let adjusted_row = visual_row.saturating_sub(self.input_scroll as usize);
 
         // +1 for the left border.
         let cx = area
@@ -252,7 +305,7 @@ impl<'a> InputBar<'a> {
         let cy = area
             .y
             .saturating_add(1)
-            .saturating_add(u16::try_from(total_row).unwrap_or(u16::MAX));
+            .saturating_add(u16::try_from(adjusted_row).unwrap_or(u16::MAX));
         Some((cx, cy))
     }
 }
@@ -279,6 +332,7 @@ impl Widget for InputBar<'_> {
         Paragraph::new(self.content)
             .wrap(Wrap { trim: false })
             .block(block)
+            .scroll((self.input_scroll, 0))
             .render(area, buf);
     }
 }
@@ -377,20 +431,40 @@ impl Widget for StatusBar<'_> {
 /// - **Input bar** (3+ rows, grows with content) -- text input with border
 /// - **Status bar** (1 row) -- connection / session / turn info and key hints
 ///
-/// The input bar height is computed dynamically from the number of logical
-/// lines in the input buffer, capped at 10 rows total (8 content + 2 borders).
-/// This supports multi-line prompts entered via Alt+Enter.
+/// The input bar height is computed dynamically from the number of visual
+/// lines (accounting for both logical newlines and character-level wrapping),
+/// capped at 10 rows total (8 content + 2 borders). When content exceeds the
+/// maximum height, the input paragraph scrolls to keep the cursor visible.
 ///
 /// The `adapter_state` snapshot drives protocol-aware visuals: the streaming
 /// indicator appears when `active_turn_id` is set and the latest message is
 /// from the assistant; input is disabled during an active turn or when the
 /// connection is not in the [`ConnectionState::Connected`] state.
-pub fn render_app(frame: &mut Frame, model: &TuiViewModel, adapter_state: &TuiUiState) {
-    // Compute input area height based on buffer line count (at least 3, at most 10).
-    // We split on '\n' rather than using `lines()` so a trailing newline is
-    // counted as starting an additional line.
-    let line_count = model.input_buffer.split('\n').count().clamp(1, 8);
-    let input_height = (line_count + 2) as u16; // +2 for top/bottom borders
+pub fn render_app(frame: &mut Frame, model: &mut TuiViewModel, adapter_state: &TuiUiState) {
+    // Compute input area height based on visual line count (accounting for
+    // wrapping). The inner width is the terminal width minus two border
+    // columns. We clamp content lines to 1..=8 to keep the input area
+    // bounded while still growing for multi-line and wrapped content.
+    let inner_width = frame.area().width.saturating_sub(2) as usize;
+    let content_visual_lines = visual_line_count_for_text(&model.input_buffer, inner_width);
+    let cursor_row = cursor_visual_row(
+        &model.input_buffer,
+        model.input_cursor_position,
+        inner_width,
+    );
+    // Ensure the height accommodates the cursor row (which may be one past
+    // the last content row when the cursor sits at the end of a full line).
+    let visual_lines = content_visual_lines.max(cursor_row + 1).clamp(1, 8);
+    let input_height = (visual_lines + 2) as u16; // +2 for top/bottom borders
+
+    // Compute scroll offset to keep the cursor visible within the clamped
+    // height. When the cursor's visual row exceeds the visible content rows,
+    // scroll down so the cursor line is the last visible row.
+    let input_scroll: u16 = if cursor_row >= visual_lines {
+        u16::try_from(cursor_row - visual_lines + 1).unwrap_or(u16::MAX)
+    } else {
+        0
+    };
 
     let [message_area, input_area, status_area] = Layout::vertical([
         Constraint::Fill(1),
@@ -406,6 +480,17 @@ pub fn render_app(frame: &mut Frame, model: &TuiViewModel, adapter_state: &TuiUi
             model.message_history.last(),
             Some(ChatMessage::Assistant(_))
         );
+
+    // Compute and store the maximum scroll offset so that scroll_up/scroll_down
+    // can resolve the usize::MAX "pin to bottom" sentinel to a real position.
+    {
+        let block = Block::bordered().title(" Messages ");
+        let inner = block.inner(message_area);
+        let lines = build_message_lines(&model.message_history, is_streaming);
+        let total_lines = wrapped_line_count(&lines, inner.width);
+        let visible = inner.height as usize;
+        model.last_max_scroll = total_lines.saturating_sub(visible);
+    }
 
     frame.render_widget(
         MessagePane::new(&model.message_history, model.scroll_offset, is_streaming),
@@ -423,6 +508,7 @@ pub fn render_app(frame: &mut Frame, model: &TuiViewModel, adapter_state: &TuiUi
         is_disabled,
         adapter_state.active_turn_id.is_some(),
         adapter_state.activity_status.as_deref(),
+        input_scroll,
     );
     let cursor_pos = input_bar.cursor_position(input_area);
     frame.render_widget(input_bar, input_area);
@@ -455,7 +541,7 @@ mod tests {
     /// Render `render_app` into a `TestBackend` terminal and return the
     /// underlying buffer for cell-level assertions.
     fn render(
-        model: &TuiViewModel,
+        model: &mut TuiViewModel,
         adapter_state: &TuiUiState,
         width: u16,
         height: u16,
@@ -492,9 +578,9 @@ mod tests {
 
     #[test]
     fn connected_idle_shows_prompt_and_idle_status() {
-        let model = TuiViewModel::new();
+        let mut model = TuiViewModel::new();
         let adapter = default_connected_state();
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Status bar is the last row (y=23).
         let status = row_text(&buf, 23, 80);
@@ -536,7 +622,7 @@ mod tests {
             active_turn_id: Some("turn-1".to_owned()),
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Status bar should show "streaming" and cancel hint.
         let status = row_text(&buf, 23, 80);
@@ -577,7 +663,7 @@ mod tests {
             connected: false,
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         let status = row_text(&buf, 23, 80);
         assert!(
@@ -598,7 +684,7 @@ mod tests {
             connected: false,
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         let status = row_text(&buf, 23, 80);
         assert!(
@@ -615,7 +701,7 @@ mod tests {
             .push(ChatMessage::Error("something broke".to_owned()));
 
         let adapter = default_connected_state();
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Error message is in the message pane inner area at row 1.
         let error_row = row_text(&buf, 1, 80);
@@ -639,7 +725,7 @@ mod tests {
             .push(ChatMessage::System("session started".to_owned()));
 
         let adapter = default_connected_state();
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Row 1: user message with "you: " prefix.
         let user_row = row_text(&buf, 1, 80);
@@ -674,14 +760,14 @@ mod tests {
 
     #[test]
     fn input_bar_disabled_during_active_turn() {
-        let model = TuiViewModel::new();
+        let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
             runtime_session_id: Some("rt-1".to_owned()),
             active_turn_id: Some("turn-1".to_owned()),
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Input bar should show "Waiting..." when there's an active turn.
         let input_title_row = row_text(&buf, 20, 80);
@@ -704,7 +790,7 @@ mod tests {
             connected: false,
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Input bar should still show "Prompt" title (no active turn).
         let input_title_row = row_text(&buf, 20, 80);
@@ -716,7 +802,7 @@ mod tests {
 
     #[test]
     fn activity_message_appears_in_input_bar_title_during_active_turn() {
-        let model = TuiViewModel::new();
+        let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
             runtime_session_id: Some("rt-1".to_owned()),
@@ -724,7 +810,7 @@ mod tests {
             activity_status: Some("[2/8] Executing tools: file_read".to_owned()),
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         // Input bar title should show the activity message instead of "Waiting...".
         let input_title_row = row_text(&buf, 20, 80);
@@ -740,7 +826,7 @@ mod tests {
 
     #[test]
     fn waiting_title_shown_when_active_turn_has_no_activity_message() {
-        let model = TuiViewModel::new();
+        let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
             runtime_session_id: Some("rt-1".to_owned()),
@@ -748,7 +834,7 @@ mod tests {
             activity_status: None,
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         let input_title_row = row_text(&buf, 20, 80);
         assert!(
@@ -772,7 +858,7 @@ mod tests {
 
         // Render at 80x24. With 4-row input + 1-row status, message pane gets 19 rows.
         // Status bar stays on row 23 regardless.
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
         let status = row_text(&buf, 23, 80);
         assert!(
             status.contains("connected"),
@@ -789,18 +875,161 @@ mod tests {
 
     #[test]
     fn session_id_shown_in_status_bar() {
-        let model = TuiViewModel::new();
+        let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
             runtime_session_id: Some("my-session-42".to_owned()),
             ..TuiUiState::default()
         };
-        let buf = render(&model, &adapter, 80, 24);
+        let buf = render(&mut model, &adapter, 80, 24);
 
         let status = row_text(&buf, 23, 80);
         assert!(
             status.contains("session: my-session-42"),
             "status bar should show session id, got: {status}"
+        );
+    }
+
+    // ── visual_line_count_for_text ──────────────────────────────────────
+
+    #[test]
+    fn visual_line_count_empty_string() {
+        assert_eq!(visual_line_count_for_text("", 78), 1);
+    }
+
+    #[test]
+    fn visual_line_count_single_short_line() {
+        assert_eq!(visual_line_count_for_text("hello", 78), 1);
+    }
+
+    #[test]
+    fn visual_line_count_two_logical_lines() {
+        assert_eq!(visual_line_count_for_text("hello\nworld", 78), 2);
+    }
+
+    #[test]
+    fn visual_line_count_wrapping_long_line() {
+        // A line of 160 characters on a 78-column inner width wraps to 3 visual lines.
+        let long_line = "a".repeat(160);
+        assert_eq!(visual_line_count_for_text(&long_line, 78), 3);
+    }
+
+    #[test]
+    fn visual_line_count_exact_width_is_one_line() {
+        let exact = "a".repeat(78);
+        assert_eq!(visual_line_count_for_text(&exact, 78), 1);
+    }
+
+    #[test]
+    fn visual_line_count_one_over_width_wraps() {
+        let one_over = "a".repeat(79);
+        assert_eq!(visual_line_count_for_text(&one_over, 78), 2);
+    }
+
+    #[test]
+    fn visual_line_count_zero_width_returns_one() {
+        assert_eq!(visual_line_count_for_text("hello", 0), 1);
+    }
+
+    // ── cursor_visual_row ───────────────────────────────────────────────
+
+    #[test]
+    fn cursor_row_at_start() {
+        assert_eq!(cursor_visual_row("hello", 0, 78), 0);
+    }
+
+    #[test]
+    fn cursor_row_end_of_short_line() {
+        assert_eq!(cursor_visual_row("hello", 5, 78), 0);
+    }
+
+    #[test]
+    fn cursor_row_second_logical_line() {
+        // "hello\nworld", cursor at end (byte 11)
+        assert_eq!(cursor_visual_row("hello\nworld", 11, 78), 1);
+    }
+
+    #[test]
+    fn cursor_row_after_wrapped_prior_line() {
+        // First line is 160 chars (wraps to 3 visual lines on 78-wide),
+        // cursor is on the second logical line.
+        let content = format!("{}\nhi", "a".repeat(160));
+        let cursor_pos = 160 + 1 + 2; // 160 'a's + '\n' + "hi"
+        assert_eq!(cursor_visual_row(&content, cursor_pos, 78), 3);
+    }
+
+    #[test]
+    fn cursor_row_within_wrapped_line() {
+        // A single 160-char line, cursor at position 100.
+        let content = "a".repeat(160);
+        // Cursor at byte 100 → display_col 100, 100/78 = 1 → visual row 1
+        assert_eq!(cursor_visual_row(&content, 100, 78), 1);
+    }
+
+    #[test]
+    fn cursor_row_at_exact_wrap_boundary() {
+        // Cursor at exactly position 78 in a long line → wraps to row 1
+        let content = "a".repeat(160);
+        assert_eq!(cursor_visual_row(&content, 78, 78), 1);
+    }
+
+    // ── Long-line input wrapping in render_app ──────────────────────────
+
+    #[test]
+    fn long_input_line_expands_input_area_for_wrapping() {
+        let mut model = TuiViewModel::new();
+        // A single line that wraps to 2 visual lines at 78 inner width.
+        model.input_buffer = "a".repeat(100);
+        model.input_cursor_position = 100;
+
+        let adapter = default_connected_state();
+
+        // Terminal 80 wide → inner width = 78. 100 chars wraps to 2 visual lines.
+        // cursor_row = 100/78 = 1, so cursor is on row 1.
+        // visual_lines = max(2, 1+1) = 2.
+        // input_height = 4 (2 content + 2 borders).
+        // Input top border at row 24 - 4 - 1 = 19.
+        let buf = render(&mut model, &adapter, 80, 24);
+
+        let input_title_row = row_text(&buf, 19, 80);
+        assert!(
+            input_title_row.contains("Prompt"),
+            "input bar should expand for wrapped long line, got: {input_title_row}"
+        );
+
+        // Status bar should still be on the last row.
+        let status = row_text(&buf, 23, 80);
+        assert!(
+            status.contains("connected"),
+            "status bar should remain on last row, got: {status}"
+        );
+    }
+
+    #[test]
+    fn very_long_input_clamps_at_max_height_and_scrolls() {
+        let mut model = TuiViewModel::new();
+        // A single line long enough to wrap to ~10 visual lines (780 chars / 78 cols = 10).
+        model.input_buffer = "a".repeat(780);
+        model.input_cursor_position = 780;
+
+        let adapter = default_connected_state();
+
+        // visual_lines clamped to 8, input_height = 10.
+        // cursor_row = 780/78 = 10, which exceeds visual_lines (8),
+        // so input_scroll = 10 - 8 + 1 = 3.
+        // Input top border at row 24 - 10 - 1 = 13.
+        let buf = render(&mut model, &adapter, 80, 24);
+
+        let input_title_row = row_text(&buf, 13, 80);
+        assert!(
+            input_title_row.contains("Prompt"),
+            "input bar should clamp at max height, got: {input_title_row}"
+        );
+
+        let status = row_text(&buf, 23, 80);
+        assert!(
+            status.contains("connected"),
+            "status bar should remain on last row, got: {status}"
         );
     }
 }

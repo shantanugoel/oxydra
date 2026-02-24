@@ -7,10 +7,10 @@ use std::{
 use clap::{Parser, Subcommand};
 use runner::{
     GATEWAY_ENDPOINT_MARKER_FILE, Runner, RunnerControlTransportError, RunnerError,
-    RunnerStartRequest, RunnerTuiConnectRequest, catalog::CatalogError,
+    RunnerStartRequest, RunnerTuiConnectRequest, catalog::CatalogError, send_control_to_daemon,
 };
 use thiserror::Error;
-use types::init_tracing;
+use types::{RunnerControl, RunnerControlResponse, init_tracing};
 
 const DEFAULT_RUNNER_CONFIG_PATH: &str = ".oxydra/runner.toml";
 const TUI_BINARY_NAME: &str = "oxydra-tui";
@@ -23,6 +23,14 @@ enum CliCommand {
         #[command(subcommand)]
         action: CatalogAction,
     },
+    /// Start the runner daemon (launch sandbox + control socket)
+    Start,
+    /// Stop a running runner daemon
+    Stop,
+    /// Show the status of a running runner daemon
+    Status,
+    /// Restart the runner daemon (stop then start)
+    Restart,
 }
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
@@ -103,6 +111,17 @@ enum CliError {
         #[source]
         source: std::io::Error,
     },
+    #[error("no running server found for user `{user_id}`; start one with `runner start`")]
+    ServerNotRunning { user_id: String },
+    #[error(
+        "timed out waiting for server to stop for user `{user_id}`; \
+         the control socket at `{socket_path}` still exists after {timeout_secs}s"
+    )]
+    ServerStopTimeout {
+        user_id: String,
+        socket_path: PathBuf,
+        timeout_secs: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -117,9 +136,14 @@ fn run() -> Result<(), CliError> {
     init_tracing();
     let args = CliArgs::parse();
 
-    // Catalog subcommands don't require a runner config or user id.
-    if let Some(command) = args.command {
-        return handle_command(command);
+    // Subcommands that don't require a running user session.
+    match &args.command {
+        Some(CliCommand::Catalog { action }) => return handle_catalog_action(action.clone()),
+        Some(CliCommand::Start) => return handle_lifecycle(LifecycleAction::Start, &args),
+        Some(CliCommand::Stop) => return handle_lifecycle(LifecycleAction::Stop, &args),
+        Some(CliCommand::Status) => return handle_lifecycle(LifecycleAction::Status, &args),
+        Some(CliCommand::Restart) => return handle_lifecycle(LifecycleAction::Restart, &args),
+        None => {}
     }
 
     let runner = Runner::from_global_config_path(&args.config_path)?;
@@ -185,56 +209,10 @@ fn run() -> Result<(), CliError> {
     }
 
     if args.daemon {
-        let control_socket_path = startup.workspace.ipc.join("runner-control.sock");
-        let _ = std::fs::remove_file(&control_socket_path);
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|source| RunnerError::AsyncRuntimeInit { source })?;
-
-        rt.block_on(async {
-            let listener =
-                tokio::net::UnixListener::bind(&control_socket_path).map_err(|source| {
-                    RunnerError::GuestLifecycle {
-                        action: "bind_control_socket",
-                        role: runner::RunnerGuestRole::OxydraVm,
-                        program: "runner".to_owned(),
-                        source,
-                    }
-                })?;
-
-            println!("control_socket={}", control_socket_path.display());
-            tracing::info!(
-                socket_path = %control_socket_path.display(),
-                user_id = %startup.user_id,
-                "runner control socket listening"
-            );
-
-            let shutdown_signal = tokio::signal::ctrl_c();
-            tokio::pin!(shutdown_signal);
-
-            tokio::select! {
-                result = startup.serve_control_unix_listener(listener) => {
-                    result?;
-                }
-                _ = &mut shutdown_signal => {
-                    startup.shutdown()?;
-                }
-            }
-
-            let _ = std::fs::remove_file(&control_socket_path);
-            Ok::<(), CliError>(())
-        })?;
+        run_daemon(&mut startup)?;
     }
 
     Ok(())
-}
-
-fn handle_command(command: CliCommand) -> Result<(), CliError> {
-    match command {
-        CliCommand::Catalog { action } => handle_catalog_action(action),
-    }
 }
 
 fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {
@@ -280,6 +258,297 @@ fn resolve_user_id(user_id: Option<String>, runner: &Runner) -> Result<String, C
             "multiple users configured; pass --user <user_id>".to_owned(),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+//  Lifecycle subcommand handlers (start / stop / status / restart)
+// ---------------------------------------------------------------------------
+
+/// Internal enum to dispatch lifecycle actions without duplicating the
+/// `CliCommand` variant names in function signatures.
+enum LifecycleAction {
+    Start,
+    Stop,
+    Status,
+    Restart,
+}
+
+fn handle_lifecycle(action: LifecycleAction, args: &CliArgs) -> Result<(), CliError> {
+    let runner = Runner::from_global_config_path(&args.config_path)?;
+    let user_id = resolve_user_id(args.user_id.clone(), &runner)?;
+
+    match action {
+        LifecycleAction::Start => server_start(&runner, &user_id, args),
+        LifecycleAction::Stop => server_stop(&runner, &user_id),
+        LifecycleAction::Status => server_status(&runner, &user_id),
+        LifecycleAction::Restart => server_restart(&runner, &user_id, args),
+    }
+}
+
+fn server_start(runner: &Runner, user_id: &str, args: &CliArgs) -> Result<(), CliError> {
+    let extra_env = parse_extra_env_vars(&args.env_vars, args.env_file.as_deref())?;
+    let mut startup = runner.start_user(RunnerStartRequest {
+        user_id: user_id.to_owned(),
+        insecure: args.insecure,
+        extra_env,
+    })?;
+
+    print_startup_info(&startup);
+
+    match wait_for_gateway_endpoint(&startup.workspace.ipc, GATEWAY_ENDPOINT_WAIT_TIMEOUT) {
+        Ok(gateway_endpoint) => {
+            println!("gateway_endpoint={gateway_endpoint}");
+            tracing::info!(
+                %gateway_endpoint,
+                user_id = %startup.user_id,
+                "runner started guest"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "could not read gateway endpoint marker");
+        }
+    }
+
+    run_daemon(&mut startup)
+}
+
+fn server_stop(runner: &Runner, user_id: &str) -> Result<(), CliError> {
+    let workspace = runner.provision_user_workspace(user_id)?;
+    let socket_path = workspace.control_socket_path();
+
+    if !socket_path.exists() {
+        return Err(CliError::ServerNotRunning {
+            user_id: user_id.to_owned(),
+        });
+    }
+
+    let response = send_control_to_daemon(
+        &socket_path,
+        &RunnerControl::ShutdownUser {
+            user_id: user_id.to_owned(),
+        },
+    )
+    .map_err(|source| {
+        if source.is_connection_refused() {
+            CliError::ServerNotRunning {
+                user_id: user_id.to_owned(),
+            }
+        } else {
+            CliError::ControlTransport(source)
+        }
+    })?;
+
+    match response {
+        RunnerControlResponse::ShutdownStatus(status) => {
+            println!("user_id={}", status.user_id);
+            println!("shutdown={}", status.shutdown);
+            if status.already_stopped {
+                println!("already_stopped=true");
+            }
+            if let Some(ref message) = status.message {
+                println!("message={message}");
+            }
+            Ok(())
+        }
+        RunnerControlResponse::Error(error) => Err(CliError::Arguments(format!(
+            "server reported error: {}",
+            error.message
+        ))),
+        _ => Err(CliError::Arguments(
+            "unexpected response to shutdown request".to_owned(),
+        )),
+    }
+}
+
+fn server_status(runner: &Runner, user_id: &str) -> Result<(), CliError> {
+    let workspace = runner.provision_user_workspace(user_id)?;
+    let socket_path = workspace.control_socket_path();
+
+    if !socket_path.exists() {
+        return Err(CliError::ServerNotRunning {
+            user_id: user_id.to_owned(),
+        });
+    }
+
+    let response =
+        send_control_to_daemon(&socket_path, &RunnerControl::HealthCheck).map_err(|source| {
+            if source.is_connection_refused() {
+                CliError::ServerNotRunning {
+                    user_id: user_id.to_owned(),
+                }
+            } else {
+                CliError::ControlTransport(source)
+            }
+        })?;
+
+    match response {
+        RunnerControlResponse::HealthStatus(status) => {
+            println!("user_id={}", status.user_id);
+            println!("healthy={}", status.healthy);
+            println!("sandbox_tier={:?}", status.sandbox_tier);
+            println!("shell_available={}", status.shell_available);
+            println!("browser_available={}", status.browser_available);
+            println!(
+                "sidecar_available={}",
+                status.startup_status.sidecar_available
+            );
+            println!("shutdown={}", status.shutdown);
+            if let Some(ref message) = status.message {
+                println!("message={message}");
+            }
+            if let Some(ref log_dir) = status.log_dir {
+                println!("log_dir={log_dir}");
+            }
+            if let Some(pid) = status.runtime_pid {
+                println!("runtime_pid={pid}");
+            }
+            if let Some(ref container) = status.runtime_container_name {
+                println!("runtime_container_name={container}");
+            }
+            for reason in &status.startup_status.degraded_reasons {
+                println!("degraded_reason={:?}:{}", reason.code, reason.detail);
+            }
+            Ok(())
+        }
+        RunnerControlResponse::Error(error) => Err(CliError::Arguments(format!(
+            "server reported error: {}",
+            error.message
+        ))),
+        _ => Err(CliError::Arguments(
+            "unexpected response to health check request".to_owned(),
+        )),
+    }
+}
+
+fn server_restart(runner: &Runner, user_id: &str, args: &CliArgs) -> Result<(), CliError> {
+    let workspace = runner.provision_user_workspace(user_id)?;
+    let socket_path = workspace.control_socket_path();
+
+    if socket_path.exists() {
+        match send_control_to_daemon(
+            &socket_path,
+            &RunnerControl::ShutdownUser {
+                user_id: user_id.to_owned(),
+            },
+        ) {
+            Ok(RunnerControlResponse::ShutdownStatus(status)) => {
+                if status.shutdown {
+                    println!("stopped previous server for user `{}`", status.user_id);
+                }
+            }
+            Ok(RunnerControlResponse::Error(error)) => {
+                eprintln!(
+                    "warning: shutdown reported error: {}; proceeding with restart",
+                    error.message
+                );
+            }
+            Err(error) => {
+                if !error.is_connection_refused() {
+                    eprintln!(
+                        "warning: could not connect to running server: {error}; \
+                         proceeding with restart"
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        wait_for_socket_removal(&socket_path, user_id)?;
+    }
+
+    server_start(runner, user_id, args)
+}
+
+/// Runs the daemon loop: binds a control socket and serves health-check and
+/// shutdown requests until the user session is shut down or Ctrl+C is received.
+fn run_daemon(startup: &mut runner::RunnerStartup) -> Result<(), CliError> {
+    let control_socket_path = startup.workspace.control_socket_path();
+    let _ = std::fs::remove_file(&control_socket_path);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| RunnerError::AsyncRuntimeInit { source })?;
+
+    rt.block_on(async {
+        let listener = tokio::net::UnixListener::bind(&control_socket_path).map_err(|source| {
+            RunnerError::GuestLifecycle {
+                action: "bind_control_socket",
+                role: runner::RunnerGuestRole::OxydraVm,
+                program: "runner".to_owned(),
+                source,
+            }
+        })?;
+
+        println!("control_socket={}", control_socket_path.display());
+        tracing::info!(
+            socket_path = %control_socket_path.display(),
+            user_id = %startup.user_id,
+            "runner control socket listening"
+        );
+
+        let shutdown_signal = tokio::signal::ctrl_c();
+        tokio::pin!(shutdown_signal);
+
+        tokio::select! {
+            result = startup.serve_control_unix_listener(listener) => {
+                result?;
+            }
+            _ = &mut shutdown_signal => {
+                startup.shutdown()?;
+            }
+        }
+
+        let _ = std::fs::remove_file(&control_socket_path);
+        Ok::<(), CliError>(())
+    })?;
+
+    Ok(())
+}
+
+fn print_startup_info(startup: &runner::RunnerStartup) {
+    println!("user_id={}", startup.user_id);
+    println!("sandbox_tier={:?}", startup.sandbox_tier);
+    println!("workspace_root={}", startup.workspace.root.display());
+    println!("shell_available={}", startup.shell_available);
+    println!("browser_available={}", startup.browser_available);
+    println!(
+        "sidecar_available={}",
+        startup.startup_status.sidecar_available
+    );
+    for reason in &startup.startup_status.degraded_reasons {
+        println!("degraded_reason={:?}:{}", reason.code, reason.detail);
+    }
+    for warning in &startup.warnings {
+        println!("warning={warning}");
+    }
+}
+
+/// Waits for the control socket file to be removed by a shutting-down daemon,
+/// with a timeout. If the socket still exists after the timeout, removes it
+/// forcefully so a new daemon can bind.
+fn wait_for_socket_removal(socket_path: &std::path::Path, user_id: &str) -> Result<(), CliError> {
+    const SOCKET_REMOVAL_TIMEOUT: Duration = Duration::from_secs(10);
+    let started = std::time::Instant::now();
+    while socket_path.exists() {
+        if started.elapsed() >= SOCKET_REMOVAL_TIMEOUT {
+            eprintln!(
+                "warning: control socket still exists after {}s; removing it",
+                SOCKET_REMOVAL_TIMEOUT.as_secs()
+            );
+            let _ = std::fs::remove_file(socket_path);
+            if socket_path.exists() {
+                return Err(CliError::ServerStopTimeout {
+                    user_id: user_id.to_owned(),
+                    socket_path: socket_path.to_path_buf(),
+                    timeout_secs: SOCKET_REMOVAL_TIMEOUT.as_secs(),
+                });
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
 }
 
 /// Locate the `oxydra-tui` binary in PATH and spawn it with the discovered
@@ -634,5 +903,59 @@ mod tests {
         let vars = vec!["KEY=val=ue".to_owned()];
         let result = parse_extra_env_vars(&vars, None).expect("value with = should be allowed");
         assert_eq!(result, vec!["KEY=val=ue"]);
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_start_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "start"]).expect("start should parse");
+        assert_eq!(args.command, Some(CliCommand::Start));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_stop_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "stop"]).expect("stop should parse");
+        assert_eq!(args.command, Some(CliCommand::Stop));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_status_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "status"]).expect("status should parse");
+        assert_eq!(args.command, Some(CliCommand::Status));
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_restart_subcommand() {
+        let args = CliArgs::try_parse_from(["runner", "restart"]).expect("restart should parse");
+        assert_eq!(args.command, Some(CliCommand::Restart));
+    }
+
+    #[test]
+    fn parse_cli_args_stop_with_user_flag() {
+        let args = CliArgs::try_parse_from(["runner", "--user", "alice", "stop"])
+            .expect("stop with --user should parse");
+        assert_eq!(args.user_id.as_deref(), Some("alice"));
+        assert_eq!(args.command, Some(CliCommand::Stop));
+    }
+
+    #[test]
+    fn parse_cli_args_start_with_env_flags() {
+        let args = CliArgs::try_parse_from(["runner", "-e", "MY_KEY=val", "--insecure", "start"])
+            .expect("start with env flags should parse");
+        assert_eq!(args.command, Some(CliCommand::Start));
+        assert_eq!(args.env_vars, vec!["MY_KEY=val"]);
+        assert!(args.insecure);
+    }
+
+    #[test]
+    fn server_not_running_error_mentions_user_id_and_hint() {
+        let err = CliError::ServerNotRunning {
+            user_id: "alice".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("alice"), "error should mention user id: {msg}");
+        assert!(
+            msg.contains("runner start"),
+            "error should suggest `runner start`: {msg}"
+        );
     }
 }

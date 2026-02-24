@@ -51,10 +51,19 @@ pub struct TuiViewModel {
     /// [`MAX_HISTORY_MESSAGES`] to prevent unbounded memory growth.
     pub message_history: Vec<ChatMessage>,
     /// Vertical scroll position in the message pane (line offset from top).
+    ///
+    /// The sentinel value [`usize::MAX`] means "pin to bottom" and is resolved
+    /// to the actual maximum scroll offset during rendering.
     pub scroll_offset: usize,
     /// When true, new output auto-scrolls the message pane. Set to `true` when
     /// the user is at the bottom; manual scrolling disables it.
     pub auto_scroll: bool,
+    /// Maximum scroll offset as computed during the most recent render pass.
+    ///
+    /// Used by [`scroll_up`] and [`scroll_down`] to resolve the `usize::MAX`
+    /// sentinel into an actual position before decrementing/incrementing.
+    /// Updated by [`render_app`](crate::widgets::render_app) each frame.
+    pub last_max_scroll: usize,
     /// Local input text being composed by the user.
     pub input_buffer: String,
     /// Cursor byte-index within [`input_buffer`].
@@ -80,6 +89,7 @@ impl TuiViewModel {
             message_history: Vec::new(),
             scroll_offset: 0,
             auto_scroll: true,
+            last_max_scroll: 0,
             input_buffer: String::new(),
             input_cursor_position: 0,
             status_line: String::new(),
@@ -222,7 +232,15 @@ impl TuiViewModel {
     // ── Scrolling ───────────────────────────────────────────────────────
 
     /// Scroll up by one line.
+    ///
+    /// When `scroll_offset` is the `usize::MAX` sentinel (meaning "pinned to
+    /// bottom"), it is first resolved to `last_max_scroll` — the actual
+    /// maximum offset from the most recent render — before decrementing.
     pub fn scroll_up(&mut self) {
+        // Resolve the "pin to bottom" sentinel to a real position.
+        if self.scroll_offset == usize::MAX {
+            self.scroll_offset = self.last_max_scroll;
+        }
         if self.scroll_offset > 0 {
             self.scroll_offset -= 1;
             self.auto_scroll = false;
@@ -230,10 +248,23 @@ impl TuiViewModel {
     }
 
     /// Scroll down by one line.
+    ///
+    /// When `scroll_offset` is the `usize::MAX` sentinel it is first
+    /// resolved to `last_max_scroll` before incrementing. The offset is
+    /// capped at `last_max_scroll` so the user cannot scroll past the
+    /// bottom; reaching the bottom re-enables auto-scroll.
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
-        // Note: auto_scroll is not re-enabled here; the caller should use
-        // `scroll_to_bottom()` when the user explicitly jumps to the end.
+        // Resolve the "pin to bottom" sentinel to a real position.
+        if self.scroll_offset == usize::MAX {
+            self.scroll_offset = self.last_max_scroll;
+        }
+        if self.scroll_offset < self.last_max_scroll {
+            self.scroll_offset = self.scroll_offset.saturating_add(1);
+        }
+        // Re-enable auto-scroll when the user reaches the bottom.
+        if self.scroll_offset >= self.last_max_scroll {
+            self.auto_scroll = true;
+        }
     }
 
     /// Jump to the bottom of the message pane and re-enable auto-scroll.
@@ -642,9 +673,36 @@ mod tests {
     #[test]
     fn scroll_down_increments() {
         let mut vm = TuiViewModel::new();
+        // last_max_scroll must be > 0 for scroll_down to increment.
+        vm.last_max_scroll = 10;
         vm.scroll_down();
 
         assert_eq!(vm.scroll_offset, 1);
+    }
+
+    #[test]
+    fn scroll_down_at_max_is_noop() {
+        let mut vm = TuiViewModel::new();
+        vm.last_max_scroll = 5;
+        vm.scroll_offset = 5;
+        vm.auto_scroll = false;
+        vm.scroll_down();
+
+        assert_eq!(vm.scroll_offset, 5);
+        // Reaching the bottom re-enables auto-scroll.
+        assert!(vm.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_reaching_bottom_reenables_auto_scroll() {
+        let mut vm = TuiViewModel::new();
+        vm.last_max_scroll = 3;
+        vm.scroll_offset = 2;
+        vm.auto_scroll = false;
+        vm.scroll_down();
+
+        assert_eq!(vm.scroll_offset, 3);
+        assert!(vm.auto_scroll);
     }
 
     #[test]
@@ -656,6 +714,31 @@ mod tests {
 
         assert!(vm.auto_scroll);
         assert_eq!(vm.scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn scroll_up_from_sentinel_resolves_to_last_max_scroll() {
+        let mut vm = TuiViewModel::new();
+        vm.scroll_offset = usize::MAX; // "pinned to bottom"
+        vm.last_max_scroll = 20;
+        vm.scroll_up();
+
+        // Should resolve usize::MAX → 20, then decrement to 19.
+        assert_eq!(vm.scroll_offset, 19);
+        assert!(!vm.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_from_sentinel_resolves_and_stays() {
+        let mut vm = TuiViewModel::new();
+        vm.scroll_offset = usize::MAX;
+        vm.last_max_scroll = 20;
+        vm.auto_scroll = false;
+        vm.scroll_down();
+
+        // Should resolve usize::MAX → 20, then stay at 20 (already at max).
+        assert_eq!(vm.scroll_offset, 20);
+        assert!(vm.auto_scroll); // re-enabled because at bottom
     }
 
     #[test]
@@ -800,6 +883,7 @@ mod tests {
         );
         assert_eq!(from_new.scroll_offset, from_default.scroll_offset);
         assert_eq!(from_new.auto_scroll, from_default.auto_scroll);
+        assert_eq!(from_new.last_max_scroll, from_default.last_max_scroll);
         assert_eq!(from_new.input_buffer, from_default.input_buffer);
         assert_eq!(
             from_new.input_cursor_position,

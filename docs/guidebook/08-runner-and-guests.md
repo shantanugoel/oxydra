@@ -31,7 +31,8 @@ The runner (`oxydra-runner`) is the host-side entry point for Oxydra. Its single
 │    ├── shared/     (persistent data)                 │
 │    ├── tmp/        (temporary + gateway-endpoint)    │
 │    ├── vault/      (sensitive credentials)           │
-│    ├── ipc/        (sockets, bootstrap files)        │
+│    ├── ipc/        (sockets, bootstrap files,        │
+│    │                runner-control.sock)              │
 │    ├── logs/       (guest process logs)              │
 │    └── internal/   (oxydra-vm only: DB, config)      │
 └─────────────────────────────────────────────────────┘
@@ -41,7 +42,7 @@ The runner (`oxydra-runner`) is the host-side entry point for Oxydra. Its single
 
 When you run `oxydra-runner`:
 
-1. **CLI parsing** — reads `--config`, `--user`, `--insecure`, `--tui` flags
+1. **CLI parsing** — reads `--config`, `--user`, `--insecure`, `--tui` flags and the subcommand (`start`, `stop`, `status`, `restart`, `catalog`)
 2. **Global config loading** — reads `runner.toml` (workspace root, user registrations, default tier, guest images)
 3. **User resolution** — if `--user` is omitted and exactly one user is configured, auto-selects; otherwise requires explicit `--user`
 4. **Workspace provisioning** — creates `<workspace_root>/<user_id>/{shared,tmp,vault,ipc,logs,internal}` if they don't exist
@@ -50,6 +51,46 @@ When you run `oxydra-runner`:
    - `Container` → provisions via Docker/OCI API (`bollard`)
    - `Process` → spawns as local child process
 6. **Guest launch** — starts `oxydra-vm` binary with bootstrap data
+7. **Daemon loop** — binds a Unix control socket at `<workspace>/ipc/runner-control.sock` and serves lifecycle requests until shutdown or Ctrl+C
+
+## CLI Lifecycle Commands
+
+The runner CLI provides four top-level subcommands for managing daemon sessions:
+
+| Command | Description |
+|---------|-------------|
+| `runner start` | Launch guest sandbox and enter daemon mode |
+| `runner stop` | Send shutdown to a running daemon via its control socket |
+| `runner status` | Query health and capability info from a running daemon |
+| `runner restart` | Stop an existing daemon (if running), then start a new one |
+
+All commands accept `--config`, `--user`, and other global flags. The `start` and `restart` commands also accept `--insecure`, `--env`, and `--env-file`.
+
+```bash
+# Start a session
+runner --user alice start
+
+# Check status
+runner --user alice status
+
+# Stop
+runner --user alice stop
+
+# Restart with extra env vars
+runner --user alice -e API_KEY=xxx restart
+```
+
+### Control Socket Protocol
+
+Each daemon binds a Unix domain socket at `<workspace>/ipc/runner-control.sock`. Lifecycle commands connect to this socket, send a length-prefixed JSON frame containing a `RunnerControl` request, and read back a `RunnerControlResponse`.
+
+- **`stop`** sends `RunnerControl::ShutdownUser` — the daemon shuts down the guest, responds with `ShutdownStatus`, removes the socket file, and exits.
+- **`status`** sends `RunnerControl::HealthCheck` — the daemon responds with `HealthStatus` containing user id, sandbox tier, tool availability, runtime PID, and degraded reasons.
+- **`restart`** sends a shutdown, waits for the socket file to be removed (with a 10-second timeout and forced cleanup), then starts a new daemon.
+
+If the control socket doesn't exist or the connection is refused, `stop` and `status` return a clear "no running server" error with a hint to use `runner start`.
+
+The legacy `--daemon` flag continues to work for backward compatibility — it enters the same daemon loop as `runner start` after the existing startup sequence.
 
 ## Bootstrap Envelope
 

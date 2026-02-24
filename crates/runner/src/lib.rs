@@ -64,6 +64,7 @@ const LOGS_DIR_NAME: &str = "logs";
 const IPC_DIR_NAME: &str = "ipc";
 const INTERNAL_DIR_NAME: &str = ".oxydra";
 pub const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
+pub const RUNNER_CONTROL_SOCKET_NAME: &str = "runner-control.sock";
 
 const FIRECRACKER_BINARY: &str = "firecracker";
 const PROCESS_EXECUTABLE_ENV_KEY: &str = "OXYDRA_VM_PROCESS_EXECUTABLE";
@@ -748,6 +749,13 @@ pub struct UserWorkspace {
     pub internal: PathBuf,
 }
 
+impl UserWorkspace {
+    /// Returns the path to the runner control socket in the IPC directory.
+    pub fn control_socket_path(&self) -> PathBuf {
+        self.ipc.join(RUNNER_CONTROL_SOCKET_NAME)
+    }
+}
+
 #[derive(Debug)]
 pub struct RunnerStartup {
     pub user_id: String,
@@ -904,6 +912,9 @@ impl RunnerStartup {
         loop {
             let (stream, _) = listener.accept().await?;
             self.serve_control_stream(stream).await?;
+            if self.shutdown_complete {
+                return Ok(());
+            }
         }
     }
 
@@ -944,6 +955,17 @@ pub enum RunnerControlTransportError {
         actual_bytes: usize,
         max_bytes: usize,
     },
+}
+
+impl RunnerControlTransportError {
+    /// Returns `true` when the underlying I/O error is `ConnectionRefused`,
+    /// which typically means no daemon is listening on the control socket.
+    pub fn is_connection_refused(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport(error) if error.kind() == io::ErrorKind::ConnectionRefused
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2344,6 +2366,35 @@ async fn receive_gateway_server_frame(
             }
         }
     }
+}
+
+/// Sends a control request to a running runner daemon via its Unix control
+/// socket and returns the daemon's response. Creates a short-lived tokio
+/// runtime internally so it can be called from synchronous CLI code.
+pub fn send_control_to_daemon(
+    control_socket_path: &Path,
+    request: &RunnerControl,
+) -> Result<RunnerControlResponse, RunnerControlTransportError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(RunnerControlTransportError::Transport)?;
+    rt.block_on(async {
+        let mut stream = tokio::net::UnixStream::connect(control_socket_path)
+            .await
+            .map_err(RunnerControlTransportError::Transport)?;
+        let payload = serde_json::to_vec(request)?;
+        write_runner_control_frame(&mut stream, &payload).await?;
+        let response_frame = read_runner_control_frame(&mut stream)
+            .await?
+            .ok_or_else(|| {
+                RunnerControlTransportError::Transport(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "daemon closed connection without sending a response",
+                ))
+            })?;
+        serde_json::from_slice(&response_frame).map_err(RunnerControlTransportError::Serialization)
+    })
 }
 
 fn validate_user_id(user_id: &str) -> Result<&str, RunnerError> {

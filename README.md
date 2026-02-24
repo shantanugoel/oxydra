@@ -93,19 +93,34 @@ export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 **Process tier** (no Docker required, isolation is degraded):
 
 ```bash
-cargo run -p runner -- --config .oxydra/runner.toml --user alice --insecure --daemon
+cargo run -p runner -- --config .oxydra/runner.toml --user alice --insecure start
 ```
-
-The process-tier runner exits immediately unless you pass `--daemon`. Keep it running in one
-terminal, then connect the TUI in another.
 
 **Container tier** (requires guest images from step 3):
 
 ```bash
-cargo run -p runner -- --config .oxydra/runner.toml --user alice
+cargo run -p runner -- --config .oxydra/runner.toml --user alice start
 ```
 
-The runner spawns two containers per user: one for the agent runtime (`oxydra-vm`) and one for the shell/browser sidecar (`shell-vm`). Both use host networking and bind-mount the user workspace.
+Both commands launch the guest sandbox and enter daemon mode, listening on a Unix control socket for lifecycle commands.
+
+Check the status of a running session:
+
+```bash
+cargo run -p runner -- --config .oxydra/runner.toml --user alice status
+```
+
+Stop a running session:
+
+```bash
+cargo run -p runner -- --config .oxydra/runner.toml --user alice stop
+```
+
+Restart (stop + start) in one command:
+
+```bash
+cargo run -p runner -- --config .oxydra/runner.toml --user alice restart
+```
 
 Connect the TUI to a running session:
 

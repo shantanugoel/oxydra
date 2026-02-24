@@ -37,9 +37,9 @@ pub enum AppAction {
     /// Alt+Enter inserts a literal newline ([`AppAction::Char('\n')`]) instead
     /// of submitting, enabling multi-line prompts.
     Submit,
-    /// Scroll message pane up by one line (arrow up or mouse scroll up).
+    /// Scroll message pane up by one line (arrow up).
     ScrollUp,
-    /// Scroll message pane down by one line (arrow down or mouse scroll down).
+    /// Scroll message pane down by one line (arrow down).
     ScrollDown,
     /// Page up — scroll message pane up by one page.
     PageUp,
@@ -134,13 +134,12 @@ fn reader_thread(sender: mpsc::Sender<AppAction>) {
 
 /// Map a raw crossterm [`Event`] to an [`AppAction`], if applicable.
 ///
-/// Returns `None` for events we do not handle (mouse events without scroll,
-/// focus events, key releases, etc.).
+/// Returns `None` for events we do not handle (focus events, mouse events,
+/// key releases, etc.).
 fn map_event(event: Event) -> Option<AppAction> {
     match event {
         Event::Key(key) => map_key_event(key),
         Event::Resize(cols, rows) => Some(AppAction::Resize(cols, rows)),
-        // Mouse scroll could be mapped here in the future.
         _ => None,
     }
 }

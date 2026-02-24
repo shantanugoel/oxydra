@@ -838,6 +838,20 @@ fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
+/// Creates a short temp directory under `/tmp` for Unix socket tests.
+/// macOS limits Unix socket paths to 104 bytes (SUN_LEN), so the standard
+/// `env::temp_dir()` path (which can be ~50 chars on its own) is too long
+/// when combined with workspace subdirectories.
+fn short_temp_dir(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic")
+        .as_nanos();
+    let path = PathBuf::from(format!("/tmp/ox-{label}-{unique}"));
+    fs::create_dir_all(&path).expect("short temp dir should be creatable");
+    path
+}
+
 fn wait_for_file(path: &Path) {
     for _ in 0..100 {
         if path.exists() {
@@ -1369,6 +1383,182 @@ fn shell_prefixed_env_vars_forwarded_to_shell_env_with_prefix_stripped() {
             .contains(&"REGULAR_KEY=val456".to_owned()),
         "shell_env should not contain regular env var; got: {:?}",
         launches[0].shell_env
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+// ---------------------------------------------------------------------------
+//  Daemon control socket and exit-after-shutdown tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_control_socket_path_uses_runner_constant() {
+    let root = temp_dir("workspace-socket-path");
+    let workspace = provision_user_workspace(root.join("workspace-root"), "alice")
+        .expect("workspace should provision");
+    let socket_path = workspace.control_socket_path();
+    assert!(
+        socket_path.ends_with(RUNNER_CONTROL_SOCKET_NAME),
+        "control socket path should use the constant: {}",
+        socket_path.display()
+    );
+    assert!(
+        socket_path.starts_with(&workspace.ipc),
+        "control socket should be under workspace.ipc: {}",
+        socket_path.display()
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn serve_control_unix_listener_exits_after_shutdown() {
+    let root = temp_dir("ctl-exit");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend)
+        .expect("runner should initialize");
+    let startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    // Use a short path under /tmp to stay within macOS SUN_LEN (104 bytes).
+    let socket_dir = short_temp_dir("ce");
+    let socket_path = socket_dir.join("s.sock");
+    let _ = fs::remove_file(&socket_path);
+    let listener =
+        tokio::net::UnixListener::bind(&socket_path).expect("test control socket should bind");
+
+    let server_task = tokio::spawn(async move {
+        let mut startup = startup;
+        let result = startup.serve_control_unix_listener(listener).await;
+        (startup, result)
+    });
+
+    // Connect as a client, send shutdown, verify the listener task completes.
+    let mut client = tokio::net::UnixStream::connect(&socket_path)
+        .await
+        .expect("client should connect to control socket");
+
+    let shutdown_request = RunnerControl::ShutdownUser {
+        user_id: "alice".to_owned(),
+    };
+    let payload = serde_json::to_vec(&shutdown_request).expect("shutdown request should serialize");
+    write_runner_control_frame(&mut client, &payload)
+        .await
+        .expect("should send shutdown frame");
+
+    let response_frame = read_runner_control_frame(&mut client)
+        .await
+        .expect("should read response frame")
+        .expect("response frame should be present");
+    let response: RunnerControlResponse =
+        serde_json::from_slice(&response_frame).expect("response should decode");
+    assert!(
+        matches!(
+            response,
+            RunnerControlResponse::ShutdownStatus(ref status) if status.shutdown
+        ),
+        "shutdown response should confirm shutdown: {response:?}"
+    );
+
+    // Drop the client connection so the listener can process the disconnect.
+    drop(client);
+
+    // The serve_control_unix_listener should return because shutdown_complete is true.
+    let (startup, result) = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+        .await
+        .expect("server task should complete within timeout")
+        .expect("server task should not panic");
+
+    result.expect("serve_control_unix_listener should return Ok after shutdown");
+    assert!(
+        startup
+            .startup_status
+            .has_reason_code(StartupDegradedReasonCode::RuntimeShutdown),
+        "startup should be marked as shut down"
+    );
+
+    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_dir_all(socket_dir);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn send_control_to_daemon_receives_health_response() {
+    let root = temp_dir("ctl-hlth");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend)
+        .expect("runner should initialize");
+    let startup = runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    // Use a short path under /tmp to stay within macOS SUN_LEN (104 bytes).
+    let socket_dir = short_temp_dir("ch");
+    let socket_path = socket_dir.join("s.sock");
+    let _ = fs::remove_file(&socket_path);
+    let listener =
+        tokio::net::UnixListener::bind(&socket_path).expect("test control socket should bind");
+
+    let socket_path_clone = socket_path.clone();
+    let server_task = tokio::spawn(async move {
+        let mut startup = startup;
+        let _ = startup.serve_control_unix_listener(listener).await;
+        startup
+    });
+
+    // Use send_control_to_daemon from a blocking context (like the CLI does).
+    let response = tokio::task::spawn_blocking(move || {
+        send_control_to_daemon(&socket_path_clone, &RunnerControl::HealthCheck)
+    })
+    .await
+    .expect("blocking task should not panic")
+    .expect("send_control_to_daemon should succeed");
+
+    assert!(
+        matches!(
+            response,
+            RunnerControlResponse::HealthStatus(ref status) if status.healthy
+        ),
+        "health check response should be healthy: {response:?}"
+    );
+
+    // Shut down via a second connection to let the server task exit.
+    let socket_path_clone2 = socket_path.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        send_control_to_daemon(
+            &socket_path_clone2,
+            &RunnerControl::ShutdownUser {
+                user_id: "alice".to_owned(),
+            },
+        )
+    })
+    .await;
+
+    let _ = server_task.await;
+    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_dir_all(socket_dir);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn send_control_to_daemon_reports_connection_refused_for_missing_socket() {
+    let root = temp_dir("ctl-miss");
+    let nonexistent_socket = root.join("x.sock");
+
+    let result = send_control_to_daemon(&nonexistent_socket, &RunnerControl::HealthCheck);
+    assert!(result.is_err(), "missing socket should fail");
+    let err = result.unwrap_err();
+    assert!(
+        err.is_connection_refused() || matches!(err, RunnerControlTransportError::Transport(_)),
+        "error should be a transport error: {err}"
     );
 
     let _ = fs::remove_dir_all(root);

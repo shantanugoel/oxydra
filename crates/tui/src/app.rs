@@ -123,7 +123,8 @@ const FORCE_QUIT_WINDOW: Duration = Duration::from_secs(2);
 /// restoration even on unwind.
 ///
 /// Mouse capture is intentionally **not** enabled so users retain native
-/// terminal mouse selection and copy/paste behaviour.
+/// terminal mouse selection and copy/paste behaviour. Scrolling is
+/// keyboard-only (arrow keys, Page Up/Down).
 struct TerminalGuard;
 
 impl TerminalGuard {
@@ -392,7 +393,7 @@ impl TuiApp {
         // 6. Initial draw (shows "connecting…" status).
         {
             let adapter_state = self.adapter.state_snapshot().await;
-            terminal.draw(|frame| render_app(frame, &self.view_model, &adapter_state))?;
+            terminal.draw(|frame| render_app(frame, &mut self.view_model, &adapter_state))?;
         }
 
         // 7. Main select! loop.
@@ -577,7 +578,7 @@ impl TuiApp {
             // Single draw point per iteration.
             if needs_draw {
                 let adapter_state = self.adapter.state_snapshot().await;
-                terminal.draw(|frame| render_app(frame, &self.view_model, &adapter_state))?;
+                terminal.draw(|frame| render_app(frame, &mut self.view_model, &adapter_state))?;
             }
         }
 

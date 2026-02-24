@@ -468,9 +468,7 @@ impl GatewayServer {
                             turn_id: send_turn.turn_id.clone(),
                             state: GatewayTurnState::Failed,
                         }),
-                        message: format!(
-                            "internal error: turn panicked: {panic_message}"
-                        ),
+                        message: format!("internal error: turn panicked: {panic_message}"),
                     })
                 }
             };

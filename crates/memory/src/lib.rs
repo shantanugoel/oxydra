@@ -27,8 +27,8 @@ use indexing::{
     prepare_index_document_with_extra_metadata,
 };
 use schema::{
-    enable_foreign_keys, ensure_migration_bookkeeping, rollback_quietly, run_pending_migrations,
-    verify_required_schema,
+    enable_foreign_keys, enable_wal_mode, ensure_migration_bookkeeping, rollback_quietly,
+    run_pending_migrations, verify_required_schema,
 };
 
 const RETRIEVAL_WEIGHT_SUM_EPSILON: f64 = 1e-6;
@@ -172,14 +172,17 @@ impl LibsqlMemory {
     async fn initialize(&self) -> Result<(), MemoryError> {
         let conn = self.connect()?;
         enable_foreign_keys(&conn).await?;
+        enable_wal_mode(&conn).await?;
         ensure_migration_bookkeeping(&conn).await?;
         run_pending_migrations(&conn).await?;
         verify_required_schema(&conn).await?;
         Ok(())
     }
 
-    pub fn connect_for_scheduler(&self) -> Result<Connection, MemoryError> {
-        self.connect()
+    pub async fn connect_for_scheduler(&self) -> Result<Connection, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+        Ok(conn)
     }
 
     fn connect(&self) -> Result<Connection, MemoryError> {

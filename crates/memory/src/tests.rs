@@ -1527,7 +1527,10 @@ async fn scheduler_store_create_get_roundtrip() {
 
     let db_path = temp_db_path("sched-create-get");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -1575,7 +1578,10 @@ async fn scheduler_store_count_and_limit() {
 
     let db_path = temp_db_path("sched-count");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -1617,7 +1623,10 @@ async fn scheduler_store_search_with_filters() {
 
     let db_path = temp_db_path("sched-search");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -1715,7 +1724,10 @@ async fn scheduler_store_delete_cascades_runs() {
 
     let db_path = temp_db_path("sched-delete");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -1784,7 +1796,10 @@ async fn scheduler_store_update_pause_resume() {
 
     let db_path = temp_db_path("sched-pause");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -1845,7 +1860,10 @@ async fn scheduler_store_due_schedules_filters_correctly() {
 
     let db_path = temp_db_path("sched-due");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let past = "2020-01-01T00:00:00Z".to_owned();
@@ -1932,7 +1950,10 @@ async fn scheduler_store_record_run_and_prune_history() {
 
     let db_path = temp_db_path("sched-runs");
     let backend = local_memory_backend(&db_path).await;
-    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let conn = backend
+        .connect_for_scheduler()
+        .await
+        .expect("scheduler conn");
     let store = LibsqlSchedulerStore::new(conn);
 
     let now = chrono::Utc::now().to_rfc3339();

@@ -516,7 +516,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
     // Build scheduler store and register scheduler tools when enabled.
     let scheduler_store: Option<Arc<dyn memory::SchedulerStore>> = if config.scheduler.enabled {
         if let Some(ref backend) = memory_backend {
-            match backend.connect_for_scheduler() {
+            match backend.connect_for_scheduler().await {
                 Ok(conn) => {
                     let store: Arc<dyn memory::SchedulerStore> =
                         Arc::new(memory::LibsqlSchedulerStore::new(conn));

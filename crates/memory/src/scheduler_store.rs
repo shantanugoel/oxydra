@@ -363,67 +363,90 @@ impl SchedulerStore for LibsqlSchedulerStore {
     ) -> Result<(), SchedulerError> {
         let run_status = run_status_to_str(run.status);
 
-        // Insert run record
         self.conn
-            .execute(
-                "INSERT INTO schedule_runs (
-                    run_id, schedule_id, started_at, finished_at,
-                    status, output_summary, turn_count, cost, notified
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    run.run_id.as_str(),
-                    run.schedule_id.as_str(),
-                    run.started_at.as_str(),
-                    run.finished_at.as_str(),
-                    run_status,
-                    run.output_summary.as_deref(),
-                    run.turn_count,
-                    run.cost,
-                    run.notified
-                ],
-            )
+            .execute("BEGIN IMMEDIATE TRANSACTION", libsql::params![])
             .await
             .map_err(|e| store_error(e.to_string()))?;
 
-        // Compute consecutive_failures update
-        let consecutive_failures_expr = match run.status {
-            ScheduleRunStatus::Failed => "consecutive_failures + 1",
-            _ => "0",
-        };
+        let transaction_result = async {
+            // Insert run record
+            self.conn
+                .execute(
+                    "INSERT INTO schedule_runs (
+                        run_id, schedule_id, started_at, finished_at,
+                        status, output_summary, turn_count, cost, notified
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        run.run_id.as_str(),
+                        run.schedule_id.as_str(),
+                        run.started_at.as_str(),
+                        run.finished_at.as_str(),
+                        run_status,
+                        run.output_summary.as_deref(),
+                        run.turn_count,
+                        run.cost,
+                        run.notified
+                    ],
+                )
+                .await
+                .map_err(|e| store_error(e.to_string()))?;
 
-        // Update schedule
-        let status_sql = match new_status {
-            Some(s) => format!("status = '{}'", schedule_status_to_str(s)),
-            None => "status = status".to_owned(),
-        };
-        let next_run_sql = match &next_run_at {
-            Some(_) => "next_run_at = ?4".to_owned(),
-            None => "next_run_at = NULL".to_owned(),
-        };
+            // Compute consecutive_failures update
+            let consecutive_failures_expr = match run.status {
+                ScheduleRunStatus::Failed => "consecutive_failures + 1",
+                _ => "0",
+            };
 
-        let sql = format!(
-            "UPDATE schedules SET
-                last_run_at = ?1,
-                last_run_status = ?2,
-                consecutive_failures = {consecutive_failures_expr},
-                {next_run_sql},
-                {status_sql},
-                updated_at = ?3
-             WHERE schedule_id = ?5"
-        );
+            // Update schedule
+            let status_sql = match new_status {
+                Some(s) => format!("status = '{}'", schedule_status_to_str(s)),
+                None => "status = status".to_owned(),
+            };
+            let next_run_sql = match &next_run_at {
+                Some(_) => "next_run_at = ?4".to_owned(),
+                None => "next_run_at = NULL".to_owned(),
+            };
 
-        let now = chrono::Utc::now().to_rfc3339();
+            let sql = format!(
+                "UPDATE schedules SET
+                    last_run_at = ?1,
+                    last_run_status = ?2,
+                    consecutive_failures = {consecutive_failures_expr},
+                    {next_run_sql},
+                    {status_sql},
+                    updated_at = ?3
+                 WHERE schedule_id = ?5"
+            );
+
+            let now = chrono::Utc::now().to_rfc3339();
+            self.conn
+                .execute(
+                    &sql,
+                    params![
+                        run.finished_at.as_str(),
+                        run_status,
+                        now,
+                        next_run_at.as_deref(),
+                        schedule_id
+                    ],
+                )
+                .await
+                .map_err(|e| store_error(e.to_string()))?;
+
+            Ok::<(), SchedulerError>(())
+        }
+        .await;
+
+        if let Err(error) = transaction_result {
+            let _ = self
+                .conn
+                .execute("ROLLBACK TRANSACTION", libsql::params![])
+                .await;
+            return Err(error);
+        }
+
         self.conn
-            .execute(
-                &sql,
-                params![
-                    run.finished_at.as_str(),
-                    run_status,
-                    now,
-                    next_run_at.as_deref(),
-                    schedule_id
-                ],
-            )
+            .execute("COMMIT TRANSACTION", libsql::params![])
             .await
             .map_err(|e| store_error(e.to_string()))?;
 

@@ -130,6 +130,35 @@ pub(crate) async fn enable_foreign_keys(conn: &Connection) -> Result<(), MemoryE
     conn.execute("PRAGMA foreign_keys = ON", params![])
         .await
         .map_err(|error| initialization_error(error.to_string()))?;
+    // busy_timeout is per-connection: wait up to 5 s when the database is locked
+    // instead of immediately returning SQLITE_BUSY.
+    // busy_timeout returns a result row, so we use query() not execute().
+    let mut rows = conn
+        .query("PRAGMA busy_timeout = 5000", params![])
+        .await
+        .map_err(|error| initialization_error(error.to_string()))?;
+    let _ = rows.next().await;
+    Ok(())
+}
+
+/// Apply database-level pragmas that improve concurrent access.
+///
+/// - **WAL mode** allows readers to proceed while a writer holds the lock,
+///   dramatically reducing lock contention compared to the default
+///   `journal_mode=delete`.
+///
+/// This only needs to be called once (typically during initialisation) because
+/// `journal_mode` is persisted across connections. The per-connection
+/// `busy_timeout` pragma is applied in [`enable_foreign_keys`] which is called
+/// on every new connection.
+pub(crate) async fn enable_wal_mode(conn: &Connection) -> Result<(), MemoryError> {
+    // journal_mode returns a result row, so we must use query() not execute().
+    let mut rows = conn
+        .query("PRAGMA journal_mode = WAL", params![])
+        .await
+        .map_err(|error| initialization_error(format!("failed to enable WAL mode: {error}")))?;
+    // Consume the result row to complete the pragma.
+    let _ = rows.next().await;
     Ok(())
 }
 

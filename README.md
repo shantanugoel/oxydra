@@ -12,6 +12,10 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 - **Gateway and channels** — WebSocket-based gateway with pluggable channel adapters (TUI included)
 - **Configuration** — Layered config (files, env vars, CLI overrides) with deterministic precedence and validation
 
+## CAUTION - WIP
+
+Not ready for use by anyone except me, yet! Unless you love dipping your toes in pre-pre-alpha software.
+
 ## Quick start
 
 ### 1. Create configuration

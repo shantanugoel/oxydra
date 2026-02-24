@@ -19,7 +19,7 @@ use types::{
 
 #[tokio::test]
 async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
-    let temp_path = temp_file_path("runtime-e2e");
+    let (workspace, temp_path) = temp_file_path("runtime-e2e");
     fs::write(&temp_path, "tokio = \"1\"\nserde = \"1\"\n").expect("test file should be writable");
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
@@ -92,7 +92,9 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
     );
 
     let mut tools = ToolRegistry::default();
-    tools.register("file_read", ReadTool::default());
+    let wasm_runner: std::sync::Arc<dyn tools::WasmToolRunner> =
+        std::sync::Arc::new(tools::HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+    tools.register("file_read", ReadTool::new(wasm_runner));
     let runtime = AgentRuntime::new(
         Box::new(provider),
         tools,
@@ -162,7 +164,7 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
             .is_some_and(|content| content.contains("tokio = \"1\""))
     );
 
-    let _ = fs::remove_file(&temp_path);
+    let _ = fs::remove_dir_all(&workspace);
 }
 
 #[tokio::test]
@@ -181,7 +183,7 @@ async fn live_openrouter_tool_call_smoke() {
     catalog
         .validate(&ProviderId::from("openai"), &model_id)
         .expect("OPENROUTER_MODEL must exist in pinned openai model catalog");
-    let temp_path = temp_file_path("runtime-live");
+    let (workspace, temp_path) = temp_file_path("runtime-live");
     fs::write(&temp_path, "RUNTIME_LIVE_SMOKE_MARKER\n").expect("test file should be writable");
 
     let provider = OpenAIProvider::new(
@@ -194,7 +196,9 @@ async fn live_openrouter_tool_call_smoke() {
     );
 
     let mut tools = ToolRegistry::default();
-    tools.register("file_read", ReadTool::default());
+    let wasm_runner: std::sync::Arc<dyn tools::WasmToolRunner> =
+        std::sync::Arc::new(tools::HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+    tools.register("file_read", ReadTool::new(wasm_runner));
     let runtime = AgentRuntime::new(
         Box::new(provider),
         tools,
@@ -270,7 +274,7 @@ async fn live_openrouter_tool_call_smoke() {
         "live run should produce assistant content"
     );
 
-    let _ = fs::remove_file(&temp_path);
+    let _ = fs::remove_dir_all(&workspace);
 }
 
 fn test_catalog(model: ModelId) -> ModelCatalog {
@@ -313,17 +317,26 @@ fn test_catalog(model: ModelId) -> ModelCatalog {
     ModelCatalog::new(providers)
 }
 
-fn temp_file_path(label: &str) -> std::path::PathBuf {
-    let mut path = env::current_dir().unwrap_or_else(|_| env::temp_dir());
+/// Create a temporary workspace under `/tmp` with `shared/`, `tmp/`, `vault/`
+/// subdirectories and return a file path inside `shared/`.
+fn temp_file_path(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be monotonic")
         .as_nanos();
-    path.push(format!(
+    let workspace = env::temp_dir().join(format!(
+        "oxydra-{label}-ws-{}-{unique}",
+        std::process::id()
+    ));
+    for dir in ["shared", "tmp", "vault"] {
+        fs::create_dir_all(workspace.join(dir))
+            .expect("workspace subdirectory should be created");
+    }
+    let file = workspace.join("shared").join(format!(
         "oxydra-{label}-{}-{unique}.txt",
         std::process::id()
     ));
-    path
+    (workspace, file)
 }
 
 fn spawn_scripted_server(

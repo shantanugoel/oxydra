@@ -150,15 +150,6 @@ impl WasmWorkspaceMounts {
         }
     }
 
-    pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Self {
-        let workspace_root = workspace_root.as_ref().to_path_buf();
-        Self {
-            shared: workspace_root.clone(),
-            tmp: workspace_root.clone(),
-            vault: workspace_root,
-        }
-    }
-
     pub fn from_mount_roots(
         shared: impl AsRef<Path>,
         tmp: impl AsRef<Path>,
@@ -241,10 +232,6 @@ impl HostWasmToolRunner {
 
     pub fn for_bootstrap_workspace(workspace_root: impl AsRef<Path>) -> Self {
         Self::new(WasmWorkspaceMounts::for_bootstrap_workspace(workspace_root))
-    }
-
-    pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Self {
-        Self::new(WasmWorkspaceMounts::for_direct_workspace(workspace_root))
     }
 
     fn next_request_id(&self, tool_name: &str) -> String {
@@ -1001,7 +988,7 @@ mod tests {
     async fn web_fetch_blocks_metadata_endpoint_targets() {
         let _env_lock = env_lock().lock().await;
         let workspace = unique_workspace("web-block-meta");
-        let runner = HostWasmToolRunner::for_direct_workspace(&workspace);
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace);
         let denied = runner
             .invoke(
                 "web_fetch",
@@ -1026,7 +1013,7 @@ mod tests {
     async fn web_fetch_blocks_private_rfc1918_targets() {
         let _env_lock = env_lock().lock().await;
         let workspace = unique_workspace("web-block-rfc1918");
-        let runner = HostWasmToolRunner::for_direct_workspace(&workspace);
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace);
         let denied = runner
             .invoke(
                 "web_fetch",

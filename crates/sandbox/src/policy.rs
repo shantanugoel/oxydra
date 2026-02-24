@@ -85,15 +85,6 @@ impl WorkspaceSecurityPolicy {
         )
     }
 
-    pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Self {
-        let workspace_root = workspace_root.as_ref().to_path_buf();
-        Self::new(
-            vec![workspace_root.clone()],
-            vec![workspace_root.clone()],
-            vec![workspace_root.join(INTERNAL_DIR_NAME)],
-        )
-    }
-
     fn new(
         read_only_roots: Vec<PathBuf>,
         read_write_roots: Vec<PathBuf>,
@@ -488,12 +479,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_policy_denies_access_to_internal_directory() {
+    fn policy_denies_read_and_write_to_internal_directory() {
         let workspace = unique_temp_workspace("policy-deny-internal-direct");
         let internal_file = workspace.join(INTERNAL_DIR_NAME).join("memory.db");
         fs::write(&internal_file, "secret data").expect("internal file should be writable");
 
-        let policy = WorkspaceSecurityPolicy::for_direct_workspace(&workspace);
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
 
         let read_result = policy.enforce(
             "file_read",
@@ -554,12 +545,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_policy_allows_normal_files_outside_internal_directory() {
+    fn policy_allows_normal_files_in_shared_directory() {
         let workspace = unique_temp_workspace("policy-allow-non-internal");
-        let normal_file = workspace.join("readme.txt");
+        let normal_file = workspace.join(SHARED_DIR_NAME).join("readme.txt");
         fs::write(&normal_file, "ok").expect("normal file should be writable");
 
-        let policy = WorkspaceSecurityPolicy::for_direct_workspace(&workspace);
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
 
         let result = policy.enforce(
             "file_read",
@@ -568,7 +559,7 @@ mod tests {
         );
         assert!(
             result.is_ok(),
-            "direct workspace policy should allow reads of normal files"
+            "workspace policy should allow reads of normal files inside shared/"
         );
 
         let _ = fs::remove_dir_all(workspace);

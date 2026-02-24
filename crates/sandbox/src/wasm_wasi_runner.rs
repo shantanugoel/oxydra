@@ -116,11 +116,6 @@ impl WasmWasiToolRunner {
         Self::new(WasmWorkspaceMounts::for_bootstrap_workspace(workspace_root))
     }
 
-    /// Create a runner where all three mounts point to the same directory.
-    pub fn for_direct_workspace(workspace_root: impl AsRef<Path>) -> Result<Self, SandboxError> {
-        Self::new(WasmWorkspaceMounts::for_direct_workspace(workspace_root))
-    }
-
     fn next_request_id(&self, tool_name: &str) -> String {
         let n = self.request_counter.fetch_add(1, Ordering::Relaxed) + 1;
         format!("{tool_name}-{n}")
@@ -661,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn wasm_runner_web_fetch_blocks_metadata_endpoint() {
         let workspace_root = unique_workspace("wasi-web-block");
-        let runner = WasmWasiToolRunner::for_direct_workspace(&workspace_root)
+        let runner = WasmWasiToolRunner::for_bootstrap_workspace(&workspace_root)
             .expect("runner should initialize");
 
         let err = runner

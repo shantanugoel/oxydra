@@ -13,9 +13,9 @@ use async_trait::async_trait;
 #[cfg(feature = "wasm-isolation")]
 use sandbox::WasmWasiToolRunner;
 use sandbox::{
-    HostWasmToolRunner, SecurityPolicy, SessionStatus, SessionUnavailable,
+    SecurityPolicy, SessionStatus, SessionUnavailable,
     SessionUnavailableReason, ShellSession, ShellSessionConfig, VsockShellSession,
-    WasmCapabilityProfile, WasmToolRunner, WasmWorkspaceMounts, WorkspaceSecurityPolicy,
+    WasmCapabilityProfile, WorkspaceSecurityPolicy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -43,6 +43,9 @@ pub use memory_tools::{
     MEMORY_DELETE_TOOL_NAME, MEMORY_SAVE_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
     MEMORY_UPDATE_TOOL_NAME, register_memory_tools,
 };
+// Re-export sandbox types needed by downstream test crates to construct
+// workspace-scoped WASM runners without depending on `sandbox` directly.
+pub use sandbox::{HostWasmToolRunner, WasmToolRunner, WasmWorkspaceMounts};
 
 pub const FILE_READ_TOOL_NAME: &str = "file_read";
 pub const FILE_SEARCH_TOOL_NAME: &str = "file_search";
@@ -762,7 +765,7 @@ fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
     let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     #[cfg(feature = "wasm-isolation")]
     {
-        match WasmWasiToolRunner::for_direct_workspace(&workspace_root) {
+        match WasmWasiToolRunner::for_bootstrap_workspace(&workspace_root) {
             Ok(runner) => return Arc::new(runner),
             Err(e) => {
                 tracing::warn!(
@@ -771,7 +774,7 @@ fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
             }
         }
     }
-    Arc::new(HostWasmToolRunner::for_direct_workspace(workspace_root))
+    Arc::new(HostWasmToolRunner::for_bootstrap_workspace(workspace_root))
 }
 
 fn runtime_wasm_runner(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Arc<dyn WasmToolRunner> {
@@ -821,7 +824,7 @@ fn workspace_security_policy(
         }
         None => {
             let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            WorkspaceSecurityPolicy::for_direct_workspace(workspace_root)
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(workspace_root)
         }
     }
 }

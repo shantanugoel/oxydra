@@ -48,6 +48,8 @@ The active tier is surfaced in startup logs and health/status endpoints. In `Mic
 - Best-effort Landlock (Linux) or Seatbelt (macOS) filesystem restrictions are applied
 - A prominent warning is emitted that isolation is degraded
 
+**Process tier applies the same WASM mount policies and security policies as Container/MicroVM tiers.** The `--insecure` flag means only that the isolation boundary is software-enforced (policy checks + best-effort OS sandboxing) rather than hardware-enforced (container namespaces, VM boundaries). Tools are still restricted to `shared/`, `tmp/`, and `vault/` subdirectories, and the `.oxydra/` internal directory is denied at the policy level. The workspace subdirectory structure (`shared/`, `tmp/`, `vault/`, `.oxydra/`) is provisioned identically across all tiers.
+
 ## WASM Tool Isolation
 
 **File:** `sandbox/src/wasm_runner.rs`

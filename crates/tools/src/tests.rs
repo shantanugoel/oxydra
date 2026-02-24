@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -28,9 +28,10 @@ async fn file_read(path: String) -> String {
 
 #[tokio::test]
 async fn read_tool_executes_through_tool_contract() {
-    let path = temp_path("read");
+    let (workspace, runner) = temp_wasm_runner("read");
+    let path = shared_file_path(&workspace, "read");
     fs::write(&path, "hello from read tool").expect("test setup should create file");
-    let tool = ReadTool::default();
+    let tool = ReadTool::new(runner);
     let contract: &dyn Tool = &tool;
 
     let result = contract
@@ -42,13 +43,14 @@ async fn read_tool_executes_through_tool_contract() {
         .expect("read should succeed");
 
     assert_eq!(result, "hello from read tool");
-    cleanup_file(&path);
+    let _ = fs::remove_dir_all(workspace);
 }
 
 #[tokio::test]
 async fn write_tool_writes_file_content() {
-    let path = temp_path("write");
-    let tool = WriteTool::default();
+    let (workspace, runner) = temp_wasm_runner("write");
+    let path = shared_file_path(&workspace, "write");
+    let tool = WriteTool::new(runner);
 
     let result = tool
         .execute(
@@ -65,14 +67,15 @@ async fn write_tool_writes_file_content() {
     assert!(result.contains("wrote"));
     let written = fs::read_to_string(&path).expect("written file should be readable");
     assert_eq!(written, "persisted text");
-    cleanup_file(&path);
+    let _ = fs::remove_dir_all(workspace);
 }
 
 #[tokio::test]
 async fn edit_tool_replaces_exact_single_match() {
-    let path = temp_path("edit");
+    let (workspace, runner) = temp_wasm_runner("edit");
+    let path = shared_file_path(&workspace, "edit");
     fs::write(&path, "alpha beta gamma").expect("test setup should create file");
-    let tool = EditTool::default();
+    let tool = EditTool::new(runner);
 
     tool.execute(
         &json!({
@@ -88,7 +91,7 @@ async fn edit_tool_replaces_exact_single_match() {
 
     let updated = fs::read_to_string(&path).expect("updated file should be readable");
     assert_eq!(updated, "alpha delta gamma");
-    cleanup_file(&path);
+    let _ = fs::remove_dir_all(workspace);
 }
 
 #[tokio::test]
@@ -405,7 +408,14 @@ async fn registry_can_gate_registered_privileged_tools() {
 #[tokio::test]
 async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
     let workspace_root = temp_workspace_root("policy-bootstrap");
-    let outside = temp_path("policy-outside");
+    let outside = env::temp_dir().join(format!(
+        "oxydra-tools-policy-outside-{}-{}.txt",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
     fs::write(&outside, "outside policy root").expect("outside file should be writable");
     let bootstrap = RunnerBootstrapEnvelope {
         user_id: "alice".to_owned(),
@@ -494,7 +504,7 @@ async fn registry_denies_shell_commands_not_in_allowlist() {
     let workspace_root = temp_workspace_root("policy-shell");
     let mut registry = ToolRegistry::default();
     registry.register(SHELL_EXEC_TOOL_NAME, BashTool::default());
-    registry.set_security_policy(Arc::new(WorkspaceSecurityPolicy::for_direct_workspace(
+    registry.set_security_policy(Arc::new(WorkspaceSecurityPolicy::for_bootstrap_workspace(
         &workspace_root,
     )));
 
@@ -555,21 +565,37 @@ async fn bootstrap_registry_exposes_runtime_tool_surface_only() {
     assert_eq!(exposed, expected);
 }
 
-fn temp_path(label: &str) -> PathBuf {
-    let mut path = env::current_dir().unwrap_or_else(|_| env::temp_dir());
+/// Create a temporary workspace under `/tmp` with the standard subdirectory
+/// structure (`shared/`, `tmp/`, `vault/`).  Returns a WASM tool runner rooted
+/// at the new workspace so tool invocations stay inside `/tmp`.
+fn temp_wasm_runner(label: &str) -> (PathBuf, Arc<dyn WasmToolRunner>) {
+    let root = temp_workspace_root(label);
+    let runner: Arc<dyn WasmToolRunner> =
+        Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&root));
+    (root, runner)
+}
+
+/// Return a file path inside the `shared/` subdirectory of a workspace root.
+fn shared_file_path(workspace_root: &Path, label: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be monotonic for test unique ids")
         .as_nanos();
-    path.push(format!(
+    workspace_root.join("shared").join(format!(
         "oxydra-tools-{label}-{}-{unique}.txt",
         std::process::id()
-    ));
-    path
+    ))
 }
 
 fn temp_workspace_root(label: &str) -> PathBuf {
-    let root = temp_path(label).with_extension("workspace");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic for test unique ids")
+        .as_nanos();
+    let root = env::temp_dir().join(format!(
+        "oxydra-tools-{label}-{}-{unique}",
+        std::process::id()
+    ));
     fs::create_dir_all(root.join("shared")).expect("shared directory should be created");
     fs::create_dir_all(root.join("tmp")).expect("tmp directory should be created");
     fs::create_dir_all(root.join("vault")).expect("vault directory should be created");

@@ -159,6 +159,16 @@ pub enum GatewayServerFrame {
     /// Runtime progress notification — emitted during tool execution and
     /// provider calls within a multi-step turn.
     TurnProgress(GatewayTurnProgress),
+    /// Notification from a completed scheduled task.
+    ScheduledNotification(GatewayScheduledNotification),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayScheduledNotification {
+    pub schedule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_name: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

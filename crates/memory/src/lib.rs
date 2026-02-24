@@ -1,7 +1,12 @@
+pub mod cadence;
 mod connection;
 mod errors;
 mod indexing;
+pub mod scheduler_store;
 mod schema;
+
+pub use cadence::{format_in_timezone, next_run_for_cadence, parse_cadence, validate_cadence};
+pub use scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
 
 use std::collections::HashMap;
 
@@ -171,6 +176,10 @@ impl LibsqlMemory {
         run_pending_migrations(&conn).await?;
         verify_required_schema(&conn).await?;
         Ok(())
+    }
+
+    pub fn connect_for_scheduler(&self) -> Result<Connection, MemoryError> {
+        self.connect()
     }
 
     fn connect(&self) -> Result<Connection, MemoryError> {

@@ -1517,3 +1517,617 @@ async fn store_note_multiple_notes_in_same_session_coexist() {
 
     let _ = fs::remove_file(db_path);
 }
+
+// ── Scheduler store tests ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn scheduler_store_create_get_roundtrip() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{NotificationPolicy, ScheduleCadence, ScheduleDefinition, ScheduleStatus};
+
+    let db_path = temp_db_path("sched-create-get");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let def = ScheduleDefinition {
+        schedule_id: "sched-001".to_owned(),
+        user_id: "alice".to_owned(),
+        name: Some("Daily check".to_owned()),
+        goal: "Check the weather".to_owned(),
+        cadence: ScheduleCadence::Cron {
+            expression: "0 8 * * *".to_owned(),
+            timezone: "Asia/Kolkata".to_owned(),
+        },
+        notification_policy: NotificationPolicy::Always,
+        status: ScheduleStatus::Active,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        next_run_at: Some(now.clone()),
+        last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
+    };
+    store
+        .create_schedule(&def)
+        .await
+        .expect("create should succeed");
+
+    let fetched = store
+        .get_schedule("sched-001")
+        .await
+        .expect("get should succeed");
+    assert_eq!(fetched.schedule_id, "sched-001");
+    assert_eq!(fetched.user_id, "alice");
+    assert_eq!(fetched.name.as_deref(), Some("Daily check"));
+    assert_eq!(fetched.goal, "Check the weather");
+    assert_eq!(fetched.status, ScheduleStatus::Active);
+    assert_eq!(fetched.notification_policy, NotificationPolicy::Always);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scheduler_store_count_and_limit() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{NotificationPolicy, ScheduleCadence, ScheduleDefinition, ScheduleStatus};
+
+    let db_path = temp_db_path("sched-count");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for i in 0..3 {
+        let def = ScheduleDefinition {
+            schedule_id: format!("sched-{i}"),
+            user_id: "bob".to_owned(),
+            name: None,
+            goal: format!("Task {i}"),
+            cadence: ScheduleCadence::Interval { every_secs: 3600 },
+            notification_policy: NotificationPolicy::Never,
+            status: ScheduleStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            next_run_at: Some(now.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        };
+        store.create_schedule(&def).await.expect("create");
+    }
+
+    let count = store.count_schedules("bob").await.expect("count");
+    assert_eq!(count, 3);
+
+    let count_other = store.count_schedules("charlie").await.expect("count other");
+    assert_eq!(count_other, 0);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scheduler_store_search_with_filters() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{
+        NotificationPolicy, ScheduleCadence, ScheduleDefinition, ScheduleSearchFilters,
+        ScheduleStatus,
+    };
+
+    let db_path = temp_db_path("sched-search");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let schedules = vec![
+        ScheduleDefinition {
+            schedule_id: "s1".to_owned(),
+            user_id: "alice".to_owned(),
+            name: Some("Weather check".to_owned()),
+            goal: "Check weather".to_owned(),
+            cadence: ScheduleCadence::Cron {
+                expression: "0 8 * * *".to_owned(),
+                timezone: "Asia/Kolkata".to_owned(),
+            },
+            notification_policy: NotificationPolicy::Always,
+            status: ScheduleStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            next_run_at: Some(now.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        },
+        ScheduleDefinition {
+            schedule_id: "s2".to_owned(),
+            user_id: "alice".to_owned(),
+            name: Some("Backup".to_owned()),
+            goal: "Backup files".to_owned(),
+            cadence: ScheduleCadence::Interval { every_secs: 86400 },
+            notification_policy: NotificationPolicy::Never,
+            status: ScheduleStatus::Paused,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            next_run_at: None,
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        },
+    ];
+    for s in &schedules {
+        store.create_schedule(s).await.expect("create");
+    }
+
+    // Search all
+    let all = store
+        .search_schedules(
+            "alice",
+            &ScheduleSearchFilters {
+                limit: 20,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("search all");
+    assert_eq!(all.total_count, 2);
+
+    // Filter by status
+    let active = store
+        .search_schedules(
+            "alice",
+            &ScheduleSearchFilters {
+                status: Some(ScheduleStatus::Active),
+                limit: 20,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("search active");
+    assert_eq!(active.total_count, 1);
+    assert_eq!(active.schedules[0].schedule_id, "s1");
+
+    // Filter by name
+    let weather = store
+        .search_schedules(
+            "alice",
+            &ScheduleSearchFilters {
+                name_contains: Some("Weather".to_owned()),
+                limit: 20,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("search name");
+    assert_eq!(weather.total_count, 1);
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scheduler_store_delete_cascades_runs() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{
+        NotificationPolicy, ScheduleCadence, ScheduleDefinition, ScheduleRunRecord,
+        ScheduleRunStatus, ScheduleStatus,
+    };
+
+    let db_path = temp_db_path("sched-delete");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let def = ScheduleDefinition {
+        schedule_id: "sched-del".to_owned(),
+        user_id: "alice".to_owned(),
+        name: None,
+        goal: "Task".to_owned(),
+        cadence: ScheduleCadence::Interval { every_secs: 3600 },
+        notification_policy: NotificationPolicy::Always,
+        status: ScheduleStatus::Active,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        next_run_at: Some(now.clone()),
+        last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
+    };
+    store.create_schedule(&def).await.expect("create");
+
+    let run = ScheduleRunRecord {
+        run_id: "run-1".to_owned(),
+        schedule_id: "sched-del".to_owned(),
+        started_at: now.clone(),
+        finished_at: now.clone(),
+        status: ScheduleRunStatus::Success,
+        output_summary: Some("Done".to_owned()),
+        turn_count: 1,
+        cost: 0.01,
+        notified: true,
+    };
+    store
+        .record_run_and_reschedule("sched-del", &run, Some(now.clone()), None)
+        .await
+        .expect("record run");
+
+    let history = store
+        .get_run_history("sched-del", 10)
+        .await
+        .expect("history");
+    assert_eq!(history.len(), 1);
+
+    let deleted = store.delete_schedule("sched-del").await.expect("delete");
+    assert!(deleted);
+
+    // Verify schedule is gone
+    let result = store.get_schedule("sched-del").await;
+    assert!(result.is_err());
+
+    // Verify runs are also gone (cascading delete)
+    let history = store
+        .get_run_history("sched-del", 10)
+        .await
+        .expect("history after delete");
+    assert!(history.is_empty());
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scheduler_store_update_pause_resume() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{
+        NotificationPolicy, ScheduleCadence, ScheduleDefinition, SchedulePatch, ScheduleStatus,
+    };
+
+    let db_path = temp_db_path("sched-pause");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let def = ScheduleDefinition {
+        schedule_id: "sched-pr".to_owned(),
+        user_id: "alice".to_owned(),
+        name: Some("Test".to_owned()),
+        goal: "Do stuff".to_owned(),
+        cadence: ScheduleCadence::Interval { every_secs: 3600 },
+        notification_policy: NotificationPolicy::Always,
+        status: ScheduleStatus::Active,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        next_run_at: Some(now.clone()),
+        last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
+    };
+    store.create_schedule(&def).await.expect("create");
+
+    // Pause
+    let paused = store
+        .update_schedule(
+            "sched-pr",
+            &SchedulePatch {
+                status: Some(ScheduleStatus::Paused),
+                next_run_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("pause");
+    assert_eq!(paused.status, ScheduleStatus::Paused);
+    assert!(paused.next_run_at.is_none());
+
+    // Resume
+    let resumed = store
+        .update_schedule(
+            "sched-pr",
+            &SchedulePatch {
+                status: Some(ScheduleStatus::Active),
+                next_run_at: Some(Some(now.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("resume");
+    assert_eq!(resumed.status, ScheduleStatus::Active);
+    assert!(resumed.next_run_at.is_some());
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scheduler_store_due_schedules_filters_correctly() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{NotificationPolicy, ScheduleCadence, ScheduleDefinition, ScheduleStatus};
+
+    let db_path = temp_db_path("sched-due");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let past = "2020-01-01T00:00:00Z".to_owned();
+    let future = "2099-01-01T00:00:00Z".to_owned();
+    let now_str = chrono::Utc::now().to_rfc3339();
+
+    // Due schedule (next_run_at in the past)
+    store
+        .create_schedule(&ScheduleDefinition {
+            schedule_id: "due".to_owned(),
+            user_id: "alice".to_owned(),
+            name: None,
+            goal: "Due task".to_owned(),
+            cadence: ScheduleCadence::Interval { every_secs: 3600 },
+            notification_policy: NotificationPolicy::Always,
+            status: ScheduleStatus::Active,
+            created_at: now_str.clone(),
+            updated_at: now_str.clone(),
+            next_run_at: Some(past.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        })
+        .await
+        .expect("create due");
+
+    // Not yet due (next_run_at in the future)
+    store
+        .create_schedule(&ScheduleDefinition {
+            schedule_id: "future".to_owned(),
+            user_id: "alice".to_owned(),
+            name: None,
+            goal: "Future task".to_owned(),
+            cadence: ScheduleCadence::Interval { every_secs: 3600 },
+            notification_policy: NotificationPolicy::Always,
+            status: ScheduleStatus::Active,
+            created_at: now_str.clone(),
+            updated_at: now_str.clone(),
+            next_run_at: Some(future.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        })
+        .await
+        .expect("create future");
+
+    // Paused (should not be picked up)
+    store
+        .create_schedule(&ScheduleDefinition {
+            schedule_id: "paused".to_owned(),
+            user_id: "alice".to_owned(),
+            name: None,
+            goal: "Paused task".to_owned(),
+            cadence: ScheduleCadence::Interval { every_secs: 3600 },
+            notification_policy: NotificationPolicy::Always,
+            status: ScheduleStatus::Paused,
+            created_at: now_str.clone(),
+            updated_at: now_str.clone(),
+            next_run_at: Some(past.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        })
+        .await
+        .expect("create paused");
+
+    let due = store
+        .due_schedules(&now_str, 10)
+        .await
+        .expect("due_schedules");
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].schedule_id, "due");
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scheduler_store_record_run_and_prune_history() {
+    use crate::scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+    use types::{
+        NotificationPolicy, ScheduleCadence, ScheduleDefinition, ScheduleRunRecord,
+        ScheduleRunStatus, ScheduleStatus,
+    };
+
+    let db_path = temp_db_path("sched-runs");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect_for_scheduler().expect("scheduler conn");
+    let store = LibsqlSchedulerStore::new(conn);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    store
+        .create_schedule(&ScheduleDefinition {
+            schedule_id: "sched-runs".to_owned(),
+            user_id: "alice".to_owned(),
+            name: None,
+            goal: "Task".to_owned(),
+            cadence: ScheduleCadence::Interval { every_secs: 3600 },
+            notification_policy: NotificationPolicy::Always,
+            status: ScheduleStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            next_run_at: Some(now.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        })
+        .await
+        .expect("create");
+
+    // Record 5 runs
+    for i in 0..5 {
+        let run = ScheduleRunRecord {
+            run_id: format!("run-{i}"),
+            schedule_id: "sched-runs".to_owned(),
+            started_at: now.clone(),
+            finished_at: now.clone(),
+            status: ScheduleRunStatus::Success,
+            output_summary: Some(format!("Output {i}")),
+            turn_count: 1,
+            cost: 0.01,
+            notified: false,
+        };
+        store
+            .record_run_and_reschedule("sched-runs", &run, Some(now.clone()), None)
+            .await
+            .expect("record run");
+    }
+
+    let history = store
+        .get_run_history("sched-runs", 10)
+        .await
+        .expect("history");
+    assert_eq!(history.len(), 5);
+
+    // Prune to keep 2
+    store
+        .prune_run_history("sched-runs", 2)
+        .await
+        .expect("prune");
+
+    let pruned = store
+        .get_run_history("sched-runs", 10)
+        .await
+        .expect("history after prune");
+    assert_eq!(pruned.len(), 2);
+
+    let _ = fs::remove_file(db_path);
+}
+
+// ── Cadence evaluation tests ───────────────────────────────────────────
+
+#[test]
+fn cadence_interval_computes_next_run() {
+    use crate::cadence::next_run_for_cadence;
+
+    let cadence = types::ScheduleCadence::Interval { every_secs: 3600 };
+    let now = chrono::Utc::now();
+    let next = next_run_for_cadence(&cadence, now)
+        .expect("should compute")
+        .expect("should have next");
+    let diff = (next - now).num_seconds();
+    assert_eq!(diff, 3600);
+}
+
+#[test]
+fn cadence_once_future_returns_some() {
+    use crate::cadence::next_run_for_cadence;
+
+    let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let cadence = types::ScheduleCadence::Once { at: future };
+    let result = next_run_for_cadence(&cadence, chrono::Utc::now()).expect("should compute");
+    assert!(result.is_some());
+}
+
+#[test]
+fn cadence_once_past_returns_none() {
+    use crate::cadence::next_run_for_cadence;
+
+    let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let cadence = types::ScheduleCadence::Once { at: past };
+    let result = next_run_for_cadence(&cadence, chrono::Utc::now()).expect("should compute");
+    assert!(result.is_none());
+}
+
+#[test]
+fn cadence_cron_computes_next_run_in_timezone() {
+    use crate::cadence::next_run_for_cadence;
+
+    let cadence = types::ScheduleCadence::Cron {
+        expression: "0 8 * * *".to_owned(),
+        timezone: "Asia/Kolkata".to_owned(),
+    };
+    let now = chrono::Utc::now();
+    let next = next_run_for_cadence(&cadence, now)
+        .expect("should compute")
+        .expect("should have next");
+    assert!(next > now, "next run should be in the future");
+}
+
+#[test]
+fn validate_cadence_rejects_too_frequent_interval() {
+    use crate::cadence::validate_cadence;
+
+    let cadence = types::ScheduleCadence::Interval { every_secs: 30 };
+    let result = validate_cadence(&cadence, 60);
+    assert!(result.is_err());
+}
+
+#[test]
+fn validate_cadence_accepts_valid_interval() {
+    use crate::cadence::validate_cadence;
+
+    let cadence = types::ScheduleCadence::Interval { every_secs: 120 };
+    let result = validate_cadence(&cadence, 60);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn validate_cadence_rejects_invalid_timezone() {
+    use crate::cadence::validate_cadence;
+
+    let cadence = types::ScheduleCadence::Cron {
+        expression: "0 8 * * *".to_owned(),
+        timezone: "Invalid/Zone".to_owned(),
+    };
+    let result = validate_cadence(&cadence, 60);
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_cadence_roundtrips_all_types() {
+    use crate::cadence::parse_cadence;
+
+    let once = parse_cadence("once", "2099-01-01T00:00:00Z", "UTC").expect("once");
+    assert!(matches!(once, types::ScheduleCadence::Once { .. }));
+
+    let cron = parse_cadence("cron", "0 8 * * *", "Asia/Kolkata").expect("cron");
+    assert!(matches!(cron, types::ScheduleCadence::Cron { .. }));
+
+    let interval = parse_cadence("interval", "3600", "UTC").expect("interval");
+    assert!(matches!(
+        interval,
+        types::ScheduleCadence::Interval { every_secs: 3600 }
+    ));
+}
+
+#[test]
+fn parse_cadence_rejects_invalid_type() {
+    use crate::cadence::parse_cadence;
+
+    let result = parse_cadence("weekly", "monday", "UTC");
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_cadence_rejects_invalid_interval() {
+    use crate::cadence::parse_cadence;
+
+    let result = parse_cadence("interval", "not-a-number", "UTC");
+    assert!(result.is_err());
+}
+
+#[test]
+fn format_in_timezone_returns_local_for_cron() {
+    use crate::cadence::format_in_timezone;
+
+    let cadence = types::ScheduleCadence::Cron {
+        expression: "0 8 * * *".to_owned(),
+        timezone: "America/New_York".to_owned(),
+    };
+    let utc_ts = "2026-03-01T13:00:00+00:00";
+    let formatted = format_in_timezone(utc_ts, &cadence);
+    assert!(formatted.is_some());
+    let s = formatted.unwrap();
+    assert!(s.contains("EST") || s.contains("EDT") || s.contains("America"));
+}
+
+#[test]
+fn format_in_timezone_returns_none_for_interval() {
+    use crate::cadence::format_in_timezone;
+
+    let cadence = types::ScheduleCadence::Interval { every_secs: 3600 };
+    let result = format_in_timezone("2026-03-01T13:00:00+00:00", &cadence);
+    assert!(result.is_none());
+}

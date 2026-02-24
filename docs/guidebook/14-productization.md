@@ -67,9 +67,9 @@ The command is available through all channels (TUI, external adapters) and produ
 
 ## Scheduler System
 
-### Purpose
+### Current State (Implemented — Phase 19)
 
-Scheduled execution provides one-off and periodic task execution through the same runtime policy envelope used for interactive turns. This is not a general-purpose cron daemon — it is a governed execution surface with bounded turns, budgets, and audit trails.
+The scheduler system is fully implemented and provides one-off and periodic task execution through the same runtime policy envelope used for interactive turns.
 
 ### Architecture
 
@@ -78,39 +78,57 @@ Scheduled execution provides one-off and periodic task execution through the sam
 │  SchedulerStore  │────►│ SchedulerExecutor│────►│   AgentRuntime   │
 │  (durable defs)  │     │ (due-job runner) │     │  (policy rails)  │
 └──────────────────┘     └──────────────────┘     └──────────────────┘
+        │                         │                         │
+        ▼                         ▼                         ▼
+   libSQL tables           tokio interval loop        run_scheduled_turn()
+   (schedules,             polls due_schedules()      via ScheduledTurnRunner
+    schedule_runs)         dispatches concurrently     trait (gateway impl)
 ```
 
-- **SchedulerStore** — persists schedule definitions in the memory database with explicit ownership by `user_id`
-- **SchedulerExecutor** — evaluates due entries on a polling interval and dispatches them as runtime turns
-- **Execution** — scheduled runs execute through the same `AgentRuntime.run_session` path as interactive turns, inheriting all policy controls (timeouts, budgets, tool gates, tracing)
+- **SchedulerStore** (`memory/src/scheduler_store.rs`) — persists schedule definitions and run history in the memory database with explicit ownership by `user_id`. Implemented as `LibsqlSchedulerStore` using a dedicated libSQL connection obtained via `LibsqlMemory::connect_for_scheduler()`.
+- **SchedulerExecutor** (`runtime/src/scheduler_executor.rs`) — evaluates due entries on a configurable polling interval (default 15s) and dispatches them as bounded agent turns through the `ScheduledTurnRunner` trait.
+- **Execution** — scheduled runs execute through `RuntimeGatewayTurnRunner.run_scheduled_turn()`, which creates a context and calls `AgentRuntime::run_session` — inheriting all policy controls (timeouts, budgets, tool gates, tracing).
 
 ### Schedule Management
 
-Schedules are managed through typed operations exposed as tools:
+Schedules are managed through four tools exposed to the LLM (see Chapter 4 for details):
 
-- `schedule_list` — list all schedules for the current user
-- `schedule_create` — create a new one-off or periodic schedule with goal, cadence, and budget
-- `schedule_delete` — remove a schedule by ID
+- `schedule_create` — create a new one-off or periodic schedule with goal, cadence, timezone, and notification policy
+- `schedule_search` — search and list schedules with filters (status, name, cadence type, notification policy) and pagination
+- `schedule_edit` — modify, pause, or resume a schedule (partial-patch semantics)
+- `schedule_delete` — permanently remove a schedule (cascading deletes run history)
 
-Validation happens at creation time: cadence grammar is parsed and validated, budget limits are checked against user-level maximums, and the schedule is persisted only after all checks pass.
+Validation happens at creation/edit time: cadence grammar is parsed and validated by the `cron` crate, budget limits are checked against user-level maximums, timezones are validated against the `chrono-tz` IANA database, and the schedule is persisted only after all checks pass.
 
 ### Silent Execution
 
-A key capability is conditional output. Scheduled tasks can be configured as:
+Scheduled tasks support three notification modes:
 
-- **Always notify** — output is always sent to the user's active channel
-- **Conditionally notify** — the task prompt includes logic to determine whether the user should be notified (e.g., "check weather and notify only if rain is forecasted")
-- **Never notify** — the task runs silently, with results stored in memory but not pushed to any channel
+- **Always notify** — output is always sent to the user's active channel via `GatewayServerFrame::ScheduledNotification`
+- **Conditionally notify** — the LLM's response is checked for a `[NOTIFY]` prefix; if present, the message after the marker is routed to the user; otherwise the run is silent
+- **Never notify** — the task runs silently, with results stored in memory only
 
-The runtime supports this through a `notification_policy` field on the schedule definition. When set to conditional, the LLM's response is checked for a notification signal before the gateway routes it to the user's channel.
+The conditional notification protocol is implemented by augmenting the scheduled turn's prompt with instructions about the `[NOTIFY]` marker convention.
 
 ### Cadence
 
-The scheduler supports:
-- One-off entries (execute once at a specific time)
-- Periodic entries (cron expression or interval-based)
+The scheduler supports three cadence types:
+- **One-off** (`once`) — execute once at a specific RFC 3339 timestamp
+- **Cron** (`cron`) — execute periodically according to a 5-field cron expression with timezone support
+- **Interval** (`interval`) — execute at a fixed interval (in seconds, minimum 60s)
 
-The exact cadence grammar (cron vs. interval DSL vs. both) is finalized before implementation to avoid parser rewrites.
+Cadence evaluation uses the `cron` crate for cron expressions and `chrono-tz` for timezone-aware scheduling. The `next_run_for_cadence()` function computes the next fire time; `validate_cadence()` ensures minimum intervals are met.
+
+### Configuration
+
+The scheduler is disabled by default. To enable it, add `[scheduler] enabled = true` to the agent config. See Chapter 2 for all configuration options including `max_turns`, `max_cost` (operator-only budgets), `min_interval_secs`, `auto_disable_after_failures`, and `default_timezone`.
+
+### Session Isolation
+
+Each schedule gets its own `runtime_session_id` (format: `scheduled:{schedule_id}`). This ensures:
+- Scheduled runs don't pollute the user's interactive session history
+- Each schedule accumulates its own conversation context across runs
+- Memory tools scoped to `user_id` still work correctly
 
 ## Skill System
 
@@ -233,10 +251,10 @@ MCP is enabled only after operational confidence in the native tool governance m
 
 These productization features are implemented in dependency order:
 
-1. **Model catalog governance** (Phase 13) — typed schema, snapshot generation, startup validation
+1. **Model catalog governance** (Phase 13) — ✅ Complete: typed schema, snapshot generation, startup validation, provider registry, capability overrides
 2. **MCP support** (Phase 17) — adapter implementation, discovery, safety integration
 3. **Session lifecycle** (Phase 18) — explicit new-session command, deterministic identity
-4. **Scheduler** (Phase 19) — store, executor, silent execution, cadence grammar
+4. **Scheduler** (Phase 19) — ✅ Complete: durable store, polling executor, four LLM tools, conditional notification, cron/interval/once cadences, auto-disable on failures
 5. **Skill system** (Phase 20) — loader, registry, API-mediated access, deletion prevention
 6. **Persona governance** (Phase 21) — SOUL.md/SYSTEM.md loading, immutability enforcement
 

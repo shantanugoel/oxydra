@@ -26,7 +26,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 16 | Observability (OpenTelemetry) | Planned | |
 | 17 | MCP support | Planned | |
 | 18 | Session lifecycle controls | Planned | |
-| 19 | Scheduler system | Planned | |
+| 19 | Scheduler system | **Complete** | Durable store, polling executor, 4 LLM tools, conditional notification, cron/interval/once cadences |
 | 20 | Skill system | Planned | |
 | 21 | Persona governance | Planned | |
 
@@ -223,6 +223,28 @@ Built the foundation layer with zero internal dependencies:
 - **Config validation:** `AgentConfig::validate()` resolves provider via registry; `validate_model_in_catalog()` uses `effective_catalog_provider()`; `ConfigError::UnknownModelForCatalogProvider` replaces old model validation errors
 
 
+### Phase 19: Scheduler System
+
+**Crates:** `types`, `memory`, `tools`, `runtime`, `gateway`, `runner`, `tui`
+
+Built a complete durable scheduler that lets the LLM create and manage one-off and periodic tasks:
+
+- **Types** (`types/src/scheduler.rs`): `ScheduleCadence` (Cron/Once/Interval), `NotificationPolicy` (Always/Conditional/Never), `ScheduleStatus` (Active/Paused/Completed/Disabled), `ScheduleDefinition`, `ScheduleRunRecord`, `ScheduleSearchFilters`, `ScheduleSearchResult`, `SchedulePatch`
+- **Errors** (`types/src/error.rs`): `SchedulerError` enum with InvalidCronExpression, InvalidCadence, NotFound, Store, Execution, LimitExceeded, Unauthorized variants; `Scheduler(SchedulerError)` variant added to `RuntimeError`
+- **Configuration** (`types/src/config.rs`): `SchedulerConfig` with `enabled` (default false), `poll_interval_secs`, `max_concurrent`, `max_schedules_per_user`, `max_turns`, `max_cost`, `max_run_history`, `min_interval_secs`, `default_timezone`, `auto_disable_after_failures`; added as `#[serde(default)]` field on `AgentConfig`
+- **Database schema** (`memory/migrations/`): Three new migrations — `0017_create_schedules_table.sql`, `0018_create_schedules_indexes.sql` (4 indexes), `0019_create_schedule_runs_table.sql` with cascading delete
+- **SchedulerStore** (`memory/src/scheduler_store.rs`): `SchedulerStore` trait with 10 methods; `LibsqlSchedulerStore` implementation using libSQL with dynamic WHERE clause construction for search, pagination support, and atomic `record_run_and_reschedule`
+- **Cadence evaluation** (`memory/src/cadence.rs`): `next_run_for_cadence()`, `validate_cadence()`, `parse_cadence()`, `format_in_timezone()` using `cron` and `chrono-tz` crates
+- **Scheduler tools** (`tools/src/scheduler_tools.rs`): `schedule_create` (SideEffecting), `schedule_search` (ReadOnly), `schedule_edit` (SideEffecting), `schedule_delete` (SideEffecting) — registered via `register_scheduler_tools()` during bootstrap when scheduler is enabled
+- **SchedulerExecutor** (`runtime/src/scheduler_executor.rs`): Background polling loop with `ScheduledTurnRunner` and `SchedulerNotifier` traits; handles notification routing (Always/Conditional/Never), one-shot completion, failure tracking, auto-disable, history pruning
+- **Gateway integration** (`gateway/src/lib.rs`): `SchedulerNotifier` implementation on `GatewayServer`; `ScheduledTurnRunner` implementation on `RuntimeGatewayTurnRunner`; `GatewayServerFrame::ScheduledNotification` variant
+- **Runner bootstrap** (`runner/src/bootstrap.rs`): `scheduler_store` field on `VmBootstrapRuntime`; conditional scheduler tool registration; system prompt augmentation with scheduler instructions
+- **oxydra-vm wiring** (`runner/src/bin/oxydra-vm.rs`): Executor spawned as `tokio::spawn` background task; `CancellationToken` cancelled on shutdown
+- **TUI support** (`tui/src/channel_adapter.rs`, `tui/src/ui_model.rs`): `ScheduledNotification` handling in match arms; `last_scheduled_notification` field; display as system messages in chat history
+- **Dependencies**: `cron = "0.15"` and `chrono-tz = "0.10"` in memory crate; `tokio-util` in runner crate
+- **Tests**: 19 scheduler store and cadence tests in memory crate; 7 scheduler executor tests in runtime crate with mock store, runner, and notifier
+
+
 ## Forward Plan: Phases 14-21
 
 ### Phase 14: External Channels + Identity Mapping
@@ -293,19 +315,22 @@ Built the foundation layer with zero internal dependencies:
 
 **Verification gate:** User can start a clean new session; previous sessions remain recallable; session_id rollover is deterministic and auditable.
 
-### Phase 19: Scheduler System
+### Phase 19: Scheduler System — ✅ Complete
 
-**Crates:** `runtime`, `memory`, `types`, `tools`, `gateway`
-**Builds on:** Phases 10, 15, 18
+**Crates:** `types`, `memory`, `tools`, `runtime`, `gateway`, `runner`, `tui`
+**Builds on:** Phases 8, 12, 13
 
-**Scope:**
-- `SchedulerStore` with durable schedule definitions (one-off + periodic)
-- `SchedulerExecutor` evaluating due entries and dispatching as runtime turns
-- Schedule management tools: `schedule_list`, `schedule_create`, `schedule_delete`
-- Silent execution support (always/conditional/never notify)
+**Implemented:**
+- `SchedulerStore` with durable schedule definitions (one-off + periodic via cron, interval, and once cadences)
+- `SchedulerExecutor` evaluating due entries on polling interval and dispatching as runtime turns
+- Schedule management tools: `schedule_create`, `schedule_search`, `schedule_edit`, `schedule_delete`
+- Silent execution support (always/conditional/never notification policies)
 - Execution through same policy envelope as interactive turns
+- Automatic schedule lifecycle management: one-shot completion, failure tracking, auto-disable
+- System prompt augmentation with scheduler tool instructions
+- TUI support for displaying scheduled notifications
 
-**Verification gate:** One-off and periodic entries execute bounded turns with normal policy/audit controls; conditional notification works correctly.
+**Verification gate:** ✅ One-off and periodic entries execute bounded turns with normal policy/audit controls; conditional notification works correctly; all tests pass.
 
 ### Phase 20: Skill System
 
@@ -354,7 +379,7 @@ These gaps do not block any currently completed phase's functionality but should
 - **Phase 8 SQL migrations** — Phase 9 added vector/FTS tables via migration, not schema wipe
 - **Phase 12 Channel trait** — Phase 14 extends with external adapters without changing the trait
 - **Phase 14 identity mapping** — prevents multi-channel history fragmentation before Phase 15 concurrency
-- **Phase 19 scheduler** — reuses runtime policy rails (budget, cancellation, tool gating)
+- **Phase 19 scheduler** — reuses runtime policy rails (budget, cancellation, tool gating); stores in existing memory DB via migrations; uses same `ToolRegistry` and `Tool` trait as native tools
 - **Phases 20-21** — separate skills from persona policy to prevent LLM mutation of behavioral boundaries
 
 ## Test Strategy

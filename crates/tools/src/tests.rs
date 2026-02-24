@@ -425,7 +425,8 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
         runtime_policy: None,
         startup_status: None,
     };
-    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
+    let RuntimeToolsBootstrap { registry, .. } =
+        bootstrap_runtime_tools(Some(&bootstrap), None).await;
     let args = json!({ "path": outside.to_string_lossy() }).to_string();
     let denied = registry
         .execute(FILE_READ_TOOL_NAME, &args)
@@ -469,7 +470,8 @@ async fn bootstrap_registry_honors_runtime_policy_mount_overrides() {
         }),
         startup_status: None,
     };
-    let RuntimeToolsBootstrap { registry, .. } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
+    let RuntimeToolsBootstrap { registry, .. } =
+        bootstrap_runtime_tools(Some(&bootstrap), None).await;
 
     let allowed_result = registry
         .execute(

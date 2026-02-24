@@ -4,22 +4,22 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 
 ## Chapters
 
-### Implemented (Phases 1-12)
+### Implemented (Phases 1-13, 19)
 
 | # | Chapter | Description |
 |---|---------|-------------|
 | 1 | [Architecture Overview](01-architecture-overview.md) | Core philosophy, workspace layout, dependency hierarchy, key design decisions |
 | 2 | [Configuration System](02-configuration-system.md) | Layered config with figment, credential resolution, runner config, validation |
 | 3 | [Provider Layer](03-provider-layer.md) | Provider trait, OpenAI/Anthropic/Gemini/Responses implementations, SSE streaming, model catalog, capability overrides, reliability wrapper |
-| 4 | [Tool System](04-tool-system.md) | Tool trait, `#[tool]` procedural macro, core tools, validation, safety tiers, LLM-callable memory tools |
-| 5 | [Agent Runtime](05-agent-runtime.md) | Turn loop, state machine, tool dispatch, self-correction, budget enforcement |
-| 6 | [Memory and Retrieval](06-memory-and-retrieval.md) | libSQL persistence, schema, hybrid retrieval (vector + FTS5), embeddings, summarization, note storage/deletion API |
+| 4 | [Tool System](04-tool-system.md) | Tool trait, `#[tool]` procedural macro, core tools, validation, safety tiers, LLM-callable memory tools, scheduler tools |
+| 5 | [Agent Runtime](05-agent-runtime.md) | Turn loop, state machine, tool dispatch, self-correction, budget enforcement, scheduled turn execution |
+| 6 | [Memory and Retrieval](06-memory-and-retrieval.md) | libSQL persistence, schema, hybrid retrieval (vector + FTS5), embeddings, summarization, note storage/deletion API, scheduler store |
 | 7 | [Security Model](07-security-model.md) | Isolation tiers, WASM capabilities, security policy, SSRF protection, credential scrubbing |
 | 8 | [Runner and Guests](08-runner-and-guests.md) | Runner lifecycle, VM provisioning, shell daemon protocol, bootstrap envelope |
-| 9 | [Gateway and Channels](09-gateway-and-channels.md) | Channel trait, gateway WebSocket server, TUI adapter, end-to-end message flow |
+| 9 | [Gateway and Channels](09-gateway-and-channels.md) | Channel trait, gateway WebSocket server, TUI adapter, end-to-end message flow, scheduled notifications |
 | 10 | [Testing and Quality](10-testing-and-quality.md) | Test strategy, mocking, snapshot testing, CI/CD pipeline |
 
-### Forward-Looking (Phases 13-21)
+### Forward-Looking (Phases 14-21)
 
 | # | Chapter | Description |
 |---|---------|-------------|
@@ -77,7 +77,7 @@ Add the following step before any `cargo build` or `cargo test` step:
 ## Conventions
 
 - **Chapters 1-10** describe the system as built. Code references point to actual implementations.
-- **Chapters 11-14** describe planned features grounded in implementation reality. They reference existing infrastructure that the features build upon.
+- **Chapters 11-14** describe planned features grounded in implementation reality. They reference existing infrastructure that the features build upon. Chapter 14's scheduler section describes the implemented system.
 - **Chapter 15** tracks the overall build plan with completion status and identified gaps.
 
 ## Canonical Source

@@ -245,6 +245,72 @@ The runtime is instrumented with `tracing` spans throughout:
 
 These spans are emitted via `tracing-subscriber` and can be upgraded to OpenTelemetry export without changing instrumentation code.
 
+## Scheduled Turn Execution
+
+**File:** `runtime/src/scheduler_executor.rs`
+
+The `SchedulerExecutor` is a background task that polls the `SchedulerStore` for due schedules and dispatches them as agent turns through the `ScheduledTurnRunner` trait.
+
+### ScheduledTurnRunner Trait
+
+```rust
+#[async_trait]
+pub trait ScheduledTurnRunner: Send + Sync {
+    async fn run_scheduled_turn(
+        &self,
+        user_id: &str,
+        runtime_session_id: &str,
+        prompt: String,
+        cancellation: CancellationToken,
+    ) -> Result<String, RuntimeError>;
+}
+```
+
+This trait is implemented by `RuntimeGatewayTurnRunner` in the gateway crate, allowing the scheduler executor to trigger agent turns without depending on the gateway crate directly. Each scheduled turn uses a schedule-specific `runtime_session_id` (format: `scheduled:{schedule_id}`) so scheduled runs don't pollute the user's interactive session history.
+
+### SchedulerExecutor
+
+```rust
+pub struct SchedulerExecutor {
+    store: Arc<dyn SchedulerStore>,
+    turn_runner: Arc<dyn ScheduledTurnRunner>,
+    notifier: Arc<dyn SchedulerNotifier>,
+    config: SchedulerConfig,
+    cancellation: CancellationToken,
+}
+```
+
+The executor runs a `tokio::time::interval` loop (configurable via `poll_interval_secs`, default 15 seconds) that:
+
+1. Queries the store for schedules where `next_run_at <= now` and `status = 'active'`
+2. Dispatches due schedules concurrently (bounded by `max_concurrent`)
+3. For each schedule: builds the prompt (augmenting with `[NOTIFY]` instruction for conditional notification), runs the turn, records the result, computes the next run time, and handles notification routing
+
+### Notification Routing
+
+After a scheduled turn completes, the executor determines whether to notify the user based on the schedule's `NotificationPolicy`:
+
+| Policy | Behavior |
+|--------|----------|
+| `Always` | Response is always routed to the user via `SchedulerNotifier` |
+| `Conditional` | Response is checked for `[NOTIFY]` prefix — if present, the message after the marker is routed; otherwise silent |
+| `Never` | No notification — results stored in memory only |
+
+The `SchedulerNotifier` trait is implemented by `GatewayServer`, which publishes `GatewayServerFrame::ScheduledNotification` frames to all connected sessions for the target user.
+
+### Automatic Schedule Management
+
+After each run, the executor:
+- **Computes next run** — uses `next_run_for_cadence()` to determine the next `next_run_at`
+- **One-shot completion** — marks `Once` cadence schedules as `Completed` with `next_run_at = None` after successful execution
+- **Failure tracking** — increments `consecutive_failures` on failed runs; resets to 0 on success
+- **Auto-disable** — disables schedules that exceed `auto_disable_after_failures` consecutive failures
+- **History pruning** — prunes old run records beyond `max_run_history`
+
+### Lifecycle
+
+The executor is spawned as a `tokio::spawn` background task in `oxydra-vm` when `scheduler_store` is present. Its `CancellationToken` is cancelled during graceful shutdown (on `ctrl_c`), ensuring clean termination.
+
 ## Progress Events
 
 The runtime emits `StreamItem::Progress` events at key transition points within `run_session_internal`. These are delivered on the same `stream_events` channel as `StreamItem::Text` deltas and flow all the way to connected channels, giving users real-time visibility into multi-step execution.

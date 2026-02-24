@@ -110,6 +110,10 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `memory_save` | `SideEffecting` | Saves a new note to the user's memory |
 | `memory_update` | `SideEffecting` | Replaces the content of an existing note by note_id |
 | `memory_delete` | `SideEffecting` | Deletes a note from the user's memory by note_id |
+| `schedule_create` | `SideEffecting` | Creates a new one-off or recurring scheduled task |
+| `schedule_search` | `ReadOnly` | Searches and lists scheduled tasks with filters and pagination |
+| `schedule_edit` | `SideEffecting` | Modifies, pauses, or resumes a scheduled task |
+| `schedule_delete` | `SideEffecting` | Permanently deletes a scheduled task |
 
 Most tools (except `BashTool`) execute through the `HostWasmToolRunner` (in the `sandbox` sub-module of `tools`), which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
 
@@ -155,6 +159,45 @@ All four tools receive a `ToolExecutionContext` on each invocation, which carrie
 #### Registration
 
 Memory tools are registered during bootstrap via `register_memory_tools()` when a memory backend is configured. The function takes a `ToolRegistry`, `Arc<dyn MemoryRetrieval>`, and the retrieval weight parameters, then creates and registers all four tools.
+
+### Scheduler Tools
+
+**File:** `tools/src/scheduler_tools.rs`
+
+Four LLM-callable tools expose the scheduler system, enabling the LLM to create, search, edit, and delete scheduled tasks. These tools are registered during bootstrap via `register_scheduler_tools()` when the scheduler is enabled and a memory backend is available.
+
+#### Per-User Scoping
+
+All scheduler tools operate within a per-user namespace using the `user_id` from `ToolExecutionContext`. Ownership checks prevent users from accessing or modifying another user's schedules.
+
+#### Tool Details
+
+| Tool | Key Parameters | Returns |
+|------|---------------|---------|
+| `schedule_create` | `goal` (required), `cadence_type` (required: cron/once/interval), `cadence_value` (required), `name` (optional), `timezone` (optional), `notification` (optional: always/conditional/never) | Created schedule with `schedule_id`, `next_run_at`, `status` |
+| `schedule_search` | `name`, `status`, `cadence_type`, `notification`, `limit` (default 20, max 50), `offset` (for pagination) | Paginated results with `schedules`, `total`, `remaining`, `hint` |
+| `schedule_edit` | `schedule_id` (required), plus optional: `name`, `goal`, `cadence_type`+`cadence_value`, `timezone`, `notification`, `status` (active/paused) | Updated schedule definition |
+| `schedule_delete` | `schedule_id` (required) | Confirmation message |
+
+#### Key Design Decisions
+
+- **`cadence_type` + `cadence_value` as separate parameters** — Forces structured input that our code validates, preventing the LLM from hallucinating hybrid formats.
+- **`goal` as the full prompt** — The tool description instructs the LLM to write goals as complete, self-contained instructions, since scheduled turns run without conversational history.
+- **No `max_turns` or `max_cost` in the schema** — These are operator-configured only via `SchedulerConfig`. The LLM cannot override execution budgets.
+- **Pagination in `schedule_search`** — The `remaining` count and `hint` string guide the LLM's pagination behavior naturally.
+- **`schedule_edit` for pause/resume** — Single tool with partial-patch semantics handles pause, resume, cadence change, goal update, and notification policy change.
+
+#### Cadence Validation
+
+At creation and edit time, the cadence is validated:
+- **Cron expressions** are parsed with the `cron` crate (5-field standard, internally prepended with `0` for seconds). Minimum interval between firings is checked against `min_interval_secs`.
+- **One-off timestamps** must be in the future (RFC 3339 format).
+- **Intervals** must meet the minimum `min_interval_secs` (default 60 seconds).
+- **Timezones** are validated against the `chrono-tz` IANA timezone database.
+
+#### Registration
+
+Scheduler tools are registered during bootstrap via `register_scheduler_tools()` when `config.scheduler.enabled` is `true` and a memory backend is available. The function takes a `ToolRegistry`, `Arc<dyn SchedulerStore>`, and `&SchedulerConfig`, then creates and registers all four tools.
 
 ## Tool Registry
 

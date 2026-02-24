@@ -15,6 +15,8 @@ pub(crate) const REQUIRED_TABLES: &[&str] = &[
     "chunks",
     "chunks_vec",
     "chunks_fts",
+    "schedules",
+    "schedule_runs",
 ];
 pub(crate) const REQUIRED_INDEXES: &[&str] = &[
     "idx_conversation_events_session_sequence",
@@ -23,6 +25,11 @@ pub(crate) const REQUIRED_INDEXES: &[&str] = &[
     "idx_chunks_session_created_at",
     "idx_chunks_file_id",
     "idx_chunks_session_content_hash",
+    "idx_schedules_user_id",
+    "idx_schedules_due",
+    "idx_schedules_status",
+    "idx_schedules_name",
+    "idx_schedule_runs_lookup",
 ];
 pub(crate) const REQUIRED_TRIGGERS: &[&str] = &[
     "trg_chunks_fts_ai",
@@ -101,6 +108,18 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: "0016_create_chunks_fts_delete_trigger",
         sql: include_str!("../migrations/0016_create_chunks_fts_delete_trigger.sql"),
     },
+    Migration {
+        version: "0017_create_schedules_table",
+        sql: include_str!("../migrations/0017_create_schedules_table.sql"),
+    },
+    Migration {
+        version: "0018_create_schedules_indexes",
+        sql: include_str!("../migrations/0018_create_schedules_indexes.sql"),
+    },
+    Migration {
+        version: "0019_create_schedule_runs_table",
+        sql: include_str!("../migrations/0019_create_schedule_runs_table.sql"),
+    },
 ];
 
 pub(crate) async fn rollback_quietly(conn: &Connection) {
@@ -138,7 +157,7 @@ pub(crate) async fn run_pending_migrations(conn: &Connection) -> Result<(), Memo
             .await
             .map_err(|error| migration_error(error.to_string()))?;
         let migration_result = async {
-            conn.execute(migration.sql, params![])
+            conn.execute_batch(migration.sql)
                 .await
                 .map_err(|error| migration_error(error.to_string()))?;
             conn.execute(

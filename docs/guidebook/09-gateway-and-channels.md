@@ -44,12 +44,15 @@ pub enum GatewayServerFrame {
     TurnCompleted { final_message: String, usage: Option<UsageUpdate> },
     TurnCancelled,
     TurnProgress { progress: RuntimeProgressEvent },  // ← runtime activity notification
+    ScheduledNotification(GatewayScheduledNotification),  // ← scheduled task result
     Error { message: String },
     HealthStatus { ... },
 }
 ```
 
 `TurnProgress` carries a `RuntimeProgressEvent` (provider call starting, tools executing, etc.) emitted by the runtime during multi-step execution. Channels decide how to surface it; the TUI shows the `progress.message` in the input bar title.
+
+`ScheduledNotification` carries the result of a scheduled task that has been configured to notify the user. It contains the `schedule_id`, optional `schedule_name`, and the notification `message`. The TUI displays these as system messages in the chat history.
 
 ## Gateway Server
 
@@ -118,6 +121,20 @@ When a `CancelActiveTurn` frame arrives:
 
 This ensures Ctrl+C in the TUI cancels only the active turn without killing the guest process.
 
+### Scheduler Notification
+
+The `GatewayServer` implements the `SchedulerNotifier` trait (defined in the `runtime` crate), enabling the scheduler executor to publish notifications to connected users without a direct dependency on the gateway:
+
+```rust
+impl SchedulerNotifier for GatewayServer {
+    fn notify_user(&self, user_id: &str, frame: GatewayServerFrame) {
+        // Finds all sessions for the user and publishes the frame
+    }
+}
+```
+
+When a scheduled task completes and its notification policy triggers delivery, the executor calls `notify_user()`, which broadcasts the `ScheduledNotification` frame to all active WebSocket connections for that user.
+
 ## TUI Channel Adapter
 
 **File:** `tui/src/channel_adapter.rs`
@@ -145,6 +162,7 @@ pub struct TuiUiState {
     pub rendered_output: String,      // accumulated stream text
     pub last_error: Option<String>,
     pub activity_status: Option<String>,  // most recent progress message from TurnProgress
+    pub last_scheduled_notification: Option<GatewayScheduledNotification>,  // latest scheduled task notification
 }
 ```
 
@@ -277,3 +295,4 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 - **Single-user isolation:** Sessions are isolated per user but true lane-based queueing (where background tasks don't block real-time chat) is implemented as mutex-based rejection — a new turn is rejected if one is already active, rather than queued
 - **No external channels yet:** Only the TUI adapter is implemented; external channel adapters (Telegram, Discord, Slack) are planned for Phase 14
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
+- **Scheduled notifications are session-scoped:** If no user session is connected when a scheduled notification fires, the notification is lost (results persist in memory via the scheduled turn's session, but the push notification is not queued)

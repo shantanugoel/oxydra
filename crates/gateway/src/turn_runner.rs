@@ -1,4 +1,5 @@
 use super::*;
+use runtime::ScheduledTurnRunner;
 
 #[async_trait]
 pub trait GatewayTurnRunner: Send + Sync {
@@ -127,5 +128,22 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         let mut contexts = self.contexts.lock().await;
         contexts.insert(runtime_session_id.to_owned(), context);
         result
+    }
+}
+
+#[async_trait]
+impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
+    async fn run_scheduled_turn(
+        &self,
+        user_id: &str,
+        runtime_session_id: &str,
+        prompt: String,
+        cancellation: CancellationToken,
+    ) -> Result<String, RuntimeError> {
+        let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
+        let response = self
+            .run_turn(user_id, runtime_session_id, prompt, cancellation, delta_tx)
+            .await?;
+        Ok(response.message.content.unwrap_or_default())
     }
 }

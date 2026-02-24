@@ -171,6 +171,16 @@ impl TuiViewModel {
                 // field and shown in the input bar title.  They do not produce
                 // permanent chat history entries.
             }
+            GatewayServerFrame::ScheduledNotification(notification) => {
+                let label = notification
+                    .schedule_name
+                    .as_deref()
+                    .unwrap_or(&notification.schedule_id);
+                self.push_message(ChatMessage::System(format!(
+                    "[Scheduled: {label}] {}",
+                    notification.message
+                )));
+            }
         }
     }
 

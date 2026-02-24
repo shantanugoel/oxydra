@@ -38,6 +38,9 @@ pub struct TuiUiState {
     /// completes, is cancelled, or errors.  Used to populate the input bar
     /// title while the user waits for the agent.
     pub activity_status: Option<String>,
+    /// Most recent notification from a completed scheduled task. Displayed
+    /// once and then cleared on the next render cycle.
+    pub last_scheduled_notification: Option<String>,
 }
 
 impl TuiUiState {
@@ -249,6 +252,16 @@ impl TuiChannelAdapter {
                 state.runtime_session_id = Some(session.runtime_session_id.clone());
                 state.mark_active_turn(turn);
                 state.activity_status = Some(progress.message.clone());
+            }
+            GatewayServerFrame::ScheduledNotification(notification) => {
+                // Scheduled notifications are informational — show the message
+                // but don't alter turn state.
+                let label = notification
+                    .schedule_name
+                    .as_deref()
+                    .unwrap_or(&notification.schedule_id);
+                state.last_scheduled_notification =
+                    Some(format!("[Scheduled: {label}] {}", notification.message));
             }
         }
     }

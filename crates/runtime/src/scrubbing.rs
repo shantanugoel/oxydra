@@ -109,7 +109,6 @@ fn resolve_virtual_prefix(input: &str, mappings: &[PathScrubMapping]) -> String 
     input.to_owned()
 }
 
-
 const HIGH_ENTROPY_THRESHOLD: f64 = 3.8;
 
 pub(crate) fn scrub_tool_output(output: &str) -> String {

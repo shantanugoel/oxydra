@@ -1404,9 +1404,7 @@ async fn launch_docker_container_async(
     // ConfigSearchPaths::discover() can resolve CWD/.oxydra/.
     // ShellVm: working_dir is /shared (container-virtual path).
     let working_dir = match params.role {
-        RunnerGuestRole::OxydraVm => {
-            Some(params.workspace.root.to_string_lossy().into_owned())
-        }
+        RunnerGuestRole::OxydraVm => Some(params.workspace.root.to_string_lossy().into_owned()),
         RunnerGuestRole::ShellVm => Some("/shared".to_owned()),
     };
 

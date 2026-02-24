@@ -9,6 +9,8 @@ wasm-isolation = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [dependencies]
 async-trait = "0.1"
+chrono = "0.4"
+memory = { path = "../memory" }
 bytes = "1"
 futures-util = { version = "0.3", features = ["sink"] }
 html2text = "0.16"

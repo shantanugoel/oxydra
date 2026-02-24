@@ -5,6 +5,7 @@ mod memory;
 mod model;
 mod provider;
 mod runner;
+mod scheduler;
 mod tool;
 mod tracing;
 
@@ -12,17 +13,19 @@ pub use channel::{
     Channel, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream, ChannelOutboundEvent,
     GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn, GatewayClientFrame,
     GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
-    GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewayTurnCancelled,
-    GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted, GatewayTurnState,
-    GatewayTurnStatus,
+    GatewayHelloAck, GatewayScheduledNotification, GatewaySendTurn, GatewayServerFrame,
+    GatewaySession, GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress,
+    GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus,
 };
 pub use config::{
     AgentConfig, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
     ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig,
-    RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SummarizationConfig, ToolsConfig,
-    ShellConfig, UnknownModelCaps, WebSearchConfig, validate_config_version,
+    RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SchedulerConfig, ShellConfig,
+    SummarizationConfig, ToolsConfig, UnknownModelCaps, WebSearchConfig, validate_config_version,
 };
-pub use error::{ChannelError, MemoryError, ProviderError, RuntimeError, ToolError};
+pub use error::{
+    ChannelError, MemoryError, ProviderError, RuntimeError, SchedulerError, ToolError,
+};
 pub use memory::{
     Memory, MemoryChunkDocument, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse,
     MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
@@ -46,6 +49,10 @@ pub use runner::{
     ShellOutputStream, SidecarEndpoint, SidecarTransport, SpawnSession, SpawnSessionAck,
     StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport, StreamOutput,
     StreamOutputChunk,
+};
+pub use scheduler::{
+    NotificationPolicy, ScheduleCadence, ScheduleDefinition, SchedulePatch, ScheduleRunRecord,
+    ScheduleRunStatus, ScheduleSearchFilters, ScheduleSearchResult, ScheduleStatus,
 };
 pub use tool::{FunctionDecl, SafetyTier, Tool, ToolExecutionContext, ToolParameterSchema};
 pub use tracing::init_tracing;

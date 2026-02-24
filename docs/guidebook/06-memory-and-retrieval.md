@@ -167,6 +167,82 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 
 Full-text search index using SQLite's FTS5 engine. Automatically synchronized via triggers on the `chunks` table.
 
+#### `schedules`
+
+```sql
+CREATE TABLE schedules (
+    schedule_id          TEXT PRIMARY KEY,
+    user_id              TEXT NOT NULL,
+    name                 TEXT,
+    goal                 TEXT NOT NULL,
+    cadence_json         TEXT NOT NULL,
+    notification_policy  TEXT NOT NULL DEFAULT 'always',
+    status               TEXT NOT NULL DEFAULT 'active',
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    next_run_at          TEXT,
+    last_run_at          TEXT,
+    last_run_status      TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0
+);
+```
+
+Stores durable schedule definitions. The `cadence_json` field holds a JSON-serialized `ScheduleCadence` (cron, once, or interval). Indexed on `user_id`, `(next_run_at WHERE status='active')`, `(user_id, status)`, and `(user_id, name)`.
+
+#### `schedule_runs`
+
+```sql
+CREATE TABLE schedule_runs (
+    run_id         TEXT PRIMARY KEY,
+    schedule_id    TEXT NOT NULL,
+    started_at     TEXT NOT NULL,
+    finished_at    TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    output_summary TEXT,
+    turn_count     INTEGER NOT NULL DEFAULT 0,
+    cost           REAL NOT NULL DEFAULT 0.0,
+    notified       INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (schedule_id) REFERENCES schedules(schedule_id) ON DELETE CASCADE
+);
+```
+
+Audit trail for scheduled executions. Each run records timing, outcome status, truncated output (first 500 characters), and whether the user was notified. Indexed on `(schedule_id, started_at DESC)` for efficient history queries. Cascading delete ensures run history is removed when the parent schedule is deleted.
+
+## SchedulerStore
+
+**File:** `memory/src/scheduler_store.rs`
+
+The `SchedulerStore` trait provides the persistence layer for the scheduler system:
+
+```rust
+#[async_trait]
+pub trait SchedulerStore: Send + Sync {
+    async fn create_schedule(&self, def: &ScheduleDefinition) -> Result<(), SchedulerError>;
+    async fn get_schedule(&self, schedule_id: &str) -> Result<ScheduleDefinition, SchedulerError>;
+    async fn search_schedules(&self, user_id: &str, filters: &ScheduleSearchFilters) -> Result<ScheduleSearchResult, SchedulerError>;
+    async fn count_schedules(&self, user_id: &str) -> Result<usize, SchedulerError>;
+    async fn delete_schedule(&self, schedule_id: &str) -> Result<bool, SchedulerError>;
+    async fn update_schedule(&self, schedule_id: &str, patch: &SchedulePatch) -> Result<ScheduleDefinition, SchedulerError>;
+    async fn due_schedules(&self, now: &str, limit: usize) -> Result<Vec<ScheduleDefinition>, SchedulerError>;
+    async fn record_run_and_reschedule(&self, schedule_id: &str, run: &ScheduleRunRecord, next_run_at: Option<String>, new_status: Option<ScheduleStatus>) -> Result<(), SchedulerError>;
+    async fn prune_run_history(&self, schedule_id: &str, keep: usize) -> Result<(), SchedulerError>;
+    async fn get_run_history(&self, schedule_id: &str, limit: usize) -> Result<Vec<ScheduleRunRecord>, SchedulerError>;
+}
+```
+
+The `LibsqlSchedulerStore` implementation uses a dedicated libSQL `Connection` obtained from the memory backend via `LibsqlMemory::connect_for_scheduler()`. The `due_schedules` query uses the indexed `next_run_at` column for efficient polling. The `search_schedules` method builds dynamic WHERE clauses from filters and runs two queries (count + fetch) for pagination support.
+
+### Cadence Evaluation
+
+**File:** `memory/src/cadence.rs`
+
+The cadence module provides next-run computation and validation:
+
+- `next_run_for_cadence(cadence, after)` — computes the next fire time after a given timestamp. Uses the `cron` crate for cron expressions (with timezone support via `chrono-tz`), direct timestamp comparison for one-shot, and `chrono::Duration` for intervals.
+- `validate_cadence(cadence, min_interval_secs)` — validates a cadence at creation/edit time. Checks that one-shot times are in the future, cron expressions are valid with sufficient intervals, and interval durations meet the minimum.
+- `parse_cadence(type, value, timezone)` — constructs a `ScheduleCadence` from tool arguments.
+- `format_in_timezone(utc_timestamp, cadence)` — formats a UTC timestamp in the schedule's timezone for human-friendly display.
+
 ## Message Storage Pipeline
 
 When a message is stored:

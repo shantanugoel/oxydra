@@ -119,9 +119,11 @@ impl WorkspaceSecurityPolicy {
         if let Some(ref allow) = config.allow {
             for entry in allow {
                 if entry.contains('*') {
-                    self.shell_command_allow_globs.push(entry.to_ascii_lowercase());
+                    self.shell_command_allow_globs
+                        .push(entry.to_ascii_lowercase());
                 } else {
-                    self.shell_command_allowlist.insert(entry.to_ascii_lowercase());
+                    self.shell_command_allowlist
+                        .insert(entry.to_ascii_lowercase());
                 }
             }
         }
@@ -139,7 +141,8 @@ impl WorkspaceSecurityPolicy {
                     self.shell_command_allow_globs
                         .retain(|g| !glob_matches(&pattern, g.trim_start_matches('!')));
                 } else {
-                    self.shell_command_allowlist.remove(&entry.to_ascii_lowercase());
+                    self.shell_command_allowlist
+                        .remove(&entry.to_ascii_lowercase());
                 }
             }
         }
@@ -662,18 +665,33 @@ mod tests {
             allow_operators: None,
             env_keys: None,
         };
-        let policy =
-            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
+            .with_shell_config(Some(&config));
 
         // Default command still allowed
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
-        assert!(result.is_ok(), "default command 'ls' should still be allowed");
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "ls /shared"}),
+        );
+        assert!(
+            result.is_ok(),
+            "default command 'ls' should still be allowed"
+        );
 
         // Newly added command allowed
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "npm install"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "npm install"}),
+        );
         assert!(result.is_ok(), "added command 'npm' should be allowed");
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "curl https://example.com"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "curl https://example.com"}),
+        );
         assert!(result.is_ok(), "added command 'curl' should be allowed");
 
         let _ = fs::remove_dir_all(workspace);
@@ -689,14 +707,22 @@ mod tests {
             allow_operators: None,
             env_keys: None,
         };
-        let policy =
-            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
+            .with_shell_config(Some(&config));
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "ls /shared"}),
+        );
         assert!(result.is_err(), "'ls' should be denied after deny config");
 
         // Other defaults still allowed
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "pwd"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "pwd"}),
+        );
         assert!(result.is_ok(), "'pwd' should still be allowed");
 
         let _ = fs::remove_dir_all(workspace);
@@ -712,15 +738,26 @@ mod tests {
             allow_operators: None,
             env_keys: None,
         };
-        let policy =
-            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
+            .with_shell_config(Some(&config));
 
         // Default commands should no longer work
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
-        assert!(result.is_err(), "'ls' should not be allowed when defaults are replaced");
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "ls /shared"}),
+        );
+        assert!(
+            result.is_err(),
+            "'ls' should not be allowed when defaults are replaced"
+        );
 
         // Only explicitly allowed commands work
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "npm install"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "npm install"}),
+        );
         assert!(result.is_ok(), "'npm' should be allowed");
 
         let _ = fs::remove_dir_all(workspace);
@@ -736,13 +773,21 @@ mod tests {
             allow_operators: None,
             env_keys: None,
         };
-        let policy =
-            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
+            .with_shell_config(Some(&config));
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "cargo-fmt"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "cargo-fmt"}),
+        );
         assert!(result.is_ok(), "'cargo-fmt' should match glob 'cargo-*'");
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "pytest foo.py"}));
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "pytest foo.py"}),
+        );
         assert!(result.is_ok(), "'pytest' should match glob '*test*'");
 
         let _ = fs::remove_dir_all(workspace);
@@ -758,14 +803,28 @@ mod tests {
             allow_operators: Some(true),
             env_keys: None,
         };
-        let policy =
-            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(Some(&config));
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
+            .with_shell_config(Some(&config));
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared && pwd"}));
-        assert!(result.is_ok(), "'&&' should be allowed when allow_operators=true");
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "ls /shared && pwd"}),
+        );
+        assert!(
+            result.is_ok(),
+            "'&&' should be allowed when allow_operators=true"
+        );
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "echo foo | grep foo"}));
-        assert!(result.is_ok(), "'|' should be allowed when allow_operators=true");
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "echo foo | grep foo"}),
+        );
+        assert!(
+            result.is_ok(),
+            "'|' should be allowed when allow_operators=true"
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }
@@ -776,11 +835,25 @@ mod tests {
         let policy =
             WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(None);
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls /shared"}));
-        assert!(result.is_ok(), "default 'ls' should be allowed with None config");
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "ls /shared"}),
+        );
+        assert!(
+            result.is_ok(),
+            "default 'ls' should be allowed with None config"
+        );
 
-        let result = policy.enforce("shell_exec", SafetyTier::SideEffecting, &json!({"command": "ls && pwd"}));
-        assert!(result.is_err(), "operators should be denied with None config");
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "ls && pwd"}),
+        );
+        assert!(
+            result.is_err(),
+            "operators should be denied with None config"
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }

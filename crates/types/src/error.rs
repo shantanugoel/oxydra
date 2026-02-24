@@ -73,6 +73,27 @@ pub enum MemoryError {
 }
 
 #[derive(Debug, Error)]
+pub enum SchedulerError {
+    #[error("invalid cron expression: {expression}: {reason}")]
+    InvalidCronExpression { expression: String, reason: String },
+    #[error("invalid schedule cadence: {reason}")]
+    InvalidCadence { reason: String },
+    #[error("schedule not found: {schedule_id}")]
+    NotFound { schedule_id: String },
+    #[error("schedule store error: {message}")]
+    Store { message: String },
+    #[error("schedule execution failed: {message}")]
+    Execution { message: String },
+    #[error("user {user_id} has reached the maximum number of schedules ({max})")]
+    LimitExceeded { user_id: String, max: usize },
+    #[error("unauthorized: schedule {schedule_id} does not belong to user {user_id}")]
+    Unauthorized {
+        schedule_id: String,
+        user_id: String,
+    },
+}
+
+#[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
     Provider(#[from] ProviderError),
@@ -80,6 +101,8 @@ pub enum RuntimeError {
     Tool(#[from] ToolError),
     #[error(transparent)]
     Memory(#[from] MemoryError),
+    #[error(transparent)]
+    Scheduler(#[from] SchedulerError),
     #[error("turn cancelled")]
     Cancelled,
     #[error("turn budget exceeded")]

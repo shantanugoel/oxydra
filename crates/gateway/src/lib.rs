@@ -34,6 +34,7 @@ mod turn_runner;
 #[cfg(test)]
 mod tests;
 
+use runtime::SchedulerNotifier;
 pub use turn_runner::{GatewayTurnRunner, RuntimeGatewayTurnRunner};
 
 const WS_ROUTE: &str = "/ws";
@@ -585,6 +586,18 @@ impl UserSessionState {
 
     fn publish(&self, frame: GatewayServerFrame) {
         let _ = self.events.send(frame);
+    }
+}
+
+impl SchedulerNotifier for GatewayServer {
+    fn notify_user(&self, user_id: &str, frame: GatewayServerFrame) {
+        if let Ok(sessions) = self.sessions.try_read() {
+            for session in sessions.values() {
+                if session.user_id == user_id {
+                    session.publish(frame.clone());
+                }
+            }
+        }
     }
 }
 

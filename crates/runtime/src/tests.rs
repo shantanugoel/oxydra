@@ -2577,3 +2577,403 @@ fn concatenated_arguments_are_fanned_out_as_parallel_tool_calls() {
     assert_eq!(tool_calls[1].name, "web_search");
     assert_eq!(tool_calls[1].arguments["query"], "second query");
 }
+
+// ── Scheduler executor tests ───────────────────────────────────────────
+
+mod scheduler_executor_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+    use types::{
+        GatewayServerFrame, NotificationPolicy, RuntimeError, ScheduleCadence, ScheduleDefinition,
+        ScheduleRunRecord, ScheduleRunStatus, ScheduleSearchFilters, ScheduleSearchResult,
+        ScheduleStatus, SchedulerConfig, SchedulerError,
+    };
+
+    use crate::ScheduledTurnRunner;
+    use crate::scheduler_executor::{SchedulerExecutor, SchedulerNotifier};
+
+    // -- Mock ScheduledTurnRunner --
+
+    #[derive(Clone)]
+    struct MockTurnRunner {
+        responses: Arc<Mutex<Vec<Result<String, RuntimeError>>>>,
+    }
+
+    impl MockTurnRunner {
+        fn new(responses: Vec<Result<String, RuntimeError>>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ScheduledTurnRunner for MockTurnRunner {
+        async fn run_scheduled_turn(
+            &self,
+            _user_id: &str,
+            _runtime_session_id: &str,
+            _prompt: String,
+            _cancellation: CancellationToken,
+        ) -> Result<String, RuntimeError> {
+            let mut responses = self.responses.lock().await;
+            if responses.is_empty() {
+                Ok("default response".to_owned())
+            } else {
+                responses.remove(0)
+            }
+        }
+    }
+
+    // -- Mock SchedulerStore --
+
+    struct MockSchedulerStore {
+        due: Mutex<Vec<ScheduleDefinition>>,
+        recorded_runs: Mutex<Vec<ScheduleRunRecord>>,
+    }
+
+    impl MockSchedulerStore {
+        fn new(due: Vec<ScheduleDefinition>) -> Self {
+            Self {
+                due: Mutex::new(due),
+                recorded_runs: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn recorded_runs(&self) -> Vec<ScheduleRunRecord> {
+            self.recorded_runs.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl memory_crate::SchedulerStore for MockSchedulerStore {
+        async fn create_schedule(&self, _def: &ScheduleDefinition) -> Result<(), SchedulerError> {
+            Ok(())
+        }
+        async fn get_schedule(
+            &self,
+            _schedule_id: &str,
+        ) -> Result<ScheduleDefinition, SchedulerError> {
+            Err(SchedulerError::NotFound {
+                schedule_id: "mock".to_owned(),
+            })
+        }
+        async fn search_schedules(
+            &self,
+            _user_id: &str,
+            _filters: &ScheduleSearchFilters,
+        ) -> Result<ScheduleSearchResult, SchedulerError> {
+            Ok(ScheduleSearchResult {
+                schedules: vec![],
+                total_count: 0,
+                offset: 0,
+                limit: 20,
+            })
+        }
+        async fn count_schedules(&self, _user_id: &str) -> Result<usize, SchedulerError> {
+            Ok(0)
+        }
+        async fn delete_schedule(&self, _schedule_id: &str) -> Result<bool, SchedulerError> {
+            Ok(true)
+        }
+        async fn update_schedule(
+            &self,
+            _schedule_id: &str,
+            _patch: &types::SchedulePatch,
+        ) -> Result<ScheduleDefinition, SchedulerError> {
+            Err(SchedulerError::NotFound {
+                schedule_id: "mock".to_owned(),
+            })
+        }
+        async fn due_schedules(
+            &self,
+            _now: &str,
+            _limit: usize,
+        ) -> Result<Vec<ScheduleDefinition>, SchedulerError> {
+            let mut due = self.due.lock().await;
+            Ok(std::mem::take(&mut *due))
+        }
+        async fn record_run_and_reschedule(
+            &self,
+            _schedule_id: &str,
+            run: &ScheduleRunRecord,
+            _next_run_at: Option<String>,
+            _new_status: Option<ScheduleStatus>,
+        ) -> Result<(), SchedulerError> {
+            self.recorded_runs.lock().await.push(run.clone());
+            Ok(())
+        }
+        async fn prune_run_history(
+            &self,
+            _schedule_id: &str,
+            _keep: usize,
+        ) -> Result<(), SchedulerError> {
+            Ok(())
+        }
+        async fn get_run_history(
+            &self,
+            _schedule_id: &str,
+            _limit: usize,
+        ) -> Result<Vec<ScheduleRunRecord>, SchedulerError> {
+            Ok(vec![])
+        }
+    }
+
+    // -- Mock SchedulerNotifier --
+
+    struct MockNotifier {
+        notifications: Mutex<Vec<GatewayServerFrame>>,
+    }
+
+    impl MockNotifier {
+        fn new() -> Self {
+            Self {
+                notifications: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn notifications(&self) -> Vec<GatewayServerFrame> {
+            self.notifications.lock().await.clone()
+        }
+    }
+
+    impl SchedulerNotifier for MockNotifier {
+        fn notify_user(&self, _user_id: &str, frame: GatewayServerFrame) {
+            let notifications = &self.notifications;
+            // Use try_lock since we're not in async context here
+            if let Ok(mut n) = notifications.try_lock() {
+                n.push(frame);
+            }
+        }
+    }
+
+    fn test_config() -> SchedulerConfig {
+        SchedulerConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            max_concurrent: 2,
+            max_schedules_per_user: 50,
+            max_turns: 10,
+            max_cost: 0.50,
+            max_run_history: 20,
+            min_interval_secs: 60,
+            default_timezone: "Asia/Kolkata".to_owned(),
+            auto_disable_after_failures: 5,
+        }
+    }
+
+    fn test_schedule(id: &str, notification_policy: NotificationPolicy) -> ScheduleDefinition {
+        let now = chrono::Utc::now().to_rfc3339();
+        ScheduleDefinition {
+            schedule_id: id.to_owned(),
+            user_id: "alice".to_owned(),
+            name: Some("Test schedule".to_owned()),
+            goal: "Do the thing".to_owned(),
+            cadence: ScheduleCadence::Interval { every_secs: 3600 },
+            notification_policy,
+            status: ScheduleStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            next_run_at: Some(now.clone()),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_tick_dispatches_due_schedule() {
+        let schedule = test_schedule("sched-1", NotificationPolicy::Always);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Ok("All done".to_owned())]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, ScheduleRunStatus::Success);
+        assert!(runs[0].notified);
+
+        let notifs = notifier.notifications().await;
+        assert_eq!(notifs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn executor_conditional_notification_with_notify_marker() {
+        let schedule = test_schedule("sched-cond", NotificationPolicy::Conditional);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Ok(
+            "[NOTIFY] Important update!".to_owned()
+        )]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].notified);
+
+        let notifs = notifier.notifications().await;
+        assert_eq!(notifs.len(), 1);
+        if let GatewayServerFrame::ScheduledNotification(n) = &notifs[0] {
+            assert_eq!(n.message, "Important update!");
+        } else {
+            panic!("expected ScheduledNotification frame");
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_conditional_notification_without_marker_is_silent() {
+        let schedule = test_schedule("sched-silent", NotificationPolicy::Conditional);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Ok(
+            "Nothing interesting happened".to_owned(),
+        )]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].notified);
+
+        let notifs = notifier.notifications().await;
+        assert!(notifs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn executor_never_notification_is_silent() {
+        let schedule = test_schedule("sched-never", NotificationPolicy::Never);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Ok("Done".to_owned())]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].notified);
+
+        let notifs = notifier.notifications().await;
+        assert!(notifs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn executor_handles_failed_turn() {
+        let schedule = test_schedule("sched-fail", NotificationPolicy::Always);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Err(RuntimeError::BudgetExceeded)]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, ScheduleRunStatus::Failed);
+        assert!(!runs[0].notified);
+    }
+
+    #[tokio::test]
+    async fn executor_one_shot_completes_after_success() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let schedule = ScheduleDefinition {
+            schedule_id: "sched-once".to_owned(),
+            user_id: "alice".to_owned(),
+            name: None,
+            goal: "One time task".to_owned(),
+            cadence: ScheduleCadence::Once { at: now.clone() },
+            notification_policy: NotificationPolicy::Always,
+            status: ScheduleStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            next_run_at: Some(now),
+            last_run_at: None,
+            last_run_status: None,
+            consecutive_failures: 0,
+        };
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Ok("Done".to_owned())]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier,
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, ScheduleRunStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn executor_empty_tick_does_nothing() {
+        let store = Arc::new(MockSchedulerStore::new(vec![]));
+        let runner = Arc::new(MockTurnRunner::new(vec![]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert!(runs.is_empty());
+
+        let notifs = notifier.notifications().await;
+        assert!(notifs.is_empty());
+    }
+}

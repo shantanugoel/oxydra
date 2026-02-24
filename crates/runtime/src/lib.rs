@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tools::ToolRegistry;
@@ -20,10 +21,25 @@ pub type RuntimeStreamEventSender = mpsc::UnboundedSender<StreamItem>;
 mod budget;
 mod memory;
 mod provider_response;
+mod scheduler_executor;
 mod scrubbing;
 mod tool_execution;
 
+pub use scheduler_executor::{SchedulerExecutor, SchedulerNotifier};
 pub use scrubbing::PathScrubMapping;
+
+/// Trait that the gateway layer implements so the scheduler executor can
+/// trigger agent turns without depending on the gateway crate directly.
+#[async_trait]
+pub trait ScheduledTurnRunner: Send + Sync {
+    async fn run_scheduled_turn(
+        &self,
+        user_id: &str,
+        runtime_session_id: &str,
+        prompt: String,
+        cancellation: CancellationToken,
+    ) -> Result<String, RuntimeError>;
+}
 
 #[cfg(test)]
 mod tests;

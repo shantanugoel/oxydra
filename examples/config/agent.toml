@@ -113,6 +113,20 @@ jitter          = false # Add randomized jitter to backoff
 # with SHELL_ are also forwarded with the prefix stripped
 # (e.g. --env SHELL_NPM_TOKEN=xxx becomes NPM_TOKEN in the shell).
 
+# --- Scheduler ---
+# Enable and configure the scheduler for automated recurring/one-off tasks.
+# [scheduler]
+# enabled = true                      # Enable scheduling (default: false)
+# poll_interval_secs = 15             # How often to check for due tasks
+# max_concurrent = 2                  # Max concurrent scheduled runs
+# max_schedules_per_user = 50         # Per-user schedule limit
+# max_turns = 10                      # Max turns per scheduled run (operator-only)
+# max_cost = 0.50                     # Max cost per scheduled run (operator-only)
+# max_run_history = 20                # Run history entries to retain
+# min_interval_secs = 60              # Minimum interval (anti-abuse)
+# default_timezone = "Asia/Kolkata"   # Default timezone for cron schedules
+# auto_disable_after_failures = 5     # Auto-disable after N consecutive failures
+
 # --- Catalog resolution and validation ---
 [catalog]
 skip_catalog_validation = false  # Set true to allow models not in the catalog

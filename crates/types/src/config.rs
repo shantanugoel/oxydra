@@ -25,6 +25,8 @@ pub struct AgentConfig {
     pub catalog: CatalogConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 impl Default for AgentConfig {
@@ -38,6 +40,7 @@ impl Default for AgentConfig {
             reliability: ReliabilityConfig::default(),
             catalog: CatalogConfig::default(),
             tools: ToolsConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -551,6 +554,61 @@ pub struct WebSearchConfig {
     pub safesearch: Option<u8>,
 }
 
+/// Scheduler system configuration.
+///
+/// Controls whether scheduled tasks are enabled, execution budgets,
+/// and anti-abuse limits. Scheduling is disabled by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    /// Whether scheduling is enabled. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Polling interval in seconds for the executor. Default: 15.
+    #[serde(default = "default_scheduler_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Maximum concurrent scheduled executions. Default: 2.
+    #[serde(default = "default_scheduler_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Maximum schedules per user. Default: 50.
+    #[serde(default = "default_scheduler_max_schedules_per_user")]
+    pub max_schedules_per_user: usize,
+    /// Max turns for each scheduled run (operator-only). Default: 10.
+    #[serde(default = "default_scheduler_max_turns")]
+    pub max_turns: usize,
+    /// Max cost for each scheduled run (operator-only). Default: 0.50.
+    #[serde(default = "default_scheduler_max_cost")]
+    pub max_cost: f64,
+    /// Maximum run history entries per schedule. Default: 20.
+    #[serde(default = "default_scheduler_max_run_history")]
+    pub max_run_history: usize,
+    /// Minimum interval between runs in seconds (anti-abuse). Default: 60.
+    #[serde(default = "default_scheduler_min_interval_secs")]
+    pub min_interval_secs: u64,
+    /// Default timezone for cron schedules. Default: "Asia/Kolkata".
+    #[serde(default = "default_scheduler_timezone")]
+    pub default_timezone: String,
+    /// Consecutive failure count before auto-disabling. Default: 5.
+    #[serde(default = "default_scheduler_auto_disable_after_failures")]
+    pub auto_disable_after_failures: u32,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: default_scheduler_poll_interval_secs(),
+            max_concurrent: default_scheduler_max_concurrent(),
+            max_schedules_per_user: default_scheduler_max_schedules_per_user(),
+            max_turns: default_scheduler_max_turns(),
+            max_cost: default_scheduler_max_cost(),
+            max_run_history: default_scheduler_max_run_history(),
+            min_interval_secs: default_scheduler_min_interval_secs(),
+            default_timezone: default_scheduler_timezone(),
+            auto_disable_after_failures: default_scheduler_auto_disable_after_failures(),
+        }
+    }
+}
+
 /// Capability overrides specified on a per-registry-entry basis.
 ///
 /// Used when `skip_catalog_validation` is on and the model is not in the
@@ -756,6 +814,42 @@ fn default_backoff_base_ms() -> u64 {
 
 fn default_backoff_max_ms() -> u64 {
     2_000
+}
+
+fn default_scheduler_poll_interval_secs() -> u64 {
+    15
+}
+
+fn default_scheduler_max_concurrent() -> usize {
+    2
+}
+
+fn default_scheduler_max_schedules_per_user() -> usize {
+    50
+}
+
+fn default_scheduler_max_turns() -> usize {
+    10
+}
+
+fn default_scheduler_max_cost() -> f64 {
+    0.50
+}
+
+fn default_scheduler_max_run_history() -> usize {
+    20
+}
+
+fn default_scheduler_min_interval_secs() -> u64 {
+    60
+}
+
+fn default_scheduler_timezone() -> String {
+    "Asia/Kolkata".to_owned()
+}
+
+fn default_scheduler_auto_disable_after_failures() -> u32 {
+    5
 }
 
 fn is_ratio(value: f64) -> bool {

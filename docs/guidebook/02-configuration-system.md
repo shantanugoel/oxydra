@@ -49,6 +49,8 @@ pub struct AgentConfig {
     pub providers: ProviderConfigs,    // Named provider registry
     pub reliability: ReliabilityConfig,
     pub catalog: CatalogConfig,        // Catalog resolution and validation
+    pub tools: ToolsConfig,
+    pub scheduler: SchedulerConfig,    // Scheduled task system (disabled by default)
 }
 ```
 
@@ -171,6 +173,43 @@ pub struct ToolsConfig {
     pub shell: Option<ShellConfig>,
 }
 ```
+
+### `SchedulerConfig`
+
+Controls the scheduled task system:
+
+```rust
+pub struct SchedulerConfig {
+    pub enabled: bool,                      // Default: false
+    pub poll_interval_secs: u64,            // Default: 15
+    pub max_concurrent: usize,              // Default: 2
+    pub max_schedules_per_user: usize,      // Default: 50
+    pub max_turns: usize,                   // Default: 10 (operator-only, not LLM-controlled)
+    pub max_cost: f64,                      // Default: 0.50 (operator-only, not LLM-controlled)
+    pub max_run_history: usize,             // Default: 20
+    pub min_interval_secs: u64,             // Default: 60
+    pub default_timezone: String,           // Default: "Asia/Kolkata"
+    pub auto_disable_after_failures: u32,   // Default: 5
+}
+```
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `enabled` | `false` | Whether scheduling is active |
+| `poll_interval_secs` | `15` | How often the executor checks for due schedules |
+| `max_concurrent` | `2` | Maximum concurrent scheduled runs |
+| `max_schedules_per_user` | `50` | Per-user schedule limit |
+| `max_turns` | `10` | Max turns per scheduled run (operator-only) |
+| `max_cost` | `0.50` | Max cost per scheduled run (operator-only) |
+| `max_run_history` | `20` | Run history entries retained per schedule |
+| `min_interval_secs` | `60` | Minimum interval between runs (anti-abuse) |
+| `default_timezone` | `"Asia/Kolkata"` | Default timezone for cron schedules |
+| `auto_disable_after_failures` | `5` | Auto-disable after N consecutive failures |
+
+**Key design decisions:**
+- Scheduling is disabled by default and must be explicitly enabled.
+- `max_turns` and `max_cost` are operator-only configuration — they are not exposed in any tool schema. The LLM cannot override execution budgets for scheduled runs.
+- The scheduler requires the memory backend to be enabled, as schedule definitions and run history are stored in the same libSQL database.
 
 ### `ShellConfig`
 
@@ -366,6 +405,20 @@ provider_type = "anthropic"
 # replace_defaults = false
 # allow_operators = false
 # env_keys = ["NPM_TOKEN", "GH_TOKEN"]  # Forward these env vars into the shell container
+
+# --- Scheduler ---
+# Enable and configure the scheduler for automated recurring/one-off tasks.
+# [scheduler]
+# enabled = true
+# poll_interval_secs = 15
+# max_concurrent = 2
+# max_schedules_per_user = 50
+# max_turns = 10            # Operator-only budget per scheduled run
+# max_cost = 0.50           # Operator-only cost cap per scheduled run
+# max_run_history = 20
+# min_interval_secs = 60
+# default_timezone = "Asia/Kolkata"
+# auto_disable_after_failures = 5
 
 # --- Catalog settings ---
 

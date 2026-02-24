@@ -19,7 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tools::{
     RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
-    register_memory_tools,
+    register_memory_tools, register_scheduler_tools,
 };
 use types::{
     AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
@@ -61,6 +61,7 @@ pub struct VmBootstrapRuntime {
     pub config: AgentConfig,
     pub provider: Box<dyn Provider>,
     pub memory: Option<Arc<dyn MemoryRetrieval>>,
+    pub scheduler_store: Option<Arc<dyn memory::SchedulerStore>>,
     pub runtime_limits: RuntimeLimits,
     pub tool_registry: ToolRegistry,
     pub tool_availability: ToolAvailability,
@@ -411,12 +412,12 @@ const MEMORY_DB_FILENAME: &str = "memory.db";
 pub async fn build_memory_backend(
     config: &AgentConfig,
     workspace_root: Option<&Path>,
-) -> Result<Option<Arc<dyn MemoryRetrieval>>, BootstrapError> {
+) -> Result<Option<Arc<LibsqlMemory>>, BootstrapError> {
     config.validate()?;
 
     // Remote mode — handled entirely by `from_config`.
     if let Some(backend) = LibsqlMemory::from_config(&config.memory).await? {
-        return Ok(Some(Arc::new(backend) as Arc<dyn MemoryRetrieval>));
+        return Ok(Some(Arc::new(backend)));
     }
 
     // Local mode — construct the DB path from the workspace root convention.
@@ -435,7 +436,7 @@ pub async fn build_memory_backend(
             "using local memory database"
         );
         let backend = LibsqlMemory::new_local(db_path.to_string_lossy()).await?;
-        return Ok(Some(Arc::new(backend) as Arc<dyn MemoryRetrieval>));
+        return Ok(Some(Arc::new(backend)));
     }
 
     // Memory is disabled.
@@ -493,7 +494,10 @@ pub async fn bootstrap_vm_runtime_with_paths(
         apply_web_search_config(ws_config);
     }
     let provider = build_provider(&config)?;
-    let memory = build_memory_backend(&config, workspace_root.as_deref()).await?;
+    let memory_backend = build_memory_backend(&config, workspace_root.as_deref()).await?;
+    let memory: Option<Arc<dyn MemoryRetrieval>> = memory_backend
+        .clone()
+        .map(|m| m as Arc<dyn MemoryRetrieval>);
     let runtime_limits = runtime_limits(&config);
     let RuntimeToolsBootstrap {
         mut registry,
@@ -509,15 +513,42 @@ pub async fn bootstrap_vm_runtime_with_paths(
         );
     }
 
+    // Build scheduler store and register scheduler tools when enabled.
+    let scheduler_store: Option<Arc<dyn memory::SchedulerStore>> = if config.scheduler.enabled {
+        if let Some(ref backend) = memory_backend {
+            match backend.connect_for_scheduler() {
+                Ok(conn) => {
+                    let store: Arc<dyn memory::SchedulerStore> =
+                        Arc::new(memory::LibsqlSchedulerStore::new(conn));
+                    register_scheduler_tools(&mut registry, store.clone(), &config.scheduler);
+                    tracing::info!("scheduler tools registered");
+                    Some(store)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to create scheduler store; scheduler disabled");
+                    None
+                }
+            }
+        } else {
+            tracing::warn!(
+                "scheduler enabled but memory backend is not available; scheduler disabled"
+            );
+            None
+        }
+    } else {
+        None
+    };
+
     let startup_status = availability.startup_status(bootstrap.as_ref());
     let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());
-    let system_prompt = build_system_prompt(paths, bootstrap.as_ref());
+    let system_prompt = build_system_prompt(paths, bootstrap.as_ref(), scheduler_store.is_some());
 
     Ok(VmBootstrapRuntime {
         bootstrap,
         config,
         provider,
         memory,
+        scheduler_store,
         runtime_limits,
         tool_registry: registry,
         tool_availability: availability,
@@ -683,10 +714,25 @@ fn build_path_scrub_mappings(bootstrap: Option<&RunnerBootstrapEnvelope>) -> Vec
 fn build_system_prompt(
     paths: &ConfigSearchPaths,
     bootstrap: Option<&RunnerBootstrapEnvelope>,
+    scheduler_enabled: bool,
 ) -> Option<String> {
     let sandbox_tier = bootstrap.map_or(types::SandboxTier::Process, |b| b.sandbox_tier);
     let shell_note = if sandbox_tier == types::SandboxTier::Process {
         "\n\nNote: Shell and browser tools are disabled in the current environment."
+    } else {
+        ""
+    };
+
+    let scheduler_note = if scheduler_enabled {
+        "\n\n## Scheduled Tasks\n\n\
+         You can create and manage scheduled tasks that run automatically.\n\
+         - Use `schedule_create` to set up one-off or recurring tasks.\n\
+         - Use `schedule_search` to find existing schedules (supports filtering and pagination).\n\
+         - Use `schedule_edit` to modify, pause, or resume schedules.\n\
+         - Use `schedule_delete` to permanently remove a schedule.\n\n\
+         Each scheduled task executes as an independent agent turn with its own context.\n\
+         Write goals as complete, self-contained instructions — scheduled tasks run\n\
+         without conversational history from this session."
     } else {
         ""
     };
@@ -700,7 +746,7 @@ fn build_system_prompt(
          - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
          When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
          always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
-         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}"
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}{scheduler_note}"
     );
 
     // Look for a SYSTEM.md override/append file in the config search paths.

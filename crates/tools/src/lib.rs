@@ -31,6 +31,7 @@ mod registry;
 pub mod sandbox;
 
 pub mod memory_tools;
+pub mod scheduler_tools;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,10 @@ pub use registry::{
 pub use sandbox::{
     HostWasmToolRunner, ProcessHardeningOutcome, WasmToolRunner, WasmWorkspaceMounts,
     attempt_process_tier_hardening,
+};
+pub use scheduler_tools::{
+    SCHEDULE_CREATE_TOOL_NAME, SCHEDULE_DELETE_TOOL_NAME, SCHEDULE_EDIT_TOOL_NAME,
+    SCHEDULE_SEARCH_TOOL_NAME, register_scheduler_tools,
 };
 
 pub const FILE_READ_TOOL_NAME: &str = "file_read";

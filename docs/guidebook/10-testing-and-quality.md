@@ -56,11 +56,15 @@ Uses `trybuild` to verify that the `#[tool]` macro:
 - **Sidecar integration:** Shell command execution via Unix domain socket to shell-daemon
 - **Resilience:** Fallback from streaming to completion on failure; budget/limit enforcement
 - **Parallelism:** `ReadOnly` tools execute concurrently while `SideEffecting` tools run sequentially
+- **Scheduler executor:** Due schedule dispatching and run recording, conditional notification with `[NOTIFY]` marker (routes when present, silent when absent), `Never` notification policy (always silent), failed turn handling (records with `Failed` status), one-shot completion (marks `Completed` after success), empty tick behavior (no-op when no due schedules)
 
 **Mock infrastructure:**
 - `MockProvider` / `MockTool` — `mockall`-generated mocks for trait contracts
 - `FakeProvider` — scripted stateful provider for complex streaming/completion scenarios
 - `RecordingMemory` — in-memory `Memory` implementation that records all operations
+- `MockSchedulerStore` — in-memory scheduler store for executor unit tests
+- `MockTurnRunner` — scripted `ScheduledTurnRunner` for executor tests
+- `MockNotifier` — captures `SchedulerNotifier` calls for assertion
 
 ### `memory` — Persistence Tests
 
@@ -70,6 +74,8 @@ Uses `trybuild` to verify that the `#[tool]` macro:
 - **Hybrid search:** Merging vector similarity and FTS results with weighted ranking
 - **Schema migrations:** Automatic migration pipeline with data preservation
 - **Concurrency:** `write_summary_state` epoch-based CAS prevents lost updates
+- **Scheduler store:** CRUD roundtrip (create, get, search, delete, update), count and limit enforcement, search with filters (status, name, cadence type), cascading delete (removing a schedule removes its run history), pause/resume state transitions, due schedules filtering (only active schedules with `next_run_at` in the past), run recording and history pruning
+- **Cadence evaluation:** Interval computation, one-shot future/past detection, cron with timezone, validation (rejects too-frequent intervals, invalid timezones, accepts valid cadences), cadence parsing for all types (cron, once, interval), error cases (invalid type, non-numeric interval), timezone formatting for cron and interval
 
 ## E2E Test Infrastructure
 

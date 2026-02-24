@@ -10,9 +10,10 @@ use std::{
 use clap::Parser;
 use gateway::{GatewayServer, RuntimeGatewayTurnRunner};
 use runner::{BootstrapError, CliOverrides, bootstrap_vm_runtime};
-use runtime::AgentRuntime;
+use runtime::{AgentRuntime, SchedulerExecutor};
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use types::init_tracing;
 
@@ -150,9 +151,27 @@ async fn run() -> Result<(), VmError> {
         model_id,
     ));
     let gateway = Arc::new(GatewayServer::with_startup_status(
-        turn_runner,
+        turn_runner.clone(),
         startup_status,
     ));
+
+    // Spawn the scheduler executor as a background task when enabled.
+    let scheduler_cancellation = CancellationToken::new();
+    if let Some(scheduler_store) = bootstrap.scheduler_store {
+        let scheduler_config = bootstrap.config.scheduler.clone();
+        let executor = SchedulerExecutor::new(
+            scheduler_store,
+            turn_runner as Arc<dyn runtime::ScheduledTurnRunner>,
+            gateway.clone() as Arc<dyn runtime::SchedulerNotifier>,
+            scheduler_config,
+            scheduler_cancellation.child_token(),
+        );
+        tokio::spawn(async move {
+            executor.run().await;
+        });
+        info!("scheduler executor started");
+    }
+
     let app = Arc::clone(&gateway).router();
 
     let listener = TcpListener::bind(&args.gateway_bind)
@@ -172,8 +191,9 @@ async fn run() -> Result<(), VmError> {
     // Run the gateway until the process receives a termination signal, then
     // clean up the endpoint marker so stale files do not confuse future
     // `connect_tui` calls.
-    let shutdown = async {
+    let shutdown = async move {
         let _ = tokio::signal::ctrl_c().await;
+        scheduler_cancellation.cancel();
     };
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)

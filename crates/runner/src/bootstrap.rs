@@ -30,8 +30,8 @@ use types::{
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
 const USER_CONFIG_DIR: &str = ".config/oxydra";
 const WORKSPACE_CONFIG_DIR: &str = ".oxydra";
-const AGENT_CONFIG_FILE: &str = "agent.toml";
-const PROVIDERS_CONFIG_FILE: &str = "providers.toml";
+pub const AGENT_CONFIG_FILE_NAME: &str = "agent.toml";
+pub const PROVIDERS_CONFIG_FILE_NAME: &str = "providers.toml";
 const CONFIG_ENV_PREFIX: &str = "OXYDRA__";
 const DEFAULT_PROFILE: &str = "default";
 
@@ -732,7 +732,7 @@ fn build_system_prompt(
 }
 
 fn merge_directory(mut figment: Figment, directory: &Path, selected_profile: &str) -> Figment {
-    for file_name in [AGENT_CONFIG_FILE, PROVIDERS_CONFIG_FILE] {
+    for file_name in [AGENT_CONFIG_FILE_NAME, PROVIDERS_CONFIG_FILE_NAME] {
         let path = directory.join(file_name);
         if path.is_file() {
             figment = if file_uses_profiles(&path, selected_profile) {
@@ -830,7 +830,7 @@ mod tests {
         let paths = test_paths(&root);
         write_config(
             &paths.system_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 config_version = "1.0.0"
 [selection]
@@ -842,7 +842,7 @@ max_turns = 2
         );
         write_config(
             &paths.user_dir.clone().expect("user dir should be present"),
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 [runtime]
 max_turns = 3
@@ -850,7 +850,7 @@ max_turns = 3
         );
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 [runtime]
 max_turns = 4
@@ -858,7 +858,7 @@ max_turns = 4
         );
         write_config(
             &paths.workspace_dir,
-            PROVIDERS_CONFIG_FILE,
+            PROVIDERS_CONFIG_FILE_NAME,
             r#"
 [providers.registry.openai]
 provider_type = "openai"
@@ -910,7 +910,7 @@ base_url = "https://workspace-openai.example"
         let paths = test_paths(&root);
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 [default]
 config_version = "1.0.0"
@@ -975,7 +975,7 @@ max_turns = 11
         let paths = test_paths(&root);
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 config_version = "2.0.0"
 [selection]
@@ -1003,7 +1003,7 @@ model = "gpt-4o-mini"
         let paths = test_paths(&root);
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 config_version = "1.0.0"
 [selection]
@@ -1281,7 +1281,7 @@ remote_url = "libsql://example-org.turso.io"
     fn write_bootstrap_config(paths: &ConfigSearchPaths) {
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 config_version = "1.0.0"
 [selection]
@@ -1407,7 +1407,7 @@ api_key = "test-openai-key"
         // at the openai catalog via `catalog_provider`.
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 config_version = "1.0.0"
 [selection]
@@ -1417,7 +1417,7 @@ model = "gpt-4o-mini"
         );
         write_config(
             &paths.workspace_dir,
-            PROVIDERS_CONFIG_FILE,
+            PROVIDERS_CONFIG_FILE_NAME,
             r#"
 [providers.registry.my-proxy]
 provider_type = "openai"
@@ -1590,7 +1590,7 @@ catalog_provider = "openai"
         let paths = test_paths(&root);
         write_config(
             &paths.workspace_dir,
-            AGENT_CONFIG_FILE,
+            AGENT_CONFIG_FILE_NAME,
             r#"
 config_version = "1.0.0"
 [selection]

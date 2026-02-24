@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use types::{
-    FunctionDecl, MemoryHybridQueryRequest, MemoryRetrieval, SafetyTier, Tool,
-    ToolError, ToolExecutionContext,
+    FunctionDecl, MemoryHybridQueryRequest, MemoryRetrieval, SafetyTier, Tool, ToolError,
+    ToolExecutionContext,
 };
 
 use crate::{execution_failed, invalid_args, parse_args};
@@ -54,10 +54,7 @@ struct MemoryDeleteArgs {
 // Helper: resolve current user_id / session_id from ToolExecutionContext
 // ---------------------------------------------------------------------------
 
-fn resolve_user_id(
-    context: &ToolExecutionContext,
-    tool_name: &str,
-) -> Result<String, ToolError> {
+fn resolve_user_id(context: &ToolExecutionContext, tool_name: &str) -> Result<String, ToolError> {
     context
         .user_id
         .clone()
@@ -85,11 +82,7 @@ pub struct MemorySearchTool {
 }
 
 impl MemorySearchTool {
-    pub fn new(
-        memory: Arc<dyn MemoryRetrieval>,
-        vector_weight: f64,
-        fts_weight: f64,
-    ) -> Self {
+    pub fn new(memory: Arc<dyn MemoryRetrieval>, vector_weight: f64, fts_weight: f64) -> Self {
         Self {
             memory,
             vector_weight,
@@ -217,10 +210,7 @@ impl Tool for MemorySearchTool {
                         Ok(conversation_results) => {
                             // Collect existing chunk IDs to deduplicate.
                             let existing_chunks: std::collections::HashSet<String> =
-                                memory_results
-                                    .iter()
-                                    .map(|r| r.chunk_id.clone())
-                                    .collect();
+                                memory_results.iter().map(|r| r.chunk_id.clone()).collect();
 
                             for result in conversation_results {
                                 if existing_chunks.contains(&result.chunk_id) {
@@ -592,16 +582,10 @@ pub fn register_memory_tools(
         MEMORY_SEARCH_TOOL_NAME,
         MemorySearchTool::new(memory.clone(), vector_weight, fts_weight),
     );
-    registry.register(
-        MEMORY_SAVE_TOOL_NAME,
-        MemorySaveTool::new(memory.clone()),
-    );
+    registry.register(MEMORY_SAVE_TOOL_NAME, MemorySaveTool::new(memory.clone()));
     registry.register(
         MEMORY_UPDATE_TOOL_NAME,
         MemoryUpdateTool::new(memory.clone()),
     );
-    registry.register(
-        MEMORY_DELETE_TOOL_NAME,
-        MemoryDeleteTool::new(memory),
-    );
+    registry.register(MEMORY_DELETE_TOOL_NAME, MemoryDeleteTool::new(memory));
 }

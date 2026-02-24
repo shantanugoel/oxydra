@@ -23,7 +23,6 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode, Uri, body::Bytes};
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector, Uri as HyperlocalUri};
-use tools::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -31,6 +30,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
+use tools::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use tracing::{info, warn};
 use types::{
     BootstrapEnvelopeError, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame, GatewayClientHello,
@@ -178,6 +178,17 @@ impl Runner {
             None
         };
 
+        // Copy host agent config into the workspace internal directory so the
+        // guest container can discover it. Also collect env vars referenced by
+        // the config (api_key_env, etc.) to forward into the container.
+        let mut extra_env = if sandbox_tier != SandboxTier::Process {
+            copy_agent_config_to_workspace(&workspace)?;
+            collect_config_env_vars()
+        } else {
+            Vec::new()
+        };
+        extra_env.extend(request.extra_env);
+
         let mut launch = self.backend.launch(SandboxLaunchRequest {
             user_id: user_id.clone(),
             host_os: host_os.to_owned(),
@@ -190,6 +201,7 @@ impl Runner {
             requested_shell: capabilities.shell,
             requested_browser: capabilities.browser,
             bootstrap_file,
+            extra_env,
         })?;
 
         let sidecar_endpoint = if launch.shell_available || launch.browser_available {
@@ -662,6 +674,10 @@ pub struct DockerSandboxVmHandle {
 pub struct RunnerStartRequest {
     pub user_id: String,
     pub insecure: bool,
+    /// Extra environment variables to inject into the guest container.
+    /// Each entry is `KEY=VALUE`. These are forwarded as-is and take
+    /// precedence over auto-detected env vars from the agent config.
+    pub extra_env: Vec<String>,
 }
 
 impl RunnerStartRequest {
@@ -669,6 +685,7 @@ impl RunnerStartRequest {
         Self {
             user_id: user_id.into(),
             insecure: false,
+            extra_env: Vec::new(),
         }
     }
 }
@@ -947,6 +964,9 @@ pub struct SandboxLaunchRequest {
     pub requested_browser: bool,
     /// Path to the bootstrap envelope JSON file, pre-written for Container/MicroVM tiers.
     pub bootstrap_file: Option<PathBuf>,
+    /// Extra environment variables to inject into the guest container.
+    /// Each entry is `KEY=VALUE`.
+    pub extra_env: Vec<String>,
 }
 
 impl SandboxLaunchRequest {
@@ -1294,6 +1314,8 @@ struct DockerContainerLaunchParams {
     resource_limits: RunnerResourceLimits,
     labels: HashMap<String, String>,
     bootstrap_file: Option<PathBuf>,
+    /// Extra environment variables to inject into the container (`KEY=VALUE`).
+    extra_env: Vec<String>,
 }
 
 async fn launch_docker_container_async(
@@ -1360,6 +1382,11 @@ async fn launch_docker_container_async(
         }
     };
 
+    // Compute working_dir before workspace.root is moved into binds.
+    // Setting working_dir to the workspace root allows ConfigSearchPaths::discover()
+    // inside the container to resolve CWD/.oxydra/ to the internal config dir.
+    let working_dir = Some(params.workspace.root.to_string_lossy().into_owned());
+
     let mut binds: Vec<String> = match params.role {
         RunnerGuestRole::OxydraVm => {
             // OxydraVm gets the full workspace root (includes .oxydra/ internal dir)
@@ -1410,12 +1437,14 @@ async fn launch_docker_container_async(
             "{CONTAINER_BOOTSTRAP_ENV_KEY}={CONTAINER_BOOTSTRAP_MOUNT_PATH}"
         ));
     }
+    env.extend(params.extra_env);
 
     let config = ContainerCreateBody {
         image: Some(params.image),
         labels: Some(params.labels),
         entrypoint: Some(entrypoint),
         cmd: Some(cmd),
+        working_dir,
         env: if env.is_empty() { None } else { Some(env) },
         host_config: Some(HostConfig {
             binds: Some(binds),
@@ -1877,6 +1906,85 @@ fn write_bootstrap_file(
         let _ = fs::set_permissions(&bootstrap_path, fs::Permissions::from_mode(0o400));
     }
     Ok(bootstrap_path)
+}
+
+/// Copy the host's agent configuration files (`agent.toml` and `providers.toml`)
+/// into the user's workspace internal directory (`<workspace>/.oxydra/`).
+/// This makes the config available inside the container, which mounts the
+/// workspace root. Files are copied (not moved) so the host config is preserved.
+fn copy_agent_config_to_workspace(workspace: &UserWorkspace) -> Result<(), RunnerError> {
+    let host_paths = bootstrap::ConfigSearchPaths::discover().map_err(|source| {
+        RunnerError::ProvisionWorkspace {
+            path: workspace.internal.clone(),
+            source: io::Error::other(source.to_string()),
+        }
+    })?;
+
+    for file_name in [
+        bootstrap::AGENT_CONFIG_FILE_NAME,
+        bootstrap::PROVIDERS_CONFIG_FILE_NAME,
+    ] {
+        let source_path = host_paths.workspace_dir.join(file_name);
+        if source_path.is_file() {
+            let dest_path = workspace.internal.join(file_name);
+            fs::copy(&source_path, &dest_path).map_err(|source| {
+                RunnerError::ProvisionWorkspace {
+                    path: dest_path,
+                    source,
+                }
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Collect environment variable names that the agent config references for API
+/// keys and other credentials. For each `api_key_env` field in the provider
+/// registry and web-search config, plus well-known provider-type defaults
+/// (e.g. `OPENAI_API_KEY`), look up the value in the runner's own environment
+/// and return `KEY=VALUE` pairs for variables that are set.
+fn collect_config_env_vars() -> Vec<String> {
+    let agent_config = match load_agent_config(None, CliOverrides::default()) {
+        Ok(config) => config,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut env_var_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // Collect api_key_env from all provider registry entries.
+    for entry in agent_config.providers.registry.values() {
+        if let Some(ref key_env) = entry.api_key_env
+            && !key_env.is_empty()
+        {
+            env_var_names.insert(key_env.clone());
+        }
+    }
+
+    // Collect web search config env var references.
+    if let Some(ref ws) = agent_config.tools.web_search {
+        if let Some(ref key_env) = ws.api_key_env
+            && !key_env.is_empty()
+        {
+            env_var_names.insert(key_env.clone());
+        }
+        if let Some(ref engine_env) = ws.engine_id_env
+            && !engine_env.is_empty()
+        {
+            env_var_names.insert(engine_env.clone());
+        }
+    }
+
+    // Resolve each env var name against the runner's own environment.
+    let mut result = Vec::new();
+    for var_name in &env_var_names {
+        if let Ok(value) = std::env::var(var_name)
+            && !value.is_empty()
+        {
+            result.push(format!("{var_name}={value}"));
+        }
+    }
+    result
 }
 
 fn ensure_firecracker_api_ready(api_socket_path: PathBuf) -> Result<(), RunnerError> {

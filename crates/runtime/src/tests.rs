@@ -176,7 +176,11 @@ impl Tool for MockReadTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let parsed: Value = serde_json::from_str(args)?;
         let path = parsed.get("path").and_then(Value::as_str).ok_or_else(|| {
             ToolError::InvalidArguments {
@@ -209,7 +213,11 @@ impl Tool for SlowTool {
         )
     }
 
-    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         sleep(Duration::from_millis(50)).await;
         Ok("done".to_owned())
     }
@@ -236,7 +244,11 @@ impl Tool for SensitiveOutputTool {
         )
     }
 
-    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         Ok(
             "api_key=sk_live_ABC123DEF456GHI789JKL012MNO345PQR678\nartifact_id=A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2\nstatus=ok"
                 .to_owned(),
@@ -2527,10 +2539,7 @@ fn try_extract_first_json_object_returns_none_for_non_object_input() {
 fn try_extract_first_json_object_ignores_trailing_whitespace() {
     let raw = r#"{"query":"test"}   "#;
     let result = super::try_extract_first_json_object(raw);
-    assert!(
-        result.is_none(),
-        "trailing whitespace is not concatenation"
-    );
+    assert!(result.is_none(), "trailing whitespace is not concatenation");
 }
 
 #[test]
@@ -2541,9 +2550,7 @@ fn concatenated_arguments_are_salvaged_during_accumulator_build() {
         index: 0,
         id: Some("call_1".to_owned()),
         name: Some("web_search".to_owned()),
-        arguments: Some(
-            r#"{"query":"first query"}{"query":"second query"}"#.to_owned(),
-        ),
+        arguments: Some(r#"{"query":"first query"}{"query":"second query"}"#.to_owned()),
         metadata: None,
     });
 

@@ -1137,9 +1137,14 @@ async fn store_note_creates_chunks_with_note_id_in_metadata() {
     let db_path = temp_db_path("store-note-metadata");
     let backend = local_memory_backend(&db_path).await;
 
-    MemoryRetrieval::store_note(&backend, "memory:alice", "note-abc123", "User likes chocolate")
-        .await
-        .expect("store_note should succeed");
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:alice",
+        "note-abc123",
+        "User likes chocolate",
+    )
+    .await
+    .expect("store_note should succeed");
 
     let conn = backend.connect().expect("backend should connect");
     let mut rows = conn
@@ -1179,9 +1184,14 @@ async fn store_note_creates_searchable_conversation_event() {
     let db_path = temp_db_path("store-note-event");
     let backend = local_memory_backend(&db_path).await;
 
-    MemoryRetrieval::store_note(&backend, "memory:alice", "note-ev1", "User prefers dark mode")
-        .await
-        .expect("store_note should succeed");
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:alice",
+        "note-ev1",
+        "User prefers dark mode",
+    )
+    .await
+    .expect("store_note should succeed");
 
     let conn = backend.connect().expect("backend should connect");
     let mut rows = conn
@@ -1241,10 +1251,9 @@ async fn delete_note_removes_chunks_and_event() {
     assert!(count > 0, "chunks should exist before deletion");
     drop(count_rows);
 
-    let found =
-        MemoryRetrieval::delete_note(&backend, "memory:alice", "note-del1")
-            .await
-            .expect("delete_note should succeed");
+    let found = MemoryRetrieval::delete_note(&backend, "memory:alice", "note-del1")
+        .await
+        .expect("delete_note should succeed");
     assert!(found, "delete should report note was found");
 
     // Verify chunks are gone
@@ -1291,10 +1300,9 @@ async fn delete_note_returns_false_for_nonexistent_note() {
     let db_path = temp_db_path("delete-note-missing");
     let backend = local_memory_backend(&db_path).await;
 
-    let found =
-        MemoryRetrieval::delete_note(&backend, "memory:alice", "note-nonexistent")
-            .await
-            .expect("delete_note should not fail for missing note");
+    let found = MemoryRetrieval::delete_note(&backend, "memory:alice", "note-nonexistent")
+        .await
+        .expect("delete_note should not fail for missing note");
     assert!(!found, "should return false for non-existent note");
 
     let _ = fs::remove_file(db_path);
@@ -1330,9 +1338,7 @@ async fn note_save_search_update_delete_roundtrip() {
     .await
     .expect("search should succeed");
     assert!(!results.is_empty(), "search should find the saved note");
-    let found_note = results
-        .iter()
-        .any(|r| r.text.contains("Shantanu"));
+    let found_note = results.iter().any(|r| r.text.contains("Shantanu"));
     assert!(found_note, "search should find 'Shantanu'");
 
     // Update the note
@@ -1371,10 +1377,9 @@ async fn note_save_search_update_delete_roundtrip() {
     );
 
     // Delete
-    let found =
-        MemoryRetrieval::delete_note(&backend, "memory:bob", "note-rt1")
-            .await
-            .expect("delete should succeed");
+    let found = MemoryRetrieval::delete_note(&backend, "memory:bob", "note-rt1")
+        .await
+        .expect("delete should succeed");
     assert!(found, "delete should report note was found");
 
     // Search again - should find nothing
@@ -1405,24 +1410,14 @@ async fn note_user_scoping_isolates_across_users() {
     let backend = local_memory_backend(&db_path).await;
 
     // User A saves a note
-    MemoryRetrieval::store_note(
-        &backend,
-        "memory:user-a",
-        "note-ua1",
-        "User A prefers red",
-    )
-    .await
-    .expect("user A store should succeed");
+    MemoryRetrieval::store_note(&backend, "memory:user-a", "note-ua1", "User A prefers red")
+        .await
+        .expect("user A store should succeed");
 
     // User B saves a note
-    MemoryRetrieval::store_note(
-        &backend,
-        "memory:user-b",
-        "note-ub1",
-        "User B prefers blue",
-    )
-    .await
-    .expect("user B store should succeed");
+    MemoryRetrieval::store_note(&backend, "memory:user-b", "note-ub1", "User B prefers blue")
+        .await
+        .expect("user B store should succeed");
 
     // User A's search should only find their own note
     let results_a = MemoryRetrieval::hybrid_query(
@@ -1476,9 +1471,14 @@ async fn store_note_multiple_notes_in_same_session_coexist() {
     let db_path = temp_db_path("note-multiple-coexist");
     let backend = local_memory_backend(&db_path).await;
 
-    MemoryRetrieval::store_note(&backend, "memory:carol", "note-m1", "Favorite color is green")
-        .await
-        .expect("first note should store");
+    MemoryRetrieval::store_note(
+        &backend,
+        "memory:carol",
+        "note-m1",
+        "Favorite color is green",
+    )
+    .await
+    .expect("first note should store");
     MemoryRetrieval::store_note(
         &backend,
         "memory:carol",

@@ -1,4 +1,7 @@
-use super::{scrubbing::{scrub_host_paths, scrub_tool_output, translate_tool_arg_paths}, *};
+use super::{
+    scrubbing::{scrub_host_paths, scrub_tool_output, translate_tool_arg_paths},
+    *,
+};
 
 /// Recursively strip `additionalProperties` from every object node in a JSON Schema value
 /// so the runtime validator accepts extra properties the LLM may have injected.

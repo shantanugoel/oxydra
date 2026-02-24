@@ -442,6 +442,7 @@ impl CrateSandboxBackend {
             resource_limits: request.resource_limits.clone(),
             labels,
             bootstrap_file: request.bootstrap_file.clone(),
+            extra_env: request.extra_env.clone(),
         }))?;
 
         Ok(RunnerGuestHandle::for_docker(

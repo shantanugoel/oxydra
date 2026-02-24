@@ -636,7 +636,11 @@ impl Tool for StaticOutputTool {
         )
     }
 
-    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         Ok("1234567890".to_owned())
     }
 
@@ -661,7 +665,11 @@ impl Tool for SlowTool {
         )
     }
 
-    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         sleep(Duration::from_millis(25)).await;
         Ok("done".to_owned())
     }
@@ -732,11 +740,13 @@ mod memory_tool_tests {
         assert_eq!(schema.name, MEMORY_SEARCH_TOOL_NAME);
         assert!(schema.description.is_some());
         assert_eq!(schema.parameters["type"], "object");
-        assert!(schema.parameters["required"]
-            .as_array()
-            .expect("required should be array")
-            .iter()
-            .any(|v| v.as_str() == Some("query")));
+        assert!(
+            schema.parameters["required"]
+                .as_array()
+                .expect("required should be array")
+                .iter()
+                .any(|v| v.as_str() == Some("query"))
+        );
         assert_eq!(tool.safety_tier(), SafetyTier::ReadOnly);
     }
 
@@ -747,11 +757,13 @@ mod memory_tool_tests {
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_SAVE_TOOL_NAME);
         assert!(schema.description.is_some());
-        assert!(schema.parameters["required"]
-            .as_array()
-            .expect("required should be array")
-            .iter()
-            .any(|v| v.as_str() == Some("content")));
+        assert!(
+            schema.parameters["required"]
+                .as_array()
+                .expect("required should be array")
+                .iter()
+                .any(|v| v.as_str() == Some("content"))
+        );
         assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
     }
 
@@ -775,11 +787,13 @@ mod memory_tool_tests {
         let tool = MemoryDeleteTool::new(memory);
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_DELETE_TOOL_NAME);
-        assert!(schema.parameters["required"]
-            .as_array()
-            .expect("required should be array")
-            .iter()
-            .any(|v| v.as_str() == Some("note_id")));
+        assert!(
+            schema.parameters["required"]
+                .as_array()
+                .expect("required should be array")
+                .iter()
+                .any(|v| v.as_str() == Some("note_id"))
+        );
         assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
     }
 
@@ -828,7 +842,10 @@ mod memory_tool_tests {
         let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         save_tool
-            .execute(&json!({"content": "User prefers dark mode"}).to_string(), &ctx)
+            .execute(
+                &json!({"content": "User prefers dark mode"}).to_string(),
+                &ctx,
+            )
             .await
             .expect("save should succeed");
 
@@ -859,7 +876,10 @@ mod memory_tool_tests {
         let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         let save_result = save_tool
-            .execute(&json!({"content": "User likes chocolates"}).to_string(), &ctx)
+            .execute(
+                &json!({"content": "User likes chocolates"}).to_string(),
+                &ctx,
+            )
             .await
             .expect("save should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&save_result).unwrap();
@@ -913,14 +933,20 @@ mod memory_tool_tests {
         let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         let save_result = save_tool
-            .execute(&json!({"content": "User's name is Shantanu"}).to_string(), &ctx)
+            .execute(
+                &json!({"content": "User's name is Shantanu"}).to_string(),
+                &ctx,
+            )
             .await
             .expect("save should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&save_result).unwrap();
         let note_id = parsed["note_id"].as_str().unwrap().to_owned();
 
         let update_result = update_tool
-            .execute(&json!({"note_id": note_id, "content": "User prefers SG"}).to_string(), &ctx)
+            .execute(
+                &json!({"note_id": note_id, "content": "User prefers SG"}).to_string(),
+                &ctx,
+            )
             .await
             .expect("update should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&update_result).unwrap();
@@ -1010,7 +1036,10 @@ mod memory_tool_tests {
         let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         save_tool
-            .execute(&json!({"content": "Alice's secret preference"}).to_string(), &ctx_alice)
+            .execute(
+                &json!({"content": "Alice's secret preference"}).to_string(),
+                &ctx_alice,
+            )
             .await
             .expect("save for alice should succeed");
 
@@ -1021,21 +1050,18 @@ mod memory_tool_tests {
             .expect("search for bob should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let results = parsed.as_array().unwrap();
-        assert!(
-            results.is_empty(),
-            "bob should not see alice's notes"
-        );
+        assert!(results.is_empty(), "bob should not see alice's notes");
 
         // Alice should see her own notes
         let result = search_tool
-            .execute(&json!({"query": "secret preference"}).to_string(), &ctx_alice)
+            .execute(
+                &json!({"query": "secret preference"}).to_string(),
+                &ctx_alice,
+            )
             .await
             .expect("search for alice should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let results = parsed.as_array().unwrap();
-        assert!(
-            !results.is_empty(),
-            "alice should see her own notes"
-        );
+        assert!(!results.is_empty(), "alice should see her own notes");
     }
 }

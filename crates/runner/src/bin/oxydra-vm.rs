@@ -93,11 +93,15 @@ async fn run() -> Result<(), VmError> {
     } else {
         None
     };
-    let bootstrap =
-        bootstrap_vm_runtime(bootstrap_frame.as_deref(), None, CliOverrides {
+    let bootstrap = bootstrap_vm_runtime(
+        bootstrap_frame.as_deref(),
+        None,
+        CliOverrides {
             workspace_root: Some(args.workspace_root.clone()),
             ..CliOverrides::default()
-        }).await?;
+        },
+    )
+    .await?;
     let provider_id = bootstrap.config.selection.provider.clone();
     let model_id = bootstrap.config.selection.model.clone();
     let startup_status = bootstrap.startup_status.clone();
@@ -140,9 +144,11 @@ async fn run() -> Result<(), VmError> {
         runtime = runtime.with_memory_retrieval(memory);
     }
 
-    let turn_runner = Arc::new(
-        RuntimeGatewayTurnRunner::new(Arc::new(runtime), provider_id, model_id),
-    );
+    let turn_runner = Arc::new(RuntimeGatewayTurnRunner::new(
+        Arc::new(runtime),
+        provider_id,
+        model_id,
+    ));
     let gateway = Arc::new(GatewayServer::with_startup_status(
         turn_runner,
         startup_status,

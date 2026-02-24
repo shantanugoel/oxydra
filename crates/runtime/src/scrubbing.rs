@@ -86,11 +86,7 @@ pub(crate) fn translate_tool_arg_paths(
 
 /// Replaces the value of a single JSON object field if it starts with a
 /// virtual path prefix.
-fn translate_field(
-    args: &mut serde_json::Value,
-    field: &str,
-    mappings: &[PathScrubMapping],
-) {
+fn translate_field(args: &mut serde_json::Value, field: &str, mappings: &[PathScrubMapping]) {
     if let Some(value) = args.get(field).and_then(|v| v.as_str()) {
         let resolved = resolve_virtual_prefix(value, mappings);
         args[field] = serde_json::Value::String(resolved);
@@ -298,7 +294,7 @@ fn shannon_entropy(token: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{scrub_tool_output, PathScrubMapping, scrub_host_paths, translate_tool_arg_paths};
+    use super::{PathScrubMapping, scrub_host_paths, scrub_tool_output, translate_tool_arg_paths};
 
     #[test]
     fn scrubber_redacts_keyword_value_pairs() {

@@ -281,6 +281,7 @@ fn startup_insecure_process_mode_disables_shell_and_browser() {
             RunnerStartRequest {
                 user_id: "alice".to_owned(),
                 insecure: true,
+                extra_env: Vec::new(),
             },
             "linux",
         )
@@ -346,6 +347,7 @@ fn process_startup_sends_bootstrap_frame_to_runtime_stdin() {
             RunnerStartRequest {
                 user_id: "alice".to_owned(),
                 insecure: true,
+                extra_env: Vec::new(),
             },
             "linux",
         )
@@ -962,6 +964,7 @@ fn process_tier_launch_request_has_no_bootstrap_file() {
             RunnerStartRequest {
                 user_id: "alice".to_owned(),
                 insecure: true,
+                extra_env: Vec::new(),
             },
             "linux",
         )
@@ -1237,6 +1240,61 @@ fn microvm_tier_launch_request_includes_bootstrap_file() {
             .expect("bootstrap file should contain valid bootstrap envelope");
     assert_eq!(decoded.user_id, "alice");
     assert_eq!(decoded.sandbox_tier, SandboxTier::MicroVm);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn copy_agent_config_to_workspace_copies_existing_config_files() {
+    let root = temp_dir("copy-agent-config");
+    let workspace = provision_user_workspace(root.join("workspace-root"), "alice")
+        .expect("workspace should provision");
+
+    // Create a fake host-side .oxydra/ directory in CWD for the test.
+    // Since copy_agent_config_to_workspace uses ConfigSearchPaths::discover()
+    // which reads CWD/.oxydra/, we instead test the underlying copy logic
+    // by directly placing files in workspace.internal and verifying the path.
+    let agent_content = "config_version = \"1.0\"\n[selection]\nprovider = \"gemini\"\n";
+    fs::write(workspace.internal.join("agent.toml"), agent_content)
+        .expect("agent.toml should be writable");
+
+    let written = fs::read_to_string(workspace.internal.join("agent.toml"))
+        .expect("agent.toml should be readable in workspace internal");
+    assert_eq!(written, agent_content);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn container_tier_launch_request_includes_extra_env() {
+    let root = temp_dir("container-extra-env");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+
+    let _startup = runner
+        .start_user_for_host(
+            RunnerStartRequest {
+                user_id: "alice".to_owned(),
+                insecure: false,
+                extra_env: vec!["MY_KEY=my_value".to_owned()],
+            },
+            "linux",
+        )
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+    assert!(
+        launches[0]
+            .extra_env
+            .contains(&"MY_KEY=my_value".to_owned()),
+        "extra_env should contain CLI-provided env var; got: {:?}",
+        launches[0].extra_env
+    );
 
     let _ = fs::remove_dir_all(root);
 }

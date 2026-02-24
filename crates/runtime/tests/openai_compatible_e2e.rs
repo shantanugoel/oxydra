@@ -92,8 +92,9 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
     );
 
     let mut tools = ToolRegistry::default();
-    let wasm_runner: std::sync::Arc<dyn tools::WasmToolRunner> =
-        std::sync::Arc::new(tools::HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+    let wasm_runner: std::sync::Arc<dyn tools::WasmToolRunner> = std::sync::Arc::new(
+        tools::HostWasmToolRunner::for_bootstrap_workspace(&workspace),
+    );
     tools.register("file_read", ReadTool::new(wasm_runner));
     let runtime = AgentRuntime::new(
         Box::new(provider),
@@ -196,8 +197,9 @@ async fn live_openrouter_tool_call_smoke() {
     );
 
     let mut tools = ToolRegistry::default();
-    let wasm_runner: std::sync::Arc<dyn tools::WasmToolRunner> =
-        std::sync::Arc::new(tools::HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+    let wasm_runner: std::sync::Arc<dyn tools::WasmToolRunner> = std::sync::Arc::new(
+        tools::HostWasmToolRunner::for_bootstrap_workspace(&workspace),
+    );
     tools.register("file_read", ReadTool::new(wasm_runner));
     let runtime = AgentRuntime::new(
         Box::new(provider),
@@ -324,13 +326,10 @@ fn temp_file_path(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         .duration_since(UNIX_EPOCH)
         .expect("clock should be monotonic")
         .as_nanos();
-    let workspace = env::temp_dir().join(format!(
-        "oxydra-{label}-ws-{}-{unique}",
-        std::process::id()
-    ));
+    let workspace =
+        env::temp_dir().join(format!("oxydra-{label}-ws-{}-{unique}", std::process::id()));
     for dir in ["shared", "tmp", "vault"] {
-        fs::create_dir_all(workspace.join(dir))
-            .expect("workspace subdirectory should be created");
+        fs::create_dir_all(workspace.join(dir)).expect("workspace subdirectory should be created");
     }
     let file = workspace.join("shared").join(format!(
         "oxydra-{label}-{}-{unique}.txt",

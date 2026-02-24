@@ -1015,10 +1015,7 @@ async fn ensure_monotonic_sequence(
     Ok(())
 }
 
-async fn next_event_sequence(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<u64, MemoryError> {
+async fn next_event_sequence(conn: &Connection, session_id: &str) -> Result<u64, MemoryError> {
     let mut rows = conn
         .query(
             "SELECT COALESCE(MAX(sequence), -1) FROM conversation_events WHERE session_id = ?1",

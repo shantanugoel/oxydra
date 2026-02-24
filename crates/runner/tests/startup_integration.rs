@@ -110,6 +110,7 @@ fn runner_process_mode_reports_explicit_degraded_warning() {
             RunnerStartRequest {
                 user_id: "alice".to_owned(),
                 insecure: true,
+                extra_env: Vec::new(),
             },
             "linux",
         )

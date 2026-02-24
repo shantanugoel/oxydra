@@ -458,8 +458,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::*;
     use super::super::wasm_runner::{SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME};
+    use super::*;
 
     fn unique_workspace(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

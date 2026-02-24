@@ -90,7 +90,6 @@ impl Default for RuntimeLimits {
     }
 }
 
-
 pub struct AgentRuntime {
     provider: Box<dyn Provider>,
     tool_registry: ToolRegistry,
@@ -445,8 +444,7 @@ fn try_extract_first_json_object(raw: &str) -> Option<serde_json::Value> {
         return None;
     }
     // Use serde_json's StreamDeserializer to pull the first complete value.
-    let mut stream =
-        serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
     let first: serde_json::Value = stream.next()?.ok()?;
     // Only salvage when there really is leftover content (the concatenation case).
     let consumed = stream.byte_offset();

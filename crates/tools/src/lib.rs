@@ -13,9 +13,8 @@ use async_trait::async_trait;
 #[cfg(feature = "wasm-isolation")]
 use sandbox::WasmWasiToolRunner;
 use sandbox::{
-    SecurityPolicy, SessionStatus, SessionUnavailable,
-    SessionUnavailableReason, ShellSession, ShellSessionConfig, VsockShellSession,
-    WasmCapabilityProfile, WorkspaceSecurityPolicy,
+    SecurityPolicy, SessionStatus, SessionUnavailable, SessionUnavailableReason, ShellSession,
+    ShellSessionConfig, VsockShellSession, WasmCapabilityProfile, WorkspaceSecurityPolicy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -28,21 +27,21 @@ use types::{
     ToolError, ToolExecutionContext,
 };
 
-pub mod sandbox;
 mod registry;
+pub mod sandbox;
 
 pub mod memory_tools;
 
 #[cfg(test)]
 mod tests;
 
-pub use registry::{
-    RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
-    default_registry,
-};
 pub use memory_tools::{
     MEMORY_DELETE_TOOL_NAME, MEMORY_SAVE_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
     MEMORY_UPDATE_TOOL_NAME, register_memory_tools,
+};
+pub use registry::{
+    RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
+    default_registry,
 };
 pub use sandbox::{
     HostWasmToolRunner, ProcessHardeningOutcome, WasmToolRunner, WasmWorkspaceMounts,
@@ -333,7 +332,11 @@ impl Tool for ReadTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: ReadArgs = parse_args(FILE_READ_TOOL_NAME, args)?;
         invoke_wasm_tool(
             &self.runner,
@@ -371,7 +374,11 @@ impl Tool for SearchTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: SearchArgs = parse_args(FILE_SEARCH_TOOL_NAME, args)?;
         invoke_wasm_tool(
             &self.runner,
@@ -407,7 +414,11 @@ impl Tool for ListTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: ListArgs = parse_args(FILE_LIST_TOOL_NAME, args)?;
         let payload = if let Some(path) = request.path {
             json!({ "path": path })
@@ -450,7 +461,11 @@ impl Tool for WriteTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: WriteArgs = parse_args(FILE_WRITE_TOOL_NAME, args)?;
         invoke_wasm_tool(
             &self.runner,
@@ -489,7 +504,11 @@ impl Tool for EditTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: EditArgs = parse_args(FILE_EDIT_TOOL_NAME, args)?;
         invoke_wasm_tool(
             &self.runner,
@@ -530,7 +549,11 @@ impl Tool for DeleteTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: DeleteArgs = parse_args(FILE_DELETE_TOOL_NAME, args)?;
         invoke_wasm_tool(
             &self.runner,
@@ -567,7 +590,11 @@ impl Tool for WebFetchTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: WebFetchArgs = parse_args(WEB_FETCH_TOOL_NAME, args)?;
         invoke_wasm_tool(
             &self.runner,
@@ -620,7 +647,11 @@ impl Tool for WebSearchTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: WebSearchArgs = parse_args(WEB_SEARCH_TOOL_NAME, args)?;
         let mut payload = serde_json::Map::new();
         payload.insert("query".to_owned(), json!(request.query));
@@ -666,7 +697,11 @@ impl Tool for VaultCopyToTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: VaultCopyToArgs = parse_args(VAULT_COPYTO_TOOL_NAME, args)?;
         let operation_id = Self::next_operation_id();
         let read_result = invoke_wasm_tool(
@@ -717,7 +752,11 @@ impl Tool for BashTool {
         )
     }
 
-    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        _context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: BashArgs = parse_args(SHELL_EXEC_TOOL_NAME, args)?;
         match &self.backend {
             BashBackend::Host => {

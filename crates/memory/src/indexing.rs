@@ -111,7 +111,13 @@ pub(crate) fn prepare_index_document(
     sequence: i64,
     payload: &serde_json::Value,
 ) -> Result<Option<PreparedIndexDocument>, MemoryError> {
-    prepare_index_document_with_extra_metadata(embedding_adapter, session_id, sequence, payload, None)
+    prepare_index_document_with_extra_metadata(
+        embedding_adapter,
+        session_id,
+        sequence,
+        payload,
+        None,
+    )
 }
 
 pub(crate) fn prepare_index_document_with_extra_metadata(

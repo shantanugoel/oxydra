@@ -1,4 +1,8 @@
-use std::{path::PathBuf, process::ExitCode, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use runner::{
@@ -52,6 +56,15 @@ struct CliArgs {
     probe: bool,
     #[arg(long = "daemon")]
     daemon: bool,
+    /// Inject an environment variable into the guest container (KEY=VALUE).
+    /// Can be repeated. Only effective for Container and MicroVM tiers.
+    #[arg(short = 'e', long = "env")]
+    env_vars: Vec<String>,
+    /// Read environment variables from a file (one KEY=VALUE per line).
+    /// Lines starting with '#' and blank lines are ignored.
+    /// Only effective for Container and MicroVM tiers.
+    #[arg(long = "env-file")]
+    env_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<CliCommand>,
 }
@@ -82,6 +95,14 @@ enum CliError {
          the oxydra-vm process may not have started correctly"
     )]
     GatewayEndpointTimeout { path: PathBuf, timeout_secs: u64 },
+    #[error("invalid --env value `{value}`: expected KEY=VALUE format")]
+    InvalidEnvVar { value: String },
+    #[error("failed to read --env-file `{path}`: {source}")]
+    EnvFileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 fn main() -> ExitCode {
@@ -119,9 +140,11 @@ fn run() -> Result<(), CliError> {
         return launch_tui_binary(&connection.gateway_endpoint, &connection.user_id);
     }
 
+    let extra_env = parse_extra_env_vars(&args.env_vars, args.env_file.as_deref())?;
     let mut startup = runner.start_user(RunnerStartRequest {
         user_id: user_id.clone(),
         insecure: args.insecure,
+        extra_env,
     })?;
     println!("mode=start");
     println!("user_id={}", startup.user_id);
@@ -343,6 +366,50 @@ fn wait_for_gateway_endpoint(
     }
 }
 
+/// Parse `--env KEY=VALUE` arguments and `--env-file` contents into a
+/// deduplicated list of `KEY=VALUE` strings. CLI `-e` entries take precedence
+/// over file entries when the same key appears in both.
+fn parse_extra_env_vars(
+    cli_env: &[String],
+    env_file: Option<&Path>,
+) -> Result<Vec<String>, CliError> {
+    let mut seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+
+    // Read env-file first (lower precedence).
+    if let Some(path) = env_file {
+        let content = std::fs::read_to_string(path).map_err(|source| CliError::EnvFileRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let (key, value) = parse_env_entry(trimmed)?;
+            seen.insert(key, value);
+        }
+    }
+
+    // CLI --env entries override file entries.
+    for entry in cli_env {
+        let (key, value) = parse_env_entry(entry)?;
+        seen.insert(key, value);
+    }
+
+    Ok(seen.into_iter().map(|(k, v)| format!("{k}={v}")).collect())
+}
+
+/// Parse a single `KEY=VALUE` string, returning `(key, value)`.
+fn parse_env_entry(entry: &str) -> Result<(String, String), CliError> {
+    match entry.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
+        _ => Err(CliError::InvalidEnvVar {
+            value: entry.to_owned(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +561,78 @@ mod tests {
     fn parse_cli_args_without_subcommand_has_no_command() {
         let args = CliArgs::try_parse_from(["runner"]).expect("no subcommand should parse");
         assert_eq!(args.command, None);
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_env_flags() {
+        let args = CliArgs::try_parse_from([
+            "runner",
+            "-e",
+            "FOO=bar",
+            "-e",
+            "BAZ=qux",
+            "--env-file",
+            "/tmp/env",
+        ])
+        .expect("env args should parse");
+        assert_eq!(args.env_vars, vec!["FOO=bar", "BAZ=qux"]);
+        assert_eq!(args.env_file, Some(PathBuf::from("/tmp/env")));
+    }
+
+    #[test]
+    fn parse_extra_env_vars_from_cli_only() {
+        let vars = vec!["KEY1=val1".to_owned(), "KEY2=val2".to_owned()];
+        let result = parse_extra_env_vars(&vars, None).expect("should parse CLI env vars");
+        assert_eq!(result, vec!["KEY1=val1", "KEY2=val2"]);
+    }
+
+    #[test]
+    fn parse_extra_env_vars_from_file() {
+        let dir = std::env::temp_dir().join("oxydra-env-file-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("test.env");
+        std::fs::write(&file_path, "# comment\nFROM_FILE=hello\n\nANOTHER=world\n")
+            .expect("env file should be writable");
+
+        let result = parse_extra_env_vars(&[], Some(&file_path)).expect("should parse env file");
+        assert_eq!(result, vec!["ANOTHER=world", "FROM_FILE=hello"]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_extra_env_vars_cli_overrides_file() {
+        let dir = std::env::temp_dir().join("oxydra-env-override-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("test.env");
+        std::fs::write(&file_path, "KEY=from_file\n").expect("env file should be writable");
+
+        let cli = vec!["KEY=from_cli".to_owned()];
+        let result =
+            parse_extra_env_vars(&cli, Some(&file_path)).expect("should merge env sources");
+        assert_eq!(result, vec!["KEY=from_cli"]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_extra_env_vars_rejects_missing_equals() {
+        let vars = vec!["INVALID".to_owned()];
+        let err = parse_extra_env_vars(&vars, None).expect_err("should reject missing =");
+        assert!(err.to_string().contains("INVALID"));
+    }
+
+    #[test]
+    fn parse_extra_env_vars_allows_empty_value() {
+        let vars = vec!["KEY=".to_owned()];
+        let result = parse_extra_env_vars(&vars, None).expect("empty value should be allowed");
+        assert_eq!(result, vec!["KEY="]);
+    }
+
+    #[test]
+    fn parse_extra_env_vars_allows_value_with_equals() {
+        let vars = vec!["KEY=val=ue".to_owned()];
+        let result = parse_extra_env_vars(&vars, None).expect("value with = should be allowed");
+        assert_eq!(result, vec!["KEY=val=ue"]);
     }
 }

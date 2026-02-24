@@ -4810,7 +4810,6 @@ dependencies = [
  "provider",
  "reqwest 0.13.2",
  "runtime",
- "sandbox",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5059,26 +5058,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "sandbox"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-util",
- "html2text",
- "reqwest 0.13.2",
- "serde_json",
- "shell-daemon",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "types",
- "wasmtime",
- "wasmtime-wasi",
 ]
 
 [[package]]
@@ -6114,16 +6093,23 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures-util",
+ "html2text",
  "memory",
- "sandbox",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "shell-daemon",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tools-macros",
  "tracing",
  "types",
  "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

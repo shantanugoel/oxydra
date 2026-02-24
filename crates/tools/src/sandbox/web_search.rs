@@ -6,7 +6,7 @@ use std::{
 use reqwest::{Client, RequestBuilder, header::CONTENT_TYPE};
 use serde_json::{Value, json};
 
-use crate::wasm_runner::{
+use super::wasm_runner::{
     parse_and_validate_web_url, read_response_bytes, request_with_default_headers,
     truncate_web_body,
 };

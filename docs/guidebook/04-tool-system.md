@@ -111,7 +111,7 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `memory_update` | `SideEffecting` | Replaces the content of an existing note by note_id |
 | `memory_delete` | `SideEffecting` | Deletes a note from the user's memory by note_id |
 
-Most tools (except `BashTool`) execute through the `HostWasmToolRunner`, which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
+Most tools (except `BashTool`) execute through the `HostWasmToolRunner` (in the `sandbox` sub-module of `tools`), which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
 
 ### BashTool Backends
 

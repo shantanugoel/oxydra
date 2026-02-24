@@ -52,7 +52,7 @@ The active tier is surfaced in startup logs and health/status endpoints. In `Mic
 
 ## WASM Tool Isolation
 
-**File:** `sandbox/src/wasm_runner.rs`
+**File:** `tools/src/sandbox/wasm_runner.rs`
 
 **Current state: simulated isolation.** The `HostWasmToolRunner` enforces capability-scoped mount policies and path boundary checks, but executes operations directly on the host using `std::fs` rather than within a `wasmtime` WASM sandbox. The `wasmtime` crate is not currently a dependency. Policy enforcement (path canonicalization, mount boundary checks, capability profiles) is real and functional — but the isolation boundary is logical, not hardware-enforced.
 
@@ -91,7 +91,7 @@ No single invocation has concurrent access to both `vault` and `shared`/`tmp`. B
 ### Path to Real WASM Isolation
 
 The planned upgrade:
-- Add `wasmtime` as a dependency in `crates/sandbox`
+- The `wasmtime` dependency is already in `crates/tools` behind the `wasm-isolation` feature flag
 - Compile tool operations as WASM modules with explicit WASI capability grants
 - Mount directories via WASI `preopens` so the guest physically cannot access unmounted paths
 - Web tools use host-function imports for HTTP access (already designed as a host-function HTTP proxy pattern)
@@ -99,7 +99,7 @@ The planned upgrade:
 
 ## Security Policy
 
-**File:** `sandbox/src/policy.rs`
+**File:** `tools/src/sandbox/policy.rs`
 
 The `WorkspaceSecurityPolicy` trait and implementation enforce boundaries before tool execution:
 
@@ -133,7 +133,7 @@ Any command not matching the allowlist or containing blocked syntax is rejected 
 
 ## SSRF Protection
 
-**File:** `sandbox/src/wasm_runner.rs` (web tools)
+**File:** `tools/src/sandbox/wasm_runner.rs` (web tools)
 
 Web tools (`web_fetch`, `web_search`) use a host-function HTTP proxy pattern with strict SSRF protections:
 

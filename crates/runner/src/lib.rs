@@ -23,7 +23,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode, Uri, body::Bytes};
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector, Uri as HyperlocalUri};
-use sandbox::{ProcessHardeningOutcome, attempt_process_tier_hardening};
+use tools::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

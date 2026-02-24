@@ -18,11 +18,10 @@ The key architectural principles:
 crates/
   types/          # Foundation — zero internal dependencies
   provider/       # Core — LLM provider adapters
-  tools/          # Core — tool trait + core tool implementations
+  tools/          # Core — tool trait + core tool implementations + sandbox isolation
   tools-macros/   # Core — #[tool] procedural macro
   runtime/        # Core — agent loop + state machine
   memory/         # Core — persistence + retrieval
-  sandbox/        # Core — isolation + security policy
   runner/         # Application — host orchestrator
   shell-daemon/   # Application — guest shell/browser RPC
   channels/       # Application — channel adapters
@@ -41,10 +40,9 @@ The workspace enforces a strict three-layer dependency graph. Lower layers never
 │  (depends on Core + Foundation)                      │
 ├─────────────────────────────────────────────────────┤
 │                      Core Layer                      │
-│  provider, tools, tools-macros, runtime, memory,     │
-│  sandbox                                             │
+│  provider, tools, tools-macros, runtime, memory      │
 │  (depends strictly on Foundation; intentional         │
-│   sub-layering: runtime → tools → sandbox)           │
+│   sub-layering: runtime → tools)                     │
 │  (dev-dependencies may cross layer boundaries        │
 │   for integration testing, e.g. shell-daemon)        │
 ├─────────────────────────────────────────────────────┤
@@ -60,11 +58,10 @@ The workspace enforces a strict three-layer dependency graph. Lower layers never
 |-------|-------|---------------|
 | Foundation | `types` | Universal structs (`Message`, `ToolCall`, `Context`, `Response`), all trait definitions (`Provider`, `Tool`, `Memory`, `Channel`), error hierarchy, config schemas, runner protocol types |
 | Core | `provider` | Provider implementations (OpenAI, Anthropic, Gemini, OpenAI Responses), SSE parsing, reliability wrapper, credential resolution |
-| Core | `tools` | Core tool implementations (file ops, shell, web, vault), tool registry with policy enforcement |
+| Core | `tools` | Core tool implementations (file ops, shell, web, vault), tool registry with policy enforcement, WASM tool isolation (via `sandbox` sub-module), security policy enforcement, shell/browser session management, SSRF protection |
 | Core | `tools-macros` | `#[tool]` attribute macro for automatic schema generation from Rust function signatures |
 | Core | `runtime` | Agent turn loop, state machine, tool dispatch, self-correction, token budgeting, credential scrubbing |
 | Core | `memory` | libSQL persistence, SQL migrations, hybrid retrieval (vector + FTS5), embedding pipeline, rolling summarization |
-| Core | `sandbox` | WASM tool isolation, security policy enforcement, shell/browser session management, SSRF protection |
 | Application | `runner` | Host entry point, per-user VM/container provisioning, bootstrap envelope, workspace directory creation, VM bootstrap logic (config loading via `figment`, provider/memory/tools initialization) |
 | Application | `shell-daemon` | Guest-side RPC server for shell command execution and browser session management |
 | Application | `channels` | Channel registry, concrete channel adapter implementations (feature-flagged) |

@@ -154,7 +154,7 @@ Built the foundation layer with zero internal dependencies:
 
 ### Phase 10: Runner + Isolation Infrastructure
 
-**Crates:** `types`, `runner`, `sandbox`, `tools`, `runtime`, `shell-daemon`
+**Crates:** `types`, `runner`, `tools`, `runtime`, `shell-daemon`
 
 - `SandboxTier` enum: `MicroVm`, `Container`, `Process`
 - Runner global config: workspace root, user map, default tier, guest image references
@@ -167,7 +167,7 @@ Built the foundation layer with zero internal dependencies:
 
 ### Phase 11: Security Policy + WASM Tool Isolation
 
-**Crates:** `sandbox`, `tools`, `runtime`
+**Crates:** `tools`, `runtime`
 
 - `HostWasmToolRunner` with capability-scoped mount profiles per tool class
 - File tools: `shared`+`tmp`+`vault` read-only for reads, `shared`+`tmp` read-write for writes

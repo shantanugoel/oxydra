@@ -17,7 +17,7 @@ use reqwest::{
 };
 use serde_json::Value;
 
-use crate::SandboxError;
+use super::SandboxError;
 
 pub(crate) const SHARED_DIR_NAME: &str = "shared";
 pub(crate) const TMP_DIR_NAME: &str = "tmp";
@@ -257,8 +257,8 @@ impl HostWasmToolRunner {
             "file_delete" => self.file_delete(arguments),
             "file_list" => self.file_list(arguments),
             "file_search" => self.file_search(arguments),
-            "web_fetch" => crate::web_fetch::execute(&self.http_client, arguments).await,
-            "web_search" => crate::web_search::execute(&self.http_client, arguments).await,
+            "web_fetch" => super::web_fetch::execute(&self.http_client, arguments).await,
+            "web_search" => super::web_search::execute(&self.http_client, arguments).await,
             "vault_copyto_read" => self.vault_copyto_read(arguments),
             "vault_copyto_write" => self.vault_copyto_write(arguments),
             _ => Err(format!("unknown wasm tool operation `{tool_name}`")),

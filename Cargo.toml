@@ -7,7 +7,6 @@ members = [
   "crates/tools-macros",
   "crates/runtime",
   "crates/memory",
-  "crates/sandbox",
   "crates/runner",
   "crates/shell-daemon",
   "crates/channels",

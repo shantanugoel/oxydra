@@ -27,7 +27,7 @@ use wasmtime_wasi::{
     p2::pipe::{MemoryInputPipe, MemoryOutputPipe},
 };
 
-use crate::{
+use super::{
     SandboxError,
     wasm_runner::{
         WasmCapabilityProfile, WasmInvocationMetadata, WasmInvocationResult, WasmMount,
@@ -36,7 +36,7 @@ use crate::{
 };
 
 /// WASM guest binary compiled from `crates/wasm-guest`, embedded at build time.
-const GUEST_WASM: &[u8] = include_bytes!("../guest/oxydra_wasm_guest.wasm");
+const GUEST_WASM: &[u8] = include_bytes!("../../guest/oxydra_wasm_guest.wasm");
 
 /// Maximum bytes the guest may write to stdout (16 MB).
 const MAX_GUEST_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -428,8 +428,8 @@ impl WasmToolRunner for WasmWasiToolRunner {
             })?;
 
         let output = match tool_name {
-            "web_fetch" => crate::web_fetch::execute(&self.http_client, arguments).await,
-            "web_search" => crate::web_search::execute(&self.http_client, arguments).await,
+            "web_fetch" => super::web_fetch::execute(&self.http_client, arguments).await,
+            "web_search" => super::web_search::execute(&self.http_client, arguments).await,
             _ => self.execute_in_wasm(tool_name, profile, arguments).await,
         }
         .map_err(|message| SandboxError::WasmInvocationFailed {
@@ -459,7 +459,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::wasm_runner::{SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME};
+    use super::super::wasm_runner::{SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME};
 
     fn unique_workspace(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

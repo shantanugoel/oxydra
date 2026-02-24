@@ -42,11 +42,11 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 # Install the Rust toolchain (stable)
 rustup toolchain install stable
 
-# Required for the WASM guest module (crates/wasm-guest → crates/sandbox)
+# Required for the WASM guest module (crates/wasm-guest → crates/tools)
 rustup target add wasm32-wasip1
 ```
 
-The `wasm32-wasip1` target is needed because `crates/sandbox/build.rs` cross-compiles the WASM guest binary at build time. Without it, any crate that transitively depends on `sandbox` with the default `wasm-isolation` feature will fail to build.
+The `wasm32-wasip1` target is needed because `crates/tools/build.rs` cross-compiles the WASM guest binary at build time. Without it, any crate that transitively depends on `tools` with the default `wasm-isolation` feature will fail to build.
 
 ### Building
 

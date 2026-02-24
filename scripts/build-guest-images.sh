@@ -42,7 +42,7 @@ rustup target add "$TARGET" 2>/dev/null || true
 rustup target add wasm32-wasip1 2>/dev/null || true
 
 # ── cross-compile ──────────────────────────────────────────────────
-# Build the wasm guest first, since the sandbox build depends on it. We use a separate target dir to avoid deadlocks on Cargo's file lock.
+# Build the wasm guest first, since the tools build depends on it. We use a separate target dir to avoid deadlocks on Cargo's file lock.
 # Let cargo resolve the target dir itself (respects build-dir, CARGO_TARGET_DIR, etc.)
 TARGET_DIR=$(cargo metadata --no-deps --format-version 1 | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['target_directory'])")
@@ -56,9 +56,9 @@ cargo build \
   -p wasm-guest \
   --target-dir "$WASM_TARGET_DIR"
 
-mkdir -p "$REPO_ROOT/crates/sandbox/guest"
+mkdir -p "$REPO_ROOT/crates/tools/guest"
 cp "$WASM_TARGET_DIR/wasm32-wasip1/release/oxydra_wasm_guest.wasm" \
-   "$REPO_ROOT/crates/sandbox/guest/oxydra_wasm_guest.wasm"
+   "$REPO_ROOT/crates/tools/guest/oxydra_wasm_guest.wasm"
 
 
 # macos has a low fd limit, need to increasse it for zig

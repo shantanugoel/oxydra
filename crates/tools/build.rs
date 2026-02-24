@@ -24,7 +24,7 @@ fn main() {
         return;
     }
 
-    // Workspace root is two levels up from crates/sandbox/
+    // Workspace root is two levels up from crates/tools/
     let workspace_root = manifest_path
         .parent()
         .and_then(|p| p.parent())
@@ -78,12 +78,12 @@ fn compile_wasm_guest(guest_cargo_toml: &Path, workspace_root: &Path, wasm_dest:
         );
     }
 
-    // Copy artifact to the sandbox/guest/ directory so include_bytes! can find it.
+    // Copy artifact to the tools/guest/ directory so include_bytes! can find it.
     let guest_output_dir = wasm_dest
         .parent()
         .expect("wasm_dest must have a parent directory");
     std::fs::create_dir_all(guest_output_dir)
-        .expect("failed to create sandbox/guest/ output directory");
+        .expect("failed to create tools/guest/ output directory");
 
     std::fs::copy(&wasm_output, wasm_dest).unwrap_or_else(|e| {
         panic!(

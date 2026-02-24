@@ -28,6 +28,7 @@ use types::{
     ToolError, ToolExecutionContext,
 };
 
+pub mod sandbox;
 mod registry;
 
 pub mod memory_tools;
@@ -43,9 +44,10 @@ pub use memory_tools::{
     MEMORY_DELETE_TOOL_NAME, MEMORY_SAVE_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
     MEMORY_UPDATE_TOOL_NAME, register_memory_tools,
 };
-// Re-export sandbox types needed by downstream test crates to construct
-// workspace-scoped WASM runners without depending on `sandbox` directly.
-pub use sandbox::{HostWasmToolRunner, WasmToolRunner, WasmWorkspaceMounts};
+pub use sandbox::{
+    HostWasmToolRunner, ProcessHardeningOutcome, WasmToolRunner, WasmWorkspaceMounts,
+    attempt_process_tier_hardening,
+};
 
 pub const FILE_READ_TOOL_NAME: &str = "file_read";
 pub const FILE_SEARCH_TOOL_NAME: &str = "file_search";

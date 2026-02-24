@@ -434,31 +434,28 @@ enum StreamCollectError {
 
 /// When the LLM stuffs multiple JSON objects into a single tool-call arguments
 /// string (e.g. `{"query":"a"}{"query":"b"}`), `serde_json::from_str` rejects
-/// the concatenation with a "trailing characters" error. This helper attempts to
-/// extract just the first valid JSON object so the tool can still execute with
-/// sensible input rather than always falling through to the self-correction
-/// error path (which the LLM may repeat).
-fn try_extract_first_json_object(raw: &str) -> Option<serde_json::Value> {
+/// the concatenation with a "trailing characters" error.
+///
+/// This helper extracts all valid JSON objects from the concatenation so they
+/// can be fanned out as parallel tool calls. When there is only a single
+/// salvageable object (i.e. the remainder is garbage, not another object) we
+/// return it alone so the caller can use the existing single-call path.
+///
+/// Returns `None` when the input is a single valid object (no concatenation) or
+/// when no objects can be extracted at all.
+fn try_extract_concatenated_json_objects(raw: &str) -> Option<Vec<serde_json::Value>> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') {
         return None;
     }
-    // Use serde_json's StreamDeserializer to pull the first complete value.
-    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
-    let first: serde_json::Value = stream.next()?.ok()?;
-    // Only salvage when there really is leftover content (the concatenation case).
-    let consumed = stream.byte_offset();
-    if consumed >= trimmed.len() {
-        // The whole string was one object — the original parse should have
-        // succeeded, so don't interfere.
+    let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    let objects: Vec<serde_json::Value> = stream.filter_map(|r| r.ok()).collect();
+    if objects.len() <= 1 {
+        // Either nothing parsed or the whole string was one object — let the
+        // normal parse path handle it (including trailing-junk errors).
         return None;
     }
-    // Verify there is at least one more non-whitespace char after the first
-    // object (proves concatenation rather than trailing whitespace).
-    if trimmed[consumed..].trim().is_empty() {
-        return None;
-    }
-    Some(first)
+    Some(objects)
 }
 
 #[derive(Debug, Default)]
@@ -509,16 +506,31 @@ impl ToolCallAccumulator {
             } else {
                 entry.arguments.as_str()
             };
-            let parsed_arguments = match serde_json::from_str(arguments) {
-                Ok(parsed_arguments) => parsed_arguments,
-                Err(error) => match try_extract_first_json_object(arguments) {
-                    Some(first_object) => {
-                        tracing::warn!(
+            match serde_json::from_str(arguments) {
+                Ok(parsed_arguments) => {
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments: parsed_arguments,
+                        metadata: entry.metadata,
+                    });
+                }
+                Err(error) => match try_extract_concatenated_json_objects(arguments) {
+                    Some(objects) => {
+                        tracing::info!(
                             tool = %name,
+                            count = objects.len(),
                             "tool call arguments contain concatenated JSON objects; \
-                             using only the first object"
+                             fanning out as parallel tool calls"
                         );
-                        first_object
+                        for (i, obj) in objects.into_iter().enumerate() {
+                            tool_calls.push(ToolCall {
+                                id: format!("{id}_{i}"),
+                                name: name.clone(),
+                                arguments: obj,
+                                metadata: entry.metadata.clone(),
+                            });
+                        }
                     }
                     None => {
                         let mut payload = serde_json::Map::new();
@@ -530,16 +542,15 @@ impl ToolCallAccumulator {
                             INVALID_TOOL_ARGS_ERROR_KEY.to_owned(),
                             serde_json::Value::String(error.to_string()),
                         );
-                        serde_json::Value::Object(payload)
+                        tool_calls.push(ToolCall {
+                            id,
+                            name,
+                            arguments: serde_json::Value::Object(payload),
+                            metadata: entry.metadata,
+                        });
                     }
                 },
             };
-            tool_calls.push(ToolCall {
-                id,
-                name,
-                arguments: parsed_arguments,
-                metadata: entry.metadata,
-            });
         }
         Ok(tool_calls)
     }

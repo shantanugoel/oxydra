@@ -2510,18 +2510,20 @@ fn streamed_tool_calls_require_function_name() {
 }
 
 #[test]
-fn try_extract_first_json_object_salvages_concatenated_objects() {
+fn try_extract_concatenated_json_objects_returns_all_objects() {
     let raw = r#"{"query":"AI doom scenario"}{"query":"p(doom) AI"}{"query":"AI risk"}"#;
-    let result = super::try_extract_first_json_object(raw);
-    assert!(result.is_some(), "should extract the first object");
-    let first = result.unwrap();
-    assert_eq!(first["query"], "AI doom scenario");
+    let result = super::try_extract_concatenated_json_objects(raw);
+    let objects = result.expect("should extract all objects");
+    assert_eq!(objects.len(), 3);
+    assert_eq!(objects[0]["query"], "AI doom scenario");
+    assert_eq!(objects[1]["query"], "p(doom) AI");
+    assert_eq!(objects[2]["query"], "AI risk");
 }
 
 #[test]
-fn try_extract_first_json_object_returns_none_for_valid_single_object() {
+fn try_extract_concatenated_json_objects_returns_none_for_valid_single_object() {
     let raw = r#"{"query":"normal query"}"#;
-    let result = super::try_extract_first_json_object(raw);
+    let result = super::try_extract_concatenated_json_objects(raw);
     assert!(
         result.is_none(),
         "single valid object should not be intercepted"
@@ -2529,22 +2531,32 @@ fn try_extract_first_json_object_returns_none_for_valid_single_object() {
 }
 
 #[test]
-fn try_extract_first_json_object_returns_none_for_non_object_input() {
-    assert!(super::try_extract_first_json_object("not json").is_none());
-    assert!(super::try_extract_first_json_object("").is_none());
-    assert!(super::try_extract_first_json_object("[1,2,3]").is_none());
+fn try_extract_concatenated_json_objects_returns_none_for_non_object_input() {
+    assert!(super::try_extract_concatenated_json_objects("not json").is_none());
+    assert!(super::try_extract_concatenated_json_objects("").is_none());
+    assert!(super::try_extract_concatenated_json_objects("[1,2,3]").is_none());
 }
 
 #[test]
-fn try_extract_first_json_object_ignores_trailing_whitespace() {
+fn try_extract_concatenated_json_objects_ignores_trailing_whitespace() {
     let raw = r#"{"query":"test"}   "#;
-    let result = super::try_extract_first_json_object(raw);
+    let result = super::try_extract_concatenated_json_objects(raw);
     assert!(result.is_none(), "trailing whitespace is not concatenation");
 }
 
 #[test]
-fn concatenated_arguments_are_salvaged_during_accumulator_build() {
-    let provider = ProviderId::from("openai");
+fn try_extract_concatenated_json_objects_returns_none_for_single_with_trailing_junk() {
+    let raw = r#"{"query":"test"}not json"#;
+    let result = super::try_extract_concatenated_json_objects(raw);
+    assert!(
+        result.is_none(),
+        "single object with trailing junk should not be intercepted"
+    );
+}
+
+#[test]
+fn concatenated_arguments_are_fanned_out_as_parallel_tool_calls() {
+    let provider = ProviderId::from("gemini");
     let mut accumulator = super::ToolCallAccumulator::default();
     accumulator.merge(ToolCallDelta {
         index: 0,
@@ -2556,7 +2568,12 @@ fn concatenated_arguments_are_salvaged_during_accumulator_build() {
 
     let tool_calls = accumulator
         .build(&provider)
-        .expect("concatenated arguments should be salvaged");
-    assert_eq!(tool_calls.len(), 1);
+        .expect("concatenated arguments should be fanned out");
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].id, "call_1_0");
+    assert_eq!(tool_calls[0].name, "web_search");
     assert_eq!(tool_calls[0].arguments["query"], "first query");
+    assert_eq!(tool_calls[1].id, "call_1_1");
+    assert_eq!(tool_calls[1].name, "web_search");
+    assert_eq!(tool_calls[1].arguments["query"], "second query");
 }

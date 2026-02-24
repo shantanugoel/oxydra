@@ -23,7 +23,7 @@ use types::{
     ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId, Response,
     RunnerBootstrapEnvelope, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier, SandboxTier,
     SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError,
-    UsageUpdate,
+    ToolExecutionContext, UsageUpdate,
 };
 
 use super::{AgentRuntime, RuntimeLimits};
@@ -51,7 +51,7 @@ mock! {
     #[async_trait]
     impl Tool for ToolContract {
         fn schema(&self) -> FunctionDecl;
-        async fn execute(&self, args: &str) -> Result<String, ToolError>;
+        async fn execute(&self, args: &str, context: &ToolExecutionContext) -> Result<String, ToolError>;
         fn timeout(&self) -> Duration;
         fn safety_tier(&self) -> SafetyTier;
     }
@@ -176,7 +176,7 @@ impl Tool for MockReadTool {
         )
     }
 
-    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+    async fn execute(&self, args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
         let parsed: Value = serde_json::from_str(args)?;
         let path = parsed.get("path").and_then(Value::as_str).ok_or_else(|| {
             ToolError::InvalidArguments {
@@ -209,7 +209,7 @@ impl Tool for SlowTool {
         )
     }
 
-    async fn execute(&self, _args: &str) -> Result<String, ToolError> {
+    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
         sleep(Duration::from_millis(50)).await;
         Ok("done".to_owned())
     }
@@ -236,7 +236,7 @@ impl Tool for SensitiveOutputTool {
         )
     }
 
-    async fn execute(&self, _args: &str) -> Result<String, ToolError> {
+    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
         Ok(
             "api_key=sk_live_ABC123DEF456GHI789JKL012MNO345PQR678\nartifact_id=A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2\nstatus=ok"
                 .to_owned(),
@@ -1463,8 +1463,8 @@ async fn run_session_supports_mockall_tool_execution() {
     tool.expect_timeout().return_const(Duration::from_secs(1));
     tool.expect_execute()
         .times(1)
-        .withf(|args| args.contains("\"path\":\"Cargo.toml\""))
-        .returning(|_| Ok("mockall read: Cargo.toml".to_owned()));
+        .withf(|args, _context| args.contains("\"path\":\"Cargo.toml\""))
+        .returning(|_, _| Ok("mockall read: Cargo.toml".to_owned()));
 
     let mut tools = ToolRegistry::default();
     tools.register("file_read", tool);
@@ -2495,4 +2495,61 @@ fn streamed_tool_calls_require_function_name() {
     assert!(
         matches!(error, ProviderError::ResponseParse { message, .. } if message.contains("missing function name"))
     );
+}
+
+#[test]
+fn try_extract_first_json_object_salvages_concatenated_objects() {
+    let raw = r#"{"query":"AI doom scenario"}{"query":"p(doom) AI"}{"query":"AI risk"}"#;
+    let result = super::try_extract_first_json_object(raw);
+    assert!(result.is_some(), "should extract the first object");
+    let first = result.unwrap();
+    assert_eq!(first["query"], "AI doom scenario");
+}
+
+#[test]
+fn try_extract_first_json_object_returns_none_for_valid_single_object() {
+    let raw = r#"{"query":"normal query"}"#;
+    let result = super::try_extract_first_json_object(raw);
+    assert!(
+        result.is_none(),
+        "single valid object should not be intercepted"
+    );
+}
+
+#[test]
+fn try_extract_first_json_object_returns_none_for_non_object_input() {
+    assert!(super::try_extract_first_json_object("not json").is_none());
+    assert!(super::try_extract_first_json_object("").is_none());
+    assert!(super::try_extract_first_json_object("[1,2,3]").is_none());
+}
+
+#[test]
+fn try_extract_first_json_object_ignores_trailing_whitespace() {
+    let raw = r#"{"query":"test"}   "#;
+    let result = super::try_extract_first_json_object(raw);
+    assert!(
+        result.is_none(),
+        "trailing whitespace is not concatenation"
+    );
+}
+
+#[test]
+fn concatenated_arguments_are_salvaged_during_accumulator_build() {
+    let provider = ProviderId::from("openai");
+    let mut accumulator = super::ToolCallAccumulator::default();
+    accumulator.merge(ToolCallDelta {
+        index: 0,
+        id: Some("call_1".to_owned()),
+        name: Some("web_search".to_owned()),
+        arguments: Some(
+            r#"{"query":"first query"}{"query":"second query"}"#.to_owned(),
+        ),
+        metadata: None,
+    });
+
+    let tool_calls = accumulator
+        .build(&provider)
+        .expect("concatenated arguments should be salvaged");
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].arguments["query"], "first query");
 }

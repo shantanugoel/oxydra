@@ -58,11 +58,29 @@ impl FunctionDecl {
     }
 }
 
+/// Per-invocation context passed to [`Tool::execute`].
+///
+/// Carries runtime state that varies per turn (user identity, active session).
+/// Tools that do not need this context simply ignore the parameter. Memory
+/// tools read `user_id` and `session_id` to scope operations to the correct
+/// user namespace.
+#[derive(Debug, Clone, Default)]
+pub struct ToolExecutionContext {
+    /// The authenticated user ID for the current turn, if known.
+    pub user_id: Option<String>,
+    /// The active conversation session ID for the current turn, if known.
+    pub session_id: Option<String>,
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> FunctionDecl;
 
-    async fn execute(&self, args: &str) -> Result<String, ToolError>;
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError>;
 
     fn timeout(&self) -> Duration;
 

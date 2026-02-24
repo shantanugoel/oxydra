@@ -98,10 +98,11 @@ impl AgentRuntime {
         }
 
         let arg_str = serde_json::to_string(&validation_args).map_err(ToolError::Serialization)?;
+        let context = self.tool_execution_context.lock().await.clone();
 
         tokio::select! {
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
-            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute(name, &arg_str)) => match timed {
+            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute_with_context(name, &arg_str, &context)) => match timed {
                 Ok(output) => output.map_err(RuntimeError::from),
                 Err(_) => Err(RuntimeError::BudgetExceeded),
             }

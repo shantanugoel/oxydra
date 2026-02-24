@@ -1021,7 +1021,8 @@ async fn next_event_sequence(
     } else {
         let next = u64::try_from(max_sequence)
             .map_err(|_| query_error("stored sequence is negative".to_owned()))?;
-        Ok(next.saturating_add(1))
+        next.checked_add(1)
+            .ok_or_else(|| query_error("event sequence overflow".to_owned()))
     }
 }
 

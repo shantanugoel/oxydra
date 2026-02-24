@@ -134,15 +134,15 @@ All memory tools operate within a per-user namespace using the session ID patter
 - Notes persist across conversation sessions
 - The LLM cannot access another user's memory
 
-#### Shared Context (`MemoryToolContext`)
+#### Per-Turn Context (`ToolExecutionContext`)
 
-All four tools share a `MemoryToolContext` that holds the current `user_id` and `session_id` behind `Arc<Mutex<Option<String>>>`. The gateway sets these values at the start of each turn. If the user context is not set (e.g., during startup before a handshake), tool execution returns a descriptive error rather than silently failing.
+All four tools receive a `ToolExecutionContext` on each invocation, which carries the current `user_id` and `session_id`. The runtime sets this context at the start of each turn. Unlike the previous shared-mutable approach, each tool invocation receives an immutable snapshot of the context, eliminating race conditions under concurrent turns. If the user context is not set (e.g., during startup before a handshake), tool execution returns a descriptive error rather than silently failing.
 
 #### Tool Details
 
 | Tool | Parameters | Returns |
 |------|-----------|---------|
-| `memory_search` | `query` (required), `max_results` (optional, default 10) | JSON array of `{text, source, score, note_id}` results |
+| `memory_search` | `query` (required), `top_k` (optional, default 5, max 20), `include_conversation` (optional, default false) | JSON array of `{text, source, score, note_id}` results |
 | `memory_save` | `content` (required) | `{note_id, message}` with the generated `note-{uuid}` identifier |
 | `memory_update` | `note_id` (required), `content` (required) | `{note_id, message}` confirming the update |
 | `memory_delete` | `note_id` (required) | `{message}` confirming deletion |
@@ -154,7 +154,7 @@ All four tools share a `MemoryToolContext` that holds the current `user_id` and 
 
 #### Registration
 
-Memory tools are registered during bootstrap via `register_memory_tools()` when a memory backend is configured. The function takes a `ToolRegistry`, `Arc<dyn MemoryRetrieval>`, `MemoryToolContext`, and the retrieval weight parameters, then creates and registers all four tools.
+Memory tools are registered during bootstrap via `register_memory_tools()` when a memory backend is configured. The function takes a `ToolRegistry`, `Arc<dyn MemoryRetrieval>`, and the retrieval weight parameters, then creates and registers all four tools.
 
 ## Tool Registry
 

@@ -3,9 +3,9 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Mutex;
 use types::{
-    FunctionDecl, MemoryHybridQueryRequest, MemoryRetrieval, SafetyTier, Tool, ToolError,
+    FunctionDecl, MemoryHybridQueryRequest, MemoryRetrieval, SafetyTier, Tool,
+    ToolError, ToolExecutionContext,
 };
 
 use crate::{execution_failed, invalid_args, parse_args};
@@ -21,29 +21,6 @@ const MEMORY_SEARCH_DEFAULT_TOP_K: usize = 5;
 /// Compute the well-known session ID for a user's persistent memory namespace.
 fn user_memory_session_id(user_id: &str) -> String {
     format!("memory:{user_id}")
-}
-
-/// Shared context holders that are set before each turn by the gateway turn
-/// runner and read by memory tools during execution.
-#[derive(Clone)]
-pub struct MemoryToolContext {
-    pub user_id: Arc<Mutex<Option<String>>>,
-    pub session_id: Arc<Mutex<Option<String>>>,
-}
-
-impl MemoryToolContext {
-    pub fn new() -> Self {
-        Self {
-            user_id: Arc::new(Mutex::new(None)),
-            session_id: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-impl Default for MemoryToolContext {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -74,26 +51,25 @@ struct MemoryDeleteArgs {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: resolve current user_id from shared context
+// Helper: resolve current user_id / session_id from ToolExecutionContext
 // ---------------------------------------------------------------------------
 
-async fn resolve_user_id(context: &MemoryToolContext, tool_name: &str) -> Result<String, ToolError> {
+fn resolve_user_id(
+    context: &ToolExecutionContext,
+    tool_name: &str,
+) -> Result<String, ToolError> {
     context
         .user_id
-        .lock()
-        .await
         .clone()
         .ok_or_else(|| execution_failed(tool_name, "user context is not available"))
 }
 
-async fn resolve_session_id(
-    context: &MemoryToolContext,
+fn resolve_session_id(
+    context: &ToolExecutionContext,
     tool_name: &str,
 ) -> Result<String, ToolError> {
     context
         .session_id
-        .lock()
-        .await
         .clone()
         .ok_or_else(|| execution_failed(tool_name, "session context is not available"))
 }
@@ -104,7 +80,6 @@ async fn resolve_session_id(
 
 pub struct MemorySearchTool {
     memory: Arc<dyn MemoryRetrieval>,
-    context: MemoryToolContext,
     vector_weight: f64,
     fts_weight: f64,
 }
@@ -112,13 +87,11 @@ pub struct MemorySearchTool {
 impl MemorySearchTool {
     pub fn new(
         memory: Arc<dyn MemoryRetrieval>,
-        context: MemoryToolContext,
         vector_weight: f64,
         fts_weight: f64,
     ) -> Self {
         Self {
             memory,
-            context,
             vector_weight,
             fts_weight,
         }
@@ -135,7 +108,8 @@ impl Tool for MemorySearchTool {
                  to recall user preferences, past decisions, stored facts, or anything previously \
                  saved. Results are ranked by relevance using semantic similarity and keyword \
                  matching. By default searches only your saved notes; set include_conversation to \
-                 true to also search the current conversation history."
+                 true to also search the current conversation history. Results with an empty \
+                 note_id (from conversation search) cannot be updated or deleted via memory tools."
                     .to_owned(),
             ),
             json!({
@@ -164,15 +138,28 @@ impl Tool for MemorySearchTool {
         )
     }
 
-    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: MemorySearchArgs = parse_args(MEMORY_SEARCH_TOOL_NAME, args)?;
-        let user_id = resolve_user_id(&self.context, MEMORY_SEARCH_TOOL_NAME).await?;
+        let user_id = resolve_user_id(context, MEMORY_SEARCH_TOOL_NAME)?;
         let memory_session = user_memory_session_id(&user_id);
 
         let top_k = request
             .top_k
             .unwrap_or(MEMORY_SEARCH_DEFAULT_TOP_K)
             .min(MEMORY_SEARCH_MAX_TOP_K);
+
+        tracing::debug!(
+            tool = MEMORY_SEARCH_TOOL_NAME,
+            user_id = %user_id,
+            query = %request.query,
+            top_k,
+            include_conversation = request.include_conversation.unwrap_or(false),
+            "searching user memory"
+        );
 
         // Search the user's memory namespace.
         let memory_results = self
@@ -212,37 +199,57 @@ impl Tool for MemorySearchTool {
             .collect();
 
         // Optionally also search the current conversation session.
-        if request.include_conversation.unwrap_or(false)
-            && let Ok(conversation_session) =
-                resolve_session_id(&self.context, MEMORY_SEARCH_TOOL_NAME).await
-            && let Ok(conversation_results) = self
-                .memory
-                .hybrid_query(MemoryHybridQueryRequest {
-                    session_id: conversation_session,
-                    query: request.query.clone(),
-                    query_embedding: None,
-                    top_k: Some(top_k),
-                    vector_weight: Some(self.vector_weight),
-                    fts_weight: Some(self.fts_weight),
-                })
-                .await
-        {
-            // Collect existing chunk IDs to deduplicate.
-            let existing_chunks: std::collections::HashSet<String> = memory_results
-                .iter()
-                .map(|r| r.chunk_id.clone())
-                .collect();
+        if request.include_conversation.unwrap_or(false) {
+            match resolve_session_id(context, MEMORY_SEARCH_TOOL_NAME) {
+                Ok(conversation_session) => {
+                    match self
+                        .memory
+                        .hybrid_query(MemoryHybridQueryRequest {
+                            session_id: conversation_session,
+                            query: request.query.clone(),
+                            query_embedding: None,
+                            top_k: Some(top_k),
+                            vector_weight: Some(self.vector_weight),
+                            fts_weight: Some(self.fts_weight),
+                        })
+                        .await
+                    {
+                        Ok(conversation_results) => {
+                            // Collect existing chunk IDs to deduplicate.
+                            let existing_chunks: std::collections::HashSet<String> =
+                                memory_results
+                                    .iter()
+                                    .map(|r| r.chunk_id.clone())
+                                    .collect();
 
-            for result in conversation_results {
-                if existing_chunks.contains(&result.chunk_id) {
-                    continue;
+                            for result in conversation_results {
+                                if existing_chunks.contains(&result.chunk_id) {
+                                    continue;
+                                }
+                                results.push(json!({
+                                    "note_id": "",
+                                    "text": result.text,
+                                    "score": result.score,
+                                    "source": "conversation"
+                                }));
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                tool = MEMORY_SEARCH_TOOL_NAME,
+                                error = %error,
+                                "conversation session search failed; returning memory results only"
+                            );
+                        }
+                    }
                 }
-                results.push(json!({
-                    "note_id": "",
-                    "text": result.text,
-                    "score": result.score,
-                    "source": "conversation"
-                }));
+                Err(error) => {
+                    tracing::warn!(
+                        tool = MEMORY_SEARCH_TOOL_NAME,
+                        error = %error,
+                        "could not resolve conversation session; returning memory results only"
+                    );
+                }
             }
         }
 
@@ -255,6 +262,13 @@ impl Tool for MemorySearchTool {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(top_k);
+
+        tracing::debug!(
+            tool = MEMORY_SEARCH_TOOL_NAME,
+            user_id = %user_id,
+            result_count = results.len(),
+            "memory search complete"
+        );
 
         serde_json::to_string_pretty(&results)
             .map_err(|error| execution_failed(MEMORY_SEARCH_TOOL_NAME, error.to_string()))
@@ -275,12 +289,11 @@ impl Tool for MemorySearchTool {
 
 pub struct MemorySaveTool {
     memory: Arc<dyn MemoryRetrieval>,
-    context: MemoryToolContext,
 }
 
 impl MemorySaveTool {
-    pub fn new(memory: Arc<dyn MemoryRetrieval>, context: MemoryToolContext) -> Self {
-        Self { memory, context }
+    pub fn new(memory: Arc<dyn MemoryRetrieval>) -> Self {
+        Self { memory }
     }
 }
 
@@ -311,7 +324,11 @@ impl Tool for MemorySaveTool {
         )
     }
 
-    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: MemorySaveArgs = parse_args(MEMORY_SAVE_TOOL_NAME, args)?;
         if request.content.trim().is_empty() {
             return Err(invalid_args(
@@ -319,9 +336,16 @@ impl Tool for MemorySaveTool {
                 "content must not be empty",
             ));
         }
-        let user_id = resolve_user_id(&self.context, MEMORY_SAVE_TOOL_NAME).await?;
+        let user_id = resolve_user_id(context, MEMORY_SAVE_TOOL_NAME)?;
         let memory_session = user_memory_session_id(&user_id);
         let note_id = format!("note-{}", uuid::Uuid::new_v4());
+
+        tracing::info!(
+            tool = MEMORY_SAVE_TOOL_NAME,
+            user_id = %user_id,
+            note_id = %note_id,
+            "saving note to user memory"
+        );
 
         self.memory
             .store_note(&memory_session, &note_id, &request.content)
@@ -356,12 +380,11 @@ impl Tool for MemorySaveTool {
 
 pub struct MemoryUpdateTool {
     memory: Arc<dyn MemoryRetrieval>,
-    context: MemoryToolContext,
 }
 
 impl MemoryUpdateTool {
-    pub fn new(memory: Arc<dyn MemoryRetrieval>, context: MemoryToolContext) -> Self {
-        Self { memory, context }
+    pub fn new(memory: Arc<dyn MemoryRetrieval>) -> Self {
+        Self { memory }
     }
 }
 
@@ -396,7 +419,11 @@ impl Tool for MemoryUpdateTool {
         )
     }
 
-    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: MemoryUpdateArgs = parse_args(MEMORY_UPDATE_TOOL_NAME, args)?;
         if request.content.trim().is_empty() {
             return Err(invalid_args(
@@ -404,8 +431,15 @@ impl Tool for MemoryUpdateTool {
                 "content must not be empty",
             ));
         }
-        let user_id = resolve_user_id(&self.context, MEMORY_UPDATE_TOOL_NAME).await?;
+        let user_id = resolve_user_id(context, MEMORY_UPDATE_TOOL_NAME)?;
         let memory_session = user_memory_session_id(&user_id);
+
+        tracing::info!(
+            tool = MEMORY_UPDATE_TOOL_NAME,
+            user_id = %user_id,
+            note_id = %request.note_id,
+            "updating note in user memory"
+        );
 
         // Delete the old note first.
         let found = self
@@ -459,12 +493,11 @@ impl Tool for MemoryUpdateTool {
 
 pub struct MemoryDeleteTool {
     memory: Arc<dyn MemoryRetrieval>,
-    context: MemoryToolContext,
 }
 
 impl MemoryDeleteTool {
-    pub fn new(memory: Arc<dyn MemoryRetrieval>, context: MemoryToolContext) -> Self {
-        Self { memory, context }
+    pub fn new(memory: Arc<dyn MemoryRetrieval>) -> Self {
+        Self { memory }
     }
 }
 
@@ -493,10 +526,21 @@ impl Tool for MemoryDeleteTool {
         )
     }
 
-    async fn execute(&self, args: &str) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
         let request: MemoryDeleteArgs = parse_args(MEMORY_DELETE_TOOL_NAME, args)?;
-        let user_id = resolve_user_id(&self.context, MEMORY_DELETE_TOOL_NAME).await?;
+        let user_id = resolve_user_id(context, MEMORY_DELETE_TOOL_NAME)?;
         let memory_session = user_memory_session_id(&user_id);
+
+        tracing::info!(
+            tool = MEMORY_DELETE_TOOL_NAME,
+            user_id = %user_id,
+            note_id = %request.note_id,
+            "deleting note from user memory"
+        );
 
         let found = self
             .memory
@@ -541,24 +585,23 @@ impl Tool for MemoryDeleteTool {
 pub fn register_memory_tools(
     registry: &mut crate::ToolRegistry,
     memory: Arc<dyn MemoryRetrieval>,
-    context: MemoryToolContext,
     vector_weight: f64,
     fts_weight: f64,
 ) {
     registry.register(
         MEMORY_SEARCH_TOOL_NAME,
-        MemorySearchTool::new(memory.clone(), context.clone(), vector_weight, fts_weight),
+        MemorySearchTool::new(memory.clone(), vector_weight, fts_weight),
     );
     registry.register(
         MEMORY_SAVE_TOOL_NAME,
-        MemorySaveTool::new(memory.clone(), context.clone()),
+        MemorySaveTool::new(memory.clone()),
     );
     registry.register(
         MEMORY_UPDATE_TOOL_NAME,
-        MemoryUpdateTool::new(memory.clone(), context.clone()),
+        MemoryUpdateTool::new(memory.clone()),
     );
     registry.register(
         MEMORY_DELETE_TOOL_NAME,
-        MemoryDeleteTool::new(memory, context),
+        MemoryDeleteTool::new(memory),
     );
 }

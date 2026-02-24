@@ -89,7 +89,7 @@ Built the foundation layer with zero internal dependencies:
 - Core tools: file read/write/edit/delete/search/list, bash, web fetch/search, vault copy
 - `SafetyTier` enum: `ReadOnly`, `SideEffecting`, `Privileged`
 - `ToolRegistry` with policy enforcement (timeout, output truncation, safety tier gating)
-- LLM-callable memory tools: `memory_search` (ReadOnly), `memory_save`, `memory_update`, `memory_delete` (SideEffecting) — per-user scoped note management with UUID-based `note_id` identifiers, shared `MemoryToolContext` for user/session propagation, registered during bootstrap when memory is configured
+- LLM-callable memory tools: `memory_search` (ReadOnly), `memory_save`, `memory_update`, `memory_delete` (SideEffecting) — per-user scoped note management with UUID-based `note_id` identifiers, per-turn `ToolExecutionContext` for user/session propagation, registered during bootstrap when memory is configured
 
 ### Phase 5: Agent Loop + Cancellation + Testing
 

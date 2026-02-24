@@ -8,7 +8,7 @@ use types::{
     MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
     Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError,
     RuntimeProgressEvent, RuntimeProgressKind, SafetyTier, StreamItem, ToolCall, ToolCallDelta,
-    ToolError, UsageUpdate,
+    ToolError, ToolExecutionContext, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -95,6 +95,7 @@ pub struct AgentRuntime {
     stream_buffer_size: usize,
     memory: Option<Arc<dyn Memory>>,
     memory_retrieval: Option<Arc<dyn MemoryRetrieval>>,
+    tool_execution_context: std::sync::Arc<tokio::sync::Mutex<ToolExecutionContext>>,
 }
 
 impl AgentRuntime {
@@ -110,9 +111,15 @@ impl AgentRuntime {
             stream_buffer_size: DEFAULT_STREAM_BUFFER_SIZE,
             memory: None,
             memory_retrieval: None,
+            tool_execution_context: std::sync::Arc::new(tokio::sync::Mutex::new(
+                ToolExecutionContext::default(),
+            )),
         }
     }
 
+    /// Deprecated: prefer [`with_memory_retrieval`] which preserves the
+    /// retrieval layer for hybrid search and context injection.  This method
+    /// is kept for backward compatibility but clears `memory_retrieval`.
     pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
         self.memory = Some(memory);
         self.memory_retrieval = None;
@@ -128,6 +135,12 @@ impl AgentRuntime {
     pub fn with_stream_buffer_size(mut self, stream_buffer_size: usize) -> Self {
         self.stream_buffer_size = stream_buffer_size.max(1);
         self
+    }
+
+    /// Set the per-turn tool execution context (user_id, session_id) that
+    /// memory tools use to scope operations to the correct user namespace.
+    pub async fn set_tool_execution_context(&self, context: ToolExecutionContext) {
+        *self.tool_execution_context.lock().await = context;
     }
 
     pub fn limits(&self) -> &RuntimeLimits {
@@ -372,6 +385,36 @@ enum StreamCollectError {
     TurnTimedOut,
 }
 
+/// When the LLM stuffs multiple JSON objects into a single tool-call arguments
+/// string (e.g. `{"query":"a"}{"query":"b"}`), `serde_json::from_str` rejects
+/// the concatenation with a "trailing characters" error. This helper attempts to
+/// extract just the first valid JSON object so the tool can still execute with
+/// sensible input rather than always falling through to the self-correction
+/// error path (which the LLM may repeat).
+fn try_extract_first_json_object(raw: &str) -> Option<serde_json::Value> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    // Use serde_json's StreamDeserializer to pull the first complete value.
+    let mut stream =
+        serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    let first: serde_json::Value = stream.next()?.ok()?;
+    // Only salvage when there really is leftover content (the concatenation case).
+    let consumed = stream.byte_offset();
+    if consumed >= trimmed.len() {
+        // The whole string was one object — the original parse should have
+        // succeeded, so don't interfere.
+        return None;
+    }
+    // Verify there is at least one more non-whitespace char after the first
+    // object (proves concatenation rather than trailing whitespace).
+    if trimmed[consumed..].trim().is_empty() {
+        return None;
+    }
+    Some(first)
+}
+
 #[derive(Debug, Default)]
 struct ToolCallAccumulator {
     by_index: BTreeMap<usize, ToolCallAccumulatorEntry>,
@@ -422,18 +465,28 @@ impl ToolCallAccumulator {
             };
             let parsed_arguments = match serde_json::from_str(arguments) {
                 Ok(parsed_arguments) => parsed_arguments,
-                Err(error) => {
-                    let mut payload = serde_json::Map::new();
-                    payload.insert(
-                        INVALID_TOOL_ARGS_RAW_KEY.to_owned(),
-                        serde_json::Value::String(arguments.to_owned()),
-                    );
-                    payload.insert(
-                        INVALID_TOOL_ARGS_ERROR_KEY.to_owned(),
-                        serde_json::Value::String(error.to_string()),
-                    );
-                    serde_json::Value::Object(payload)
-                }
+                Err(error) => match try_extract_first_json_object(arguments) {
+                    Some(first_object) => {
+                        tracing::warn!(
+                            tool = %name,
+                            "tool call arguments contain concatenated JSON objects; \
+                             using only the first object"
+                        );
+                        first_object
+                    }
+                    None => {
+                        let mut payload = serde_json::Map::new();
+                        payload.insert(
+                            INVALID_TOOL_ARGS_RAW_KEY.to_owned(),
+                            serde_json::Value::String(arguments.to_owned()),
+                        );
+                        payload.insert(
+                            INVALID_TOOL_ARGS_ERROR_KEY.to_owned(),
+                            serde_json::Value::String(error.to_string()),
+                        );
+                        serde_json::Value::Object(payload)
+                    }
+                },
             };
             tool_calls.push(ToolCall {
                 id,

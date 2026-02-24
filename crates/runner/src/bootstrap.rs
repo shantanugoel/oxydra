@@ -16,7 +16,7 @@ use runtime::{ContextBudgetLimits, RetrievalLimits, RuntimeLimits, Summarization
 use serde::Serialize;
 use thiserror::Error;
 use tools::{
-    MemoryToolContext, RuntimeToolsBootstrap, ToolAvailability, ToolRegistry,
+    RuntimeToolsBootstrap, ToolAvailability, ToolRegistry,
     bootstrap_runtime_tools, register_memory_tools,
 };
 use types::{
@@ -63,7 +63,6 @@ pub struct VmBootstrapRuntime {
     pub tool_registry: ToolRegistry,
     pub tool_availability: ToolAvailability,
     pub startup_status: StartupStatusReport,
-    pub memory_tool_context: MemoryToolContext,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -458,12 +457,10 @@ pub async fn bootstrap_vm_runtime_with_paths(
         availability,
     } = bootstrap_runtime_tools(bootstrap.as_ref()).await;
 
-    let memory_tool_context = MemoryToolContext::new();
     if let Some(ref memory_retrieval) = memory {
         register_memory_tools(
             &mut registry,
             memory_retrieval.clone(),
-            memory_tool_context.clone(),
             config.memory.retrieval.vector_weight,
             config.memory.retrieval.fts_weight,
         );
@@ -480,7 +477,6 @@ pub async fn bootstrap_vm_runtime_with_paths(
         tool_registry: registry,
         tool_availability: availability,
         startup_status,
-        memory_tool_context,
     })
 }
 

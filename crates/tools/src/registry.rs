@@ -48,14 +48,49 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, args: &str) -> Result<String, ToolError> {
-        self.execute_with_policy(name, args, |_| Ok(())).await
+        self.execute_with_policy_and_context(
+            name,
+            args,
+            |_| Ok(()),
+            &ToolExecutionContext::default(),
+        )
+        .await
     }
 
     pub async fn execute_with_policy<F>(
         &self,
         name: &str,
         args: &str,
+        safety_gate: F,
+    ) -> Result<String, ToolError>
+    where
+        F: FnMut(SafetyTier) -> Result<(), ToolError>,
+    {
+        self.execute_with_policy_and_context(
+            name,
+            args,
+            safety_gate,
+            &ToolExecutionContext::default(),
+        )
+        .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
+        self.execute_with_policy_and_context(name, args, |_| Ok(()), context)
+            .await
+    }
+
+    pub async fn execute_with_policy_and_context<F>(
+        &self,
+        name: &str,
+        args: &str,
         mut safety_gate: F,
+        context: &ToolExecutionContext,
     ) -> Result<String, ToolError>
     where
         F: FnMut(SafetyTier) -> Result<(), ToolError>,
@@ -81,7 +116,7 @@ impl ToolRegistry {
         }
 
         let timeout = tool.timeout();
-        let output = tokio::time::timeout(timeout, tool.execute(args))
+        let output = tokio::time::timeout(timeout, tool.execute(args, context))
             .await
             .map_err(|_| execution_failed(name, format!("tool timed out after {timeout:?}")))??;
 

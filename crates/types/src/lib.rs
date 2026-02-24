@@ -47,5 +47,5 @@ pub use runner::{
     StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport, StreamOutput,
     StreamOutputChunk,
 };
-pub use tool::{FunctionDecl, SafetyTier, Tool, ToolParameterSchema};
+pub use tool::{FunctionDecl, SafetyTier, Tool, ToolExecutionContext, ToolParameterSchema};
 pub use tracing::init_tracing;

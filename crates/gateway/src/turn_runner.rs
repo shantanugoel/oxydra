@@ -17,7 +17,6 @@ pub struct RuntimeGatewayTurnRunner {
     provider: ProviderId,
     model: ModelId,
     contexts: Mutex<HashMap<String, Context>>,
-    memory_tool_context: Option<tools::MemoryToolContext>,
 }
 
 impl RuntimeGatewayTurnRunner {
@@ -27,13 +26,7 @@ impl RuntimeGatewayTurnRunner {
             provider,
             model,
             contexts: Mutex::new(HashMap::new()),
-            memory_tool_context: None,
         }
-    }
-
-    pub fn with_memory_tool_context(mut self, context: tools::MemoryToolContext) -> Self {
-        self.memory_tool_context = Some(context);
-        self
     }
 
     fn base_context(&self) -> Context {
@@ -56,12 +49,15 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
     ) -> Result<Response, RuntimeError> {
-        // Set the memory tool context holders so memory tools can resolve
-        // the user_id and session_id during execution.
-        if let Some(ref ctx) = self.memory_tool_context {
-            *ctx.user_id.lock().await = Some(user_id.to_owned());
-            *ctx.session_id.lock().await = Some(runtime_session_id.to_owned());
-        }
+        // Set the per-turn tool execution context so memory tools resolve
+        // to the correct user namespace. This is safe for concurrent turns
+        // because the context is cloned per tool invocation in the runtime.
+        self.runtime
+            .set_tool_execution_context(types::ToolExecutionContext {
+                user_id: Some(user_id.to_owned()),
+                session_id: Some(runtime_session_id.to_owned()),
+            })
+            .await;
 
         let mut context = {
             let mut contexts = self.contexts.lock().await;

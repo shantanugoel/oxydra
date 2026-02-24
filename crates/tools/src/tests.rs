@@ -34,7 +34,10 @@ async fn read_tool_executes_through_tool_contract() {
     let contract: &dyn Tool = &tool;
 
     let result = contract
-        .execute(&json!({ "path": path.to_string_lossy() }).to_string())
+        .execute(
+            &json!({ "path": path.to_string_lossy() }).to_string(),
+            &ToolExecutionContext::default(),
+        )
         .await
         .expect("read should succeed");
 
@@ -54,6 +57,7 @@ async fn write_tool_writes_file_content() {
                 "content": "persisted text"
             })
             .to_string(),
+            &ToolExecutionContext::default(),
         )
         .await
         .expect("write should succeed");
@@ -77,6 +81,7 @@ async fn edit_tool_replaces_exact_single_match() {
             "new_text": "delta"
         })
         .to_string(),
+        &ToolExecutionContext::default(),
     )
     .await
     .expect("edit should succeed");
@@ -102,6 +107,7 @@ async fn vault_copyto_uses_two_auditable_wasm_invocations_with_disjoint_mounts()
                 "destination_path": destination_path.to_string_lossy(),
             })
             .to_string(),
+            &ToolExecutionContext::default(),
         )
         .await
         .expect("vault_copyto should succeed");
@@ -153,6 +159,7 @@ async fn vault_copyto_propagates_read_step_errors_without_running_write_step() {
                 "destination_path": destination_path.to_string_lossy(),
             })
             .to_string(),
+            &ToolExecutionContext::default(),
         )
         .await
         .expect_err("missing source should fail in read step");
@@ -186,6 +193,7 @@ async fn vault_copyto_propagates_write_step_errors_after_read_step() {
                 "destination_path": destination_path.to_string_lossy(),
             })
             .to_string(),
+            &ToolExecutionContext::default(),
         )
         .await
         .expect_err("missing destination parent should fail in write step");
@@ -209,7 +217,10 @@ async fn bash_tool_executes_command() {
     };
 
     let output = BashTool::default()
-        .execute(&json!({ "command": command }).to_string())
+        .execute(
+            &json!({ "command": command }).to_string(),
+            &ToolExecutionContext::default(),
+        )
         .await
         .expect("bash command should succeed");
     assert!(output.contains("hello"));
@@ -599,7 +610,7 @@ impl Tool for StaticOutputTool {
         )
     }
 
-    async fn execute(&self, _args: &str) -> Result<String, ToolError> {
+    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
         Ok("1234567890".to_owned())
     }
 
@@ -624,7 +635,7 @@ impl Tool for SlowTool {
         )
     }
 
-    async fn execute(&self, _args: &str) -> Result<String, ToolError> {
+    async fn execute(&self, _args: &str, _context: &ToolExecutionContext) -> Result<String, ToolError> {
         sleep(Duration::from_millis(25)).await;
         Ok("done".to_owned())
     }
@@ -647,7 +658,7 @@ mod memory_tool_tests {
 
     use memory::LibsqlMemory;
     use serde_json::json;
-    use types::{MemoryRetrieval, SafetyTier, Tool};
+    use types::{MemoryRetrieval, SafetyTier, Tool, ToolExecutionContext};
 
     use crate::memory_tools::*;
 
@@ -680,18 +691,17 @@ mod memory_tool_tests {
         )
     }
 
-    async fn test_context(user_id: &str, session_id: &str) -> MemoryToolContext {
-        let ctx = MemoryToolContext::new();
-        *ctx.user_id.lock().await = Some(user_id.to_owned());
-        *ctx.session_id.lock().await = Some(session_id.to_owned());
-        ctx
+    fn test_context(user_id: &str, session_id: &str) -> ToolExecutionContext {
+        ToolExecutionContext {
+            user_id: Some(user_id.to_owned()),
+            session_id: Some(session_id.to_owned()),
+        }
     }
 
     #[tokio::test]
     async fn memory_search_tool_schema_is_valid() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+        let tool = MemorySearchTool::new(memory, 0.7, 0.3);
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_SEARCH_TOOL_NAME);
         assert!(schema.description.is_some());
@@ -707,8 +717,7 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_save_tool_schema_is_valid() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let tool = MemorySaveTool::new(memory, ctx);
+        let tool = MemorySaveTool::new(memory);
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_SAVE_TOOL_NAME);
         assert!(schema.description.is_some());
@@ -723,8 +732,7 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_update_tool_schema_is_valid() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let tool = MemoryUpdateTool::new(memory, ctx);
+        let tool = MemoryUpdateTool::new(memory);
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_UPDATE_TOOL_NAME);
         let required = schema.parameters["required"]
@@ -738,8 +746,7 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_delete_tool_schema_is_valid() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let tool = MemoryDeleteTool::new(memory, ctx);
+        let tool = MemoryDeleteTool::new(memory);
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_DELETE_TOOL_NAME);
         assert!(schema.parameters["required"]
@@ -753,11 +760,11 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_save_returns_note_id() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let tool = MemorySaveTool::new(memory, ctx);
+        let ctx = test_context("alice", "runtime-alice");
+        let tool = MemorySaveTool::new(memory);
 
         let result = tool
-            .execute(&json!({"content": "User likes pizza"}).to_string())
+            .execute(&json!({"content": "User likes pizza"}).to_string(), &ctx)
             .await
             .expect("save should succeed");
 
@@ -774,11 +781,11 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_save_rejects_empty_content() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let tool = MemorySaveTool::new(memory, ctx);
+        let ctx = test_context("alice", "runtime-alice");
+        let tool = MemorySaveTool::new(memory);
 
         let error = tool
-            .execute(&json!({"content": "   "}).to_string())
+            .execute(&json!({"content": "   "}).to_string(), &ctx)
             .await
             .expect_err("empty content should fail");
         assert!(matches!(
@@ -790,17 +797,17 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_search_returns_saved_notes() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let save_tool = MemorySaveTool::new(memory.clone(), ctx.clone());
-        let search_tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+        let ctx = test_context("alice", "runtime-alice");
+        let save_tool = MemorySaveTool::new(memory.clone());
+        let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         save_tool
-            .execute(&json!({"content": "User prefers dark mode"}).to_string())
+            .execute(&json!({"content": "User prefers dark mode"}).to_string(), &ctx)
             .await
             .expect("save should succeed");
 
         let result = search_tool
-            .execute(&json!({"query": "dark mode"}).to_string())
+            .execute(&json!({"query": "dark mode"}).to_string(), &ctx)
             .await
             .expect("search should succeed");
 
@@ -820,20 +827,20 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_delete_removes_note() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let save_tool = MemorySaveTool::new(memory.clone(), ctx.clone());
-        let delete_tool = MemoryDeleteTool::new(memory.clone(), ctx.clone());
-        let search_tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+        let ctx = test_context("alice", "runtime-alice");
+        let save_tool = MemorySaveTool::new(memory.clone());
+        let delete_tool = MemoryDeleteTool::new(memory.clone());
+        let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         let save_result = save_tool
-            .execute(&json!({"content": "User likes chocolates"}).to_string())
+            .execute(&json!({"content": "User likes chocolates"}).to_string(), &ctx)
             .await
             .expect("save should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&save_result).unwrap();
         let note_id = parsed["note_id"].as_str().unwrap();
 
         let delete_result = delete_tool
-            .execute(&json!({"note_id": note_id}).to_string())
+            .execute(&json!({"note_id": note_id}).to_string(), &ctx)
             .await
             .expect("delete should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&delete_result).unwrap();
@@ -843,7 +850,7 @@ mod memory_tool_tests {
         );
 
         let search_result = search_tool
-            .execute(&json!({"query": "chocolates"}).to_string())
+            .execute(&json!({"query": "chocolates"}).to_string(), &ctx)
             .await
             .expect("search should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&search_result).unwrap();
@@ -857,11 +864,11 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_delete_returns_error_for_nonexistent_note() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let delete_tool = MemoryDeleteTool::new(memory, ctx);
+        let ctx = test_context("alice", "runtime-alice");
+        let delete_tool = MemoryDeleteTool::new(memory);
 
         let error = delete_tool
-            .execute(&json!({"note_id": "note-nonexistent"}).to_string())
+            .execute(&json!({"note_id": "note-nonexistent"}).to_string(), &ctx)
             .await
             .expect_err("delete of nonexistent note should fail");
         assert!(matches!(
@@ -874,20 +881,20 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_update_replaces_note_content() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let save_tool = MemorySaveTool::new(memory.clone(), ctx.clone());
-        let update_tool = MemoryUpdateTool::new(memory.clone(), ctx.clone());
-        let search_tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+        let ctx = test_context("alice", "runtime-alice");
+        let save_tool = MemorySaveTool::new(memory.clone());
+        let update_tool = MemoryUpdateTool::new(memory.clone());
+        let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         let save_result = save_tool
-            .execute(&json!({"content": "User's name is Shantanu"}).to_string())
+            .execute(&json!({"content": "User's name is Shantanu"}).to_string(), &ctx)
             .await
             .expect("save should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&save_result).unwrap();
         let note_id = parsed["note_id"].as_str().unwrap().to_owned();
 
         let update_result = update_tool
-            .execute(&json!({"note_id": note_id, "content": "User prefers SG"}).to_string())
+            .execute(&json!({"note_id": note_id, "content": "User prefers SG"}).to_string(), &ctx)
             .await
             .expect("update should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&update_result).unwrap();
@@ -898,7 +905,7 @@ mod memory_tool_tests {
         );
 
         let search_result = search_tool
-            .execute(&json!({"query": "name preference"}).to_string())
+            .execute(&json!({"query": "name preference"}).to_string(), &ctx)
             .await
             .expect("search should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&search_result).unwrap();
@@ -913,12 +920,13 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_update_returns_error_for_nonexistent_note() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
-        let update_tool = MemoryUpdateTool::new(memory, ctx);
+        let ctx = test_context("alice", "runtime-alice");
+        let update_tool = MemoryUpdateTool::new(memory);
 
         let error = update_tool
             .execute(
                 &json!({"note_id": "note-nonexistent", "content": "new content"}).to_string(),
+                &ctx,
             )
             .await
             .expect_err("update of nonexistent note should fail");
@@ -932,11 +940,11 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn memory_search_fails_without_user_context() {
         let memory = test_memory_backend().await;
-        let ctx = MemoryToolContext::new();
-        let tool = MemorySearchTool::new(memory, ctx, 0.7, 0.3);
+        let empty_ctx = ToolExecutionContext::default();
+        let tool = MemorySearchTool::new(memory, 0.7, 0.3);
 
         let error = tool
-            .execute(&json!({"query": "test"}).to_string())
+            .execute(&json!({"query": "test"}).to_string(), &empty_ctx)
             .await
             .expect_err("search without user context should fail");
         assert!(matches!(
@@ -949,10 +957,9 @@ mod memory_tool_tests {
     #[tokio::test]
     async fn register_memory_tools_adds_four_tools_to_registry() {
         let memory = test_memory_backend().await;
-        let ctx = test_context("alice", "runtime-alice").await;
         let mut registry = crate::ToolRegistry::default();
 
-        register_memory_tools(&mut registry, memory, ctx, 0.7, 0.3);
+        register_memory_tools(&mut registry, memory, 0.7, 0.3);
 
         assert!(registry.get(MEMORY_SEARCH_TOOL_NAME).is_some());
         assert!(registry.get(MEMORY_SAVE_TOOL_NAME).is_some());
@@ -965,5 +972,44 @@ mod memory_tool_tests {
         assert!(names.contains(&MEMORY_SAVE_TOOL_NAME.to_owned()));
         assert!(names.contains(&MEMORY_UPDATE_TOOL_NAME.to_owned()));
         assert!(names.contains(&MEMORY_DELETE_TOOL_NAME.to_owned()));
+    }
+
+    #[tokio::test]
+    async fn memory_notes_are_isolated_per_user() {
+        let memory = test_memory_backend().await;
+        let ctx_alice = test_context("alice", "runtime-alice");
+        let ctx_bob = test_context("bob", "runtime-bob");
+
+        let save_tool = MemorySaveTool::new(memory.clone());
+        let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
+
+        save_tool
+            .execute(&json!({"content": "Alice's secret preference"}).to_string(), &ctx_alice)
+            .await
+            .expect("save for alice should succeed");
+
+        // Bob should not see Alice's notes
+        let result = search_tool
+            .execute(&json!({"query": "secret preference"}).to_string(), &ctx_bob)
+            .await
+            .expect("search for bob should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let results = parsed.as_array().unwrap();
+        assert!(
+            results.is_empty(),
+            "bob should not see alice's notes"
+        );
+
+        // Alice should see her own notes
+        let result = search_tool
+            .execute(&json!({"query": "secret preference"}).to_string(), &ctx_alice)
+            .await
+            .expect("search for alice should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let results = parsed.as_array().unwrap();
+        assert!(
+            !results.is_empty(),
+            "alice should see her own notes"
+        );
     }
 }

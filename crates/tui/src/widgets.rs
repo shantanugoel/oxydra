@@ -389,7 +389,7 @@ pub fn render_app(frame: &mut Frame, model: &TuiViewModel, adapter_state: &TuiUi
     // Compute input area height based on buffer line count (at least 3, at most 10).
     // We split on '\n' rather than using `lines()` so a trailing newline is
     // counted as starting an additional line.
-    let line_count = model.input_buffer.split('\n').count().max(1).min(8);
+    let line_count = model.input_buffer.split('\n').count().clamp(1, 8);
     let input_height = (line_count + 2) as u16; // +2 for top/bottom borders
 
     let [message_area, input_area, status_area] = Layout::vertical([

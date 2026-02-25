@@ -119,6 +119,7 @@ Reuse existing `GatewayServerFrame::TurnProgress`. No new frame type.
 - Feature flags are standard Rust practice for optional transports
 - CI tests without the flag stay fast; feature-flag CI job tests with it
 - Guidebook is the canonical source
+- But add it to default features
 
 ```toml
 # channels/Cargo.toml

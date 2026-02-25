@@ -836,91 +836,78 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 6: Auth & Identity Pipeline
+### Step 6: Auth & Identity Pipeline ✅ DONE
 
 **Goal:** Sender authentication for external channels. Runs inside the VM alongside the gateway.
 
 **Crates:** `types`, `channels`, `runner`
 
-**Changes:**
+**Changes applied:**
 
 1. **`types/src/runner.rs`:**
-   - Add `SenderBinding` type (from Section 2)
-   - Add `ChannelsConfig` to `RunnerUserConfig`:
-     ```rust
-     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-     pub struct RunnerUserConfig {
-         #[serde(default)]
-         pub mounts: RunnerMountPaths,
-         #[serde(default)]
-         pub resources: RunnerResourceLimits,
-         #[serde(default)]
-         pub credential_refs: BTreeMap<String, String>,
-         #[serde(default)]
-         pub behavior: RunnerBehaviorOverrides,
-         #[serde(default)]
-         pub channels: ChannelsConfig,  // NEW
-     }
+   - Added `SenderBinding` type with `platform_ids: Vec<String>` and optional `display_name`
+   - Added `ChannelsConfig` with `telegram: Option<TelegramChannelConfig>` (extensible for future channels)
+   - Added `TelegramChannelConfig` with `enabled`, `bot_token_env`, `polling_timeout_secs`, `senders`, `max_message_length` fields with sensible defaults
+   - Added `channels: ChannelsConfig` field to `RunnerUserConfig` with `#[serde(default)]`
+   - Added `channels: Option<ChannelsConfig>` field to `RunnerBootstrapEnvelope` with `#[serde(default, skip_serializing_if = "Option::is_none")]`
+   - Added `ChannelsConfig::bot_token_env_refs()` helper to collect all bot token env var names from enabled channels
+   - Added `ChannelsConfig::is_empty()` helper to check if any channel is configured
 
-     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-     pub struct ChannelsConfig {
-         #[serde(default)]
-         pub telegram: Option<TelegramChannelConfig>,
-         // Future: discord, whatsapp, etc.
-     }
+2. **`types/src/lib.rs`:**
+   - Re-exported `ChannelsConfig`, `TelegramChannelConfig`, `SenderBinding` from `runner` module
 
-     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-     pub struct TelegramChannelConfig {
-         #[serde(default)]
-         pub enabled: bool,
-         pub bot_token_env: Option<String>,
-         #[serde(default = "default_polling_timeout_secs")]
-         pub polling_timeout_secs: u64,
-         #[serde(default)]
-         pub senders: Vec<SenderBinding>,
-         #[serde(default = "default_max_message_length")]
-         pub max_message_length: usize,
-     }
-     ```
-
-2. **`types/src/runner.rs` — add channels to bootstrap envelope:**
-   - Add `channels: Option<ChannelsConfig>` field to `RunnerBootstrapEnvelope` with `#[serde(default)]`
-   - Runner populates it from the user's `RunnerUserConfig.channels`
-
-3. **`runner/src/lib.rs` — forward channels config + bot token env vars:**
-   - In `start_user_for_host()`: read `user_config.channels`, include in bootstrap envelope
-   - In `collect_config_env_vars()`: also collect `bot_token_env` values from channels config
+3. **`runner/src/lib.rs`:**
+   - `start_user_for_host()` populates `channels` field in `RunnerBootstrapEnvelope` from `user_config.channels` (None if empty)
+   - Added `collect_channel_bot_token_env_vars()` function that resolves bot token env var names from channel config against the runner's environment
+   - Bot token env vars are collected alongside existing API key env vars and forwarded to the VM container
 
 4. **`channels/src/sender_auth.rs` (new file):**
-   - `SenderAuthPolicy` struct:
-     ```rust
-     pub struct SenderAuthPolicy {
-         authorized: HashSet<String>, // all platform_ids from all sender bindings
-     }
-
-     impl SenderAuthPolicy {
-         pub fn from_bindings(bindings: &[SenderBinding]) -> Self {
-             let authorized = bindings.iter()
-                 .flat_map(|b| b.platform_ids.iter().cloned())
-                 .collect();
-             Self { authorized }
-         }
-         pub fn is_authorized(&self, platform_id: &str) -> bool {
-             self.authorized.contains(platform_id)
-         }
-     }
-     ```
+   - `SenderAuthPolicy` struct with `authorized: HashSet<String>` for O(1) lookup
+   - `from_bindings(&[SenderBinding])` flattens all platform IDs into lookup set
+   - `is_authorized(platform_id)`, `authorized_count()`, `is_empty()` methods
+   - Implements default-deny: only explicitly listed platform IDs are allowed
 
 5. **`channels/src/audit.rs` (new file):**
-   - `AuditLogger` for recording rejected senders
-   - File-based implementation (writes to workspace log dir inside VM)
+   - `AuditEntry` struct with `timestamp`, `channel`, `sender_id`, `reason`, `context` fields
+   - `AuditLogger` struct with append-only JSON-lines file output
+   - `for_workspace(workspace_root)` constructor targets `<workspace>/.oxydra/sender_audit.log`
+   - `log_rejected_sender(entry)` writes entry; failures logged via tracing, never propagated
+   - `now_iso8601()` utility for UTC timestamps without external chrono dependency
+   - Parent directories created automatically on first write
 
-**Verification:**
-- New test: known sender is authorized
-- New test: unknown sender rejected, audit entry created
-- Config test: channels config is optional (default = no channels)
-- Config test: empty senders list means nobody can interact
-- Config test: multiple platform_ids in one binding all authorize
+6. **`channels/src/lib.rs`:**
+   - Added `pub mod audit` and `pub mod sender_auth` modules
+   - Re-exported `AuditEntry`, `AuditLogger`, `SenderAuthPolicy`
+
+7. **`channels/Cargo.toml`:**
+   - Added `serde`, `serde_json`, `tracing` dependencies
+
+8. **All existing test files across crates updated:**
+   - Added `channels: None` to all `RunnerBootstrapEnvelope` struct constructions in `types/tests`, `runner/src/tests.rs`, `runner/src/bootstrap.rs`, `runner/src/bin/oxydra-vm.rs`, `runtime/src/tests.rs`, `tools/src/tests.rs`
+
+**Verification:** ✅ All tests pass, clippy clean
+- New channels tests (12 total, 9 new):
+  - `sender_auth::known_sender_is_authorized`: authorized sender passes check
+  - `sender_auth::unknown_sender_is_rejected`: unknown sender rejected
+  - `sender_auth::empty_bindings_reject_everyone`: empty policy denies all
+  - `sender_auth::multiple_platform_ids_in_one_binding_all_authorize`: multi-ID binding works
+  - `sender_auth::multiple_bindings_flatten_into_single_set`: cross-binding flattening
+  - `sender_auth::duplicate_platform_ids_deduplicated`: dedup in HashSet
+  - `audit::audit_logger_creates_log_file_and_writes_entry`: write + read back
+  - `audit::audit_logger_appends_multiple_entries`: append-only behavior
+  - `audit::audit_logger_creates_parent_directories`: auto-mkdir
+  - `audit::now_iso8601_returns_valid_format`: timestamp format validation
+- New types runner_contracts tests (9 new):
+  - `channels_config_is_optional_and_defaults_empty`: channels default to empty
+  - `channels_config_with_telegram_round_trips_through_toml`: full TOML round-trip
+  - `channels_config_defaults_for_telegram_fields`: default values for polling_timeout_secs, max_message_length
+  - `empty_senders_list_means_nobody_can_interact`: empty senders = nobody authorized
+  - `bot_token_env_refs_only_from_enabled_channels`: disabled channels don't contribute env refs
+  - `bootstrap_envelope_with_channels_round_trips`: envelope with channels serializes/deserializes
+  - `bootstrap_envelope_without_channels_round_trips`: envelope without channels still works
+  - `sender_binding_serde_round_trip`: SenderBinding JSON round-trip
+  - `sender_binding_without_display_name`: optional display_name deserialization
+- All existing tests continue to pass (zero regressions)
 
 ---
 

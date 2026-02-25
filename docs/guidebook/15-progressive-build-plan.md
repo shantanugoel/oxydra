@@ -21,7 +21,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring. **Resolved:** multi-line input (Alt+Enter), runtime activity visibility (`TurnProgress`). **Protocol v2:** `runtime_session_id` renamed to `session_id` throughout; `GatewayClientHello` gains `create_new_session` field; `ToolExecutionContext` threaded as parameter (not shared state) for concurrent-session safety. |
 | 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides, cached catalog resolution, `skip_catalog_validation` escape hatch, updated CLI (`fetch --pinned`, unfiltered cache) |
-| 14 | External channels + identity mapping | Planned | |
+| 14 | External channels + identity mapping | **In Progress** | Auth/identity pipeline implemented: `ChannelsConfig`, `TelegramChannelConfig`, `SenderBinding` types; `SenderAuthPolicy` (default-deny); `AuditLogger` (JSON-lines); bootstrap envelope propagation; bot token env var forwarding. Channel session mapping and Telegram adapter remaining. |
 | 15 | Multi-agent orchestration | Planned | |
 | 16 | Observability (OpenTelemetry) | Planned | |
 | 17 | MCP support | Planned | |
@@ -263,6 +263,15 @@ Built a complete durable scheduler that lets the LLM create and manage one-off a
 - Canonical session identity mapping: `(user_id, channel_id, channel_session_id) → session_id`
 - Reconnects reuse same workspace and memory namespace
 - Rejected senders audited
+
+**Status (partial):**
+- ✅ `ChannelsConfig`, `TelegramChannelConfig`, `SenderBinding` types in `types/src/runner.rs`
+- ✅ `SenderAuthPolicy` (default-deny auth) in `channels/src/sender_auth.rs`
+- ✅ `AuditLogger` (JSON-lines audit trail) in `channels/src/audit.rs`
+- ✅ Bootstrap envelope propagation and bot token env var forwarding in `runner/src/lib.rs`
+- ⬜ Channel session mapping (DB-backed, `channel_session_mappings` table)
+- ⬜ Telegram adapter (teloxide, feature-flagged)
+- ⬜ Edit-message streaming for Telegram
 
 **Verification gate:** Messages from external channel trigger agent responses through gateway routing; identity maps deterministically; unauthorized senders rejected and audited.
 

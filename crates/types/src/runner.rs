@@ -114,6 +114,8 @@ pub struct RunnerUserConfig {
     pub credential_refs: BTreeMap<String, String>,
     #[serde(default)]
     pub behavior: RunnerBehaviorOverrides,
+    #[serde(default)]
+    pub channels: ChannelsConfig,
 }
 
 impl RunnerUserConfig {
@@ -286,6 +288,81 @@ pub struct RunnerBehaviorOverrides {
     pub browser_enabled: Option<bool>,
 }
 
+// ── Channel Configuration Types ─────────────────────────────────────────────
+
+/// Per-user channel configuration. Lives in `RunnerUserConfig` (host-side,
+/// per-user). Delivered to the VM via `RunnerBootstrapEnvelope`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChannelsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<TelegramChannelConfig>,
+    // Future: discord, whatsapp, etc.
+}
+
+impl ChannelsConfig {
+    /// Returns `true` if no channel is configured.
+    pub fn is_empty(&self) -> bool {
+        self.telegram.is_none()
+    }
+
+    /// Collect all `bot_token_env` references from enabled channels.
+    /// Returns environment variable names that the runner should forward
+    /// to the VM process.
+    pub fn bot_token_env_refs(&self) -> Vec<String> {
+        let mut refs = Vec::new();
+        if let Some(telegram) = &self.telegram
+            && telegram.enabled
+            && let Some(ref env_name) = telegram.bot_token_env
+            && !env_name.is_empty()
+        {
+            refs.push(env_name.clone());
+        }
+        refs
+    }
+}
+
+/// Telegram channel adapter configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelegramChannelConfig {
+    /// Whether this channel is active. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Name of the environment variable holding the Telegram bot token.
+    /// The runner forwards the resolved value to the VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token_env: Option<String>,
+    /// Long-polling timeout in seconds. Defaults to 30.
+    #[serde(default = "default_polling_timeout_secs")]
+    pub polling_timeout_secs: u64,
+    /// Authorized senders — only these platform IDs can interact with the agent.
+    #[serde(default)]
+    pub senders: Vec<SenderBinding>,
+    /// Maximum Telegram message length (chars) before splitting. Defaults to 4096.
+    #[serde(default = "default_max_message_length")]
+    pub max_message_length: usize,
+}
+
+/// A sender identity binding: a set of platform-specific IDs that identify
+/// the same person. All authorized senders are treated identically as the
+/// owning user — there is no role differentiation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderBinding {
+    /// Platform-specific sender identifiers (e.g. Telegram user_id strings).
+    /// A single person may have multiple platform IDs.
+    pub platform_ids: Vec<String>,
+    /// Optional human-readable name for logging and audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+fn default_polling_timeout_secs() -> u64 {
+    30
+}
+
+fn default_max_message_length() -> usize {
+    4096
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RunnerConfigError {
     #[error("runner workspace_root must not be empty")]
@@ -317,6 +394,10 @@ pub struct RunnerBootstrapEnvelope {
     pub runtime_policy: Option<RunnerRuntimePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_status: Option<StartupStatusReport>,
+    /// Channel configuration (Telegram, etc.) for this user.
+    /// Populated from the user's `RunnerUserConfig.channels`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<ChannelsConfig>,
 }
 
 impl RunnerBootstrapEnvelope {

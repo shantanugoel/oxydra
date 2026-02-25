@@ -901,6 +901,7 @@ fn bootstrap_file_written_with_correct_content_for_non_process_tier() {
         sidecar_endpoint: None,
         runtime_policy: None,
         startup_status: None,
+        channels: None,
     };
     let path =
         write_bootstrap_file(&workspace, &bootstrap).expect("bootstrap file should be written");
@@ -1024,6 +1025,7 @@ fn firecracker_config_injects_bootstrap_into_boot_args() {
         sidecar_endpoint: None,
         runtime_policy: None,
         startup_status: None,
+        channels: None,
     };
     let bootstrap_json = serde_json::to_vec_pretty(&bootstrap).unwrap();
     fs::write(&bootstrap_path, &bootstrap_json).expect("bootstrap file should be writable");
@@ -1144,6 +1146,7 @@ fn firecracker_config_rejects_oversized_bootstrap() {
         sidecar_endpoint: None,
         runtime_policy: None,
         startup_status: None,
+        channels: None,
     };
     let bootstrap_json = serde_json::to_vec_pretty(&bootstrap).unwrap();
     fs::write(&bootstrap_path, &bootstrap_json).expect("bootstrap file should be writable");

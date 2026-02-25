@@ -311,10 +311,11 @@ pub struct RunnerUserConfig {
     pub resources: ResourceLimits,
     pub credentials: CredentialReferences,
     pub overrides: BehaviorOverrides,
+    pub channels: ChannelsConfig,     // External channel configuration (Telegram, etc.)
 }
 ```
 
-Per-user files carry mount paths, resource limits, credential references, and behavioral overrides used to launch that user's VM pair.
+Per-user files carry mount paths, resource limits, credential references, behavioral overrides, and external channel configuration used to launch that user's VM pair. The `channels` field configures external channel adapters (Telegram bot tokens, authorized senders) — see Chapter 12 for details.
 
 ## Config File Locations
 

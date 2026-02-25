@@ -168,6 +168,11 @@ impl Runner {
             sidecar_endpoint: pre_sidecar_endpoint,
             runtime_policy: Some(effective_launch_settings.runtime_policy()),
             startup_status: Some(pre_startup_status),
+            channels: if user_config.channels.is_empty() {
+                None
+            } else {
+                Some(user_config.channels.clone())
+            },
         };
         bootstrap.validate()?;
 
@@ -185,7 +190,10 @@ impl Runner {
         // Shell-vm gets a separate set of env vars to avoid leaking API keys.
         let (mut extra_env, mut shell_env) = if sandbox_tier != SandboxTier::Process {
             copy_agent_config_to_workspace(&workspace)?;
-            let config_env = collect_config_env_vars();
+            let mut config_env = collect_config_env_vars();
+            // Also forward bot token env vars from channel config.
+            let bot_token_env = collect_channel_bot_token_env_vars(&user_config.channels);
+            config_env.extend(bot_token_env);
             let shell_config_env = collect_shell_config_env_keys();
             (config_env, shell_config_env)
         } else {
@@ -2254,6 +2262,21 @@ fn collect_shell_config_env_keys() -> Vec<String> {
             && !value.is_empty()
         {
             result.push(format!("{var_name}={value}"));
+        }
+    }
+    result
+}
+
+/// Collect bot token environment variables from the user's channel config.
+/// For each enabled channel with a `bot_token_env` field, resolve the value
+/// from the runner's environment and return `KEY=VALUE` pairs.
+fn collect_channel_bot_token_env_vars(channels: &types::ChannelsConfig) -> Vec<String> {
+    let mut result = Vec::new();
+    for env_name in channels.bot_token_env_refs() {
+        if let Ok(value) = std::env::var(&env_name)
+            && !value.is_empty()
+        {
+            result.push(format!("{env_name}={value}"));
         }
     }
     result

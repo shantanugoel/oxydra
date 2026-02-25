@@ -805,7 +805,10 @@ name = "channels"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde",
+ "serde_json",
  "tokio",
+ "tracing",
  "types",
 ]
 
@@ -6397,6 +6400,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]

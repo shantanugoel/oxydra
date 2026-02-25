@@ -278,6 +278,7 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
         }),
         runtime_policy: None,
         startup_status: None,
+        channels: None,
     };
     let RuntimeToolsBootstrap {
         registry,
@@ -424,6 +425,7 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
         sidecar_endpoint: None,
         runtime_policy: None,
         startup_status: None,
+        channels: None,
     };
     let RuntimeToolsBootstrap { registry, .. } =
         bootstrap_runtime_tools(Some(&bootstrap), None).await;
@@ -469,6 +471,7 @@ async fn bootstrap_registry_honors_runtime_policy_mount_overrides() {
             credential_refs: BTreeMap::new(),
         }),
         startup_status: None,
+        channels: None,
     };
     let RuntimeToolsBootstrap { registry, .. } =
         bootstrap_runtime_tools(Some(&bootstrap), None).await;

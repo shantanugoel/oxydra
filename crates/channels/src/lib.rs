@@ -5,6 +5,12 @@ use std::{
 
 use types::{Channel, ChannelError, ChannelHealthStatus};
 
+pub mod audit;
+pub mod sender_auth;
+
+pub use audit::{AuditEntry, AuditLogger};
+pub use sender_auth::SenderAuthPolicy;
+
 pub type SharedChannel = Arc<dyn Channel>;
 
 #[derive(Default)]

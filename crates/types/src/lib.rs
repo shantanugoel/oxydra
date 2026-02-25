@@ -43,15 +43,15 @@ pub use model::{
 };
 pub use provider::{Provider, ProviderStream};
 pub use runner::{
-    BootstrapEnvelopeError, ExecCommand, ExecCommandAck, KillSession, KillSessionAck,
-    RunnerBehaviorOverrides, RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl,
-    RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlResponse,
-    RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages, RunnerMountPaths,
-    RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig,
-    RunnerUserRegistration, SandboxTier, ShellDaemonError, ShellDaemonRequest, ShellDaemonResponse,
-    ShellOutputStream, SidecarEndpoint, SidecarTransport, SpawnSession, SpawnSessionAck,
-    StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport, StreamOutput,
-    StreamOutputChunk,
+    BootstrapEnvelopeError, ChannelsConfig, ExecCommand, ExecCommandAck, KillSession,
+    KillSessionAck, RunnerBehaviorOverrides, RunnerBootstrapEnvelope, RunnerConfigError,
+    RunnerControl, RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus,
+    RunnerControlResponse, RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages,
+    RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
+    RunnerUserConfig, RunnerUserRegistration, SandboxTier, SenderBinding, ShellDaemonError,
+    ShellDaemonRequest, ShellDaemonResponse, ShellOutputStream, SidecarEndpoint, SidecarTransport,
+    SpawnSession, SpawnSessionAck, StartupDegradedReason, StartupDegradedReasonCode,
+    StartupStatusReport, StreamOutput, StreamOutputChunk, TelegramChannelConfig,
 };
 pub use scheduler::{
     NotificationPolicy, ScheduleCadence, ScheduleDefinition, SchedulePatch, ScheduleRunRecord,

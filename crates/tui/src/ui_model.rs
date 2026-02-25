@@ -215,8 +215,8 @@ impl TuiViewModel {
                             .display_name
                             .as_deref()
                             .unwrap_or("-");
-                        let short_id = if s.session_id.len() > 8 {
-                            &s.session_id[..8]
+                        let short_id = if s.session_id.len() > 13 {
+                            &s.session_id[..13]
                         } else {
                             &s.session_id
                         };

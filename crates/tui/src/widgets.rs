@@ -393,7 +393,7 @@ impl Widget for StatusBar<'_> {
 
         // Session ID (shortened for readability).
         if let Some(sid) = self.session_id {
-            let display_id = if sid.len() > 8 { &sid[..8] } else { sid };
+            let display_id = if sid.len() > 13 { &sid[..13] } else { sid };
             spans.push(Span::raw(format!(" | session: {display_id}")));
         }
 
@@ -879,15 +879,15 @@ mod tests {
         let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
-            session_id: Some("my-session-42".to_owned()),
+            session_id: Some("my-session-42-long-uuid".to_owned()),
             ..TuiUiState::default()
         };
         let buf = render(&mut model, &adapter, 80, 24);
 
         let status = row_text(&buf, 23, 80);
-        // Session ID is shortened to first 8 chars for readability.
+        // Session ID is shortened to first 13 chars for readability.
         assert!(
-            status.contains("session: my-sessi"),
+            status.contains("session: my-session-42"),
             "status bar should show shortened session id, got: {status}"
         );
     }

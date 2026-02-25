@@ -1569,3 +1569,60 @@ async fn two_tui_windows_with_separate_sessions_work_independently() {
 
     server_task.abort();
 }
+
+#[tokio::test]
+async fn switch_session_supports_prefix_matching() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (address, server_task, _store) =
+        spawn_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
+    let mut socket = connect_gateway(address).await;
+
+    // Create first session.
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let first_sid = match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    // Create second session.
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::CreateSession(types::GatewayCreateSession {
+            request_id: "req-new".to_owned(),
+            display_name: None,
+            agent_name: None,
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket).await;
+
+    // Switch back using a prefix of the first session (first 13 chars).
+    let prefix = &first_sid[..13];
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::SwitchSession(types::GatewaySwitchSession {
+            request_id: "req-switch-prefix".to_owned(),
+            session_id: prefix.to_owned(),
+        }),
+    )
+    .await;
+
+    match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::SessionSwitched(switched) => {
+            assert_eq!(switched.session.session_id, first_sid);
+        }
+        other => panic!("expected session_switched, got {other:?}"),
+    }
+
+    server_task.abort();
+}

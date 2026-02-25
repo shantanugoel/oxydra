@@ -633,6 +633,52 @@ impl RunnerGuestHandle {
         self.pid = None;
         Ok(())
     }
+
+    /// Async variant of [`Self::shutdown`] for use inside an existing tokio
+    /// runtime (e.g. the daemon control loop). Avoids nested `block_on` by
+    /// calling async Docker APIs directly.
+    pub async fn shutdown_async(&mut self) -> Result<(), RunnerError> {
+        let lifecycle = std::mem::replace(&mut self.lifecycle, RunnerGuestLifecycle::Simulated);
+        match lifecycle {
+            RunnerGuestLifecycle::Process { mut child } => {
+                let program = self.command.program.clone();
+                if child
+                    .try_wait()
+                    .map_err(|source| RunnerError::GuestLifecycle {
+                        action: "check_status",
+                        role: self.role,
+                        program: program.clone(),
+                        source,
+                    })?
+                    .is_none()
+                {
+                    child.kill().map_err(|source| RunnerError::GuestLifecycle {
+                        action: "terminate",
+                        role: self.role,
+                        program: program.clone(),
+                        source,
+                    })?;
+                    child.wait().map_err(|source| RunnerError::GuestLifecycle {
+                        action: "wait",
+                        role: self.role,
+                        program,
+                        source,
+                    })?;
+                }
+            }
+            RunnerGuestLifecycle::DockerContainer(handle) => {
+                shutdown_docker_container_async(handle).await?;
+            }
+            RunnerGuestLifecycle::Simulated => {}
+        }
+
+        for handle in self.log_tasks.drain(..) {
+            let _ = handle.join();
+        }
+
+        self.pid = None;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -669,6 +715,34 @@ impl RunnerLaunchHandle {
             Ok(())
         }
     }
+
+    /// Async variant of [`Self::shutdown`] for use inside an existing tokio
+    /// runtime.
+    pub async fn shutdown_async(&mut self) -> Result<(), RunnerError> {
+        let mut first_error = None;
+        if let Some(sidecar) = self.sidecar.as_mut()
+            && let Err(error) = sidecar.shutdown_async().await
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = self.runtime.shutdown_async().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Some(scope) = self.scope.as_mut()
+            && let Err(error) = scope.shutdown_async().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,6 +758,21 @@ impl RunnerScopeHandle {
                 vm_handle.sandbox_socket_path.clone(),
                 vm_handle.vm_name.clone(),
             ),
+            Self::Simulated => Ok(()),
+        }
+    }
+
+    /// Async variant of [`Self::shutdown`] for use inside an existing tokio
+    /// runtime.
+    async fn shutdown_async(&mut self) -> Result<(), RunnerError> {
+        match self {
+            Self::DockerSandboxVm(vm_handle) => {
+                delete_docker_sandbox_vm_async(
+                    vm_handle.sandbox_socket_path.clone(),
+                    vm_handle.vm_name.clone(),
+                )
+                .await
+            }
             Self::Simulated => Ok(()),
         }
     }
@@ -793,6 +882,28 @@ impl RunnerStartup {
         Ok(())
     }
 
+    /// Async variant of [`Self::shutdown`] for use inside an existing tokio
+    /// runtime (e.g. the daemon control loop).
+    pub async fn shutdown_async(&mut self) -> Result<(), RunnerError> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
+        self.launch.shutdown_async().await?;
+        self.shutdown_complete = true;
+        self.shell_available = false;
+        self.browser_available = false;
+        self.startup_status.shell_available = false;
+        self.startup_status.browser_available = false;
+        self.startup_status.sidecar_available = false;
+        self.startup_status.push_reason(
+            StartupDegradedReasonCode::RuntimeShutdown,
+            "runtime is shut down",
+        );
+        let marker_path = self.workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
+        let _ = fs::remove_file(&marker_path);
+        Ok(())
+    }
+
     pub fn handle_control(&mut self, request: RunnerControl) -> RunnerControlResponse {
         match request {
             RunnerControl::HealthCheck => {
@@ -883,6 +994,73 @@ impl RunnerStartup {
         }
     }
 
+    /// Async variant of [`Self::handle_control`] for use inside the daemon
+    /// control loop. Uses async shutdown to avoid nested tokio runtimes.
+    pub async fn handle_control_async(
+        &mut self,
+        request: RunnerControl,
+    ) -> RunnerControlResponse {
+        match request {
+            RunnerControl::HealthCheck => self.handle_control(request),
+            RunnerControl::ShutdownUser { user_id } => {
+                if user_id != self.user_id {
+                    warn!(
+                        requested_user = %user_id,
+                        active_user = %self.user_id,
+                        "runner control shutdown rejected for unknown user"
+                    );
+                    return RunnerControlResponse::Error(RunnerControlError {
+                        code: RunnerControlErrorCode::UnknownUser,
+                        message: format!(
+                            "shutdown request targeted unknown user `{user_id}`; active user is `{}`",
+                            self.user_id
+                        ),
+                    });
+                }
+
+                if self.shutdown_complete {
+                    info!(user_id = %self.user_id, "runner control shutdown acknowledged as already stopped");
+                    return RunnerControlResponse::ShutdownStatus(
+                        RunnerControlShutdownStatus {
+                            user_id,
+                            shutdown: true,
+                            already_stopped: true,
+                            message: Some("user runtime already shut down".to_owned()),
+                        },
+                    );
+                }
+
+                match self.shutdown_async().await {
+                    Ok(()) => {
+                        info!(user_id = %self.user_id, "runner control shutdown completed");
+                        RunnerControlResponse::ShutdownStatus(
+                            RunnerControlShutdownStatus {
+                                user_id,
+                                shutdown: true,
+                                already_stopped: false,
+                                message: Some("shutdown completed".to_owned()),
+                            },
+                        )
+                    }
+                    Err(error) => {
+                        warn!(
+                            user_id = %self.user_id,
+                            error = %error,
+                            "runner control shutdown failed"
+                        );
+                        RunnerControlResponse::Error(RunnerControlError {
+                            code: RunnerControlErrorCode::Internal,
+                            message: format!(
+                                "failed to shut down user `{}`: {error}",
+                                self.user_id
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn serve_control_stream<Stream>(
         &mut self,
         mut stream: Stream,
@@ -892,7 +1070,7 @@ impl RunnerStartup {
     {
         while let Some(frame) = read_runner_control_frame(&mut stream).await? {
             let response = match serde_json::from_slice::<RunnerControl>(&frame) {
-                Ok(request) => self.handle_control(request),
+                Ok(request) => self.handle_control_async(request).await,
                 Err(error) => RunnerControlResponse::Error(RunnerControlError {
                     code: RunnerControlErrorCode::InvalidRequest,
                     message: format!("invalid runner control request frame: {error}"),
@@ -1558,6 +1736,19 @@ fn shutdown_docker_container(handle: DockerContainerHandle) -> Result<(), Runner
             .await;
         remove_container_if_exists(&docker, &handle.endpoint, &handle.container_name).await
     })
+}
+
+async fn shutdown_docker_container_async(
+    handle: DockerContainerHandle,
+) -> Result<(), RunnerError> {
+    let docker = docker_client(&handle.endpoint)?;
+    let _ = docker
+        .stop_container(
+            &handle.container_name,
+            Some(StopContainerOptionsBuilder::new().t(5).build()),
+        )
+        .await;
+    remove_container_if_exists(&docker, &handle.endpoint, &handle.container_name).await
 }
 
 async fn remove_container_if_exists(

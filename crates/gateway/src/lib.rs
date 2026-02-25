@@ -202,6 +202,88 @@ impl GatewayServer {
         Ok(session)
     }
 
+    /// Resolve a session by exact ID or unique prefix (like Docker short IDs).
+    ///
+    /// Checks in-memory sessions first, then the session store. Returns the
+    /// matching session if exactly one prefix-match is found; an error if the
+    /// prefix is ambiguous or matches nothing.
+    async fn resolve_session_by_prefix(
+        &self,
+        user_id: &str,
+        prefix: &str,
+    ) -> Result<Arc<SessionState>, String> {
+        let user = match self.users.read().await.get(user_id).cloned() {
+            Some(u) => u,
+            None => return Err(format!("session `{prefix}` not found for user `{user_id}`")),
+        };
+
+        // Try exact match first (fast path).
+        let sessions = user.sessions.read().await;
+        if let Some(existing) = sessions.get(prefix) {
+            return Ok(Arc::clone(existing));
+        }
+
+        // Prefix match against in-memory sessions.
+        let matches: Vec<_> = sessions
+            .iter()
+            .filter(|(id, _)| id.starts_with(prefix))
+            .map(|(_, s)| Arc::clone(s))
+            .collect();
+        drop(sessions);
+
+        if matches.len() == 1 {
+            return Ok(matches.into_iter().next().unwrap());
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "ambiguous session prefix `{prefix}`: matches {} sessions",
+                matches.len()
+            ));
+        }
+
+        // Fall back to session store for persisted sessions not yet in memory.
+        if let Some(store) = &self.session_store {
+            // Try exact match in store.
+            if let Ok(Some(record)) = store.get_session(prefix).await {
+                return self
+                    .create_or_get_session(
+                        user_id,
+                        Some(&record.session_id),
+                        &record.agent_name,
+                        GATEWAY_CHANNEL_ID,
+                    )
+                    .await;
+            }
+
+            // Prefix match in store.
+            if let Ok(all) = store.list_sessions(user_id, false).await {
+                let store_matches: Vec<_> = all
+                    .iter()
+                    .filter(|r| r.session_id.starts_with(prefix))
+                    .collect();
+
+                if store_matches.len() == 1 {
+                    return self
+                        .create_or_get_session(
+                            user_id,
+                            Some(&store_matches[0].session_id),
+                            &store_matches[0].agent_name,
+                            GATEWAY_CHANNEL_ID,
+                        )
+                        .await;
+                }
+                if store_matches.len() > 1 {
+                    return Err(format!(
+                        "ambiguous session prefix `{prefix}`: matches {} sessions",
+                        store_matches.len()
+                    ));
+                }
+            }
+        }
+
+        Err(format!("session `{prefix}` not found for user `{user_id}`"))
+    }
+
     /// Submit a user turn to a session.
     ///
     /// Returns `None` on success (the turn was started), or `Some(error_frame)`
@@ -582,12 +664,7 @@ impl GatewayServer {
             GatewayClientFrame::SwitchSession(switch) => {
                 let user_id = active_session.user_id.clone();
                 match self
-                    .create_or_get_session(
-                        &user_id,
-                        Some(&switch.session_id),
-                        "default",
-                        GATEWAY_CHANNEL_ID,
-                    )
+                    .resolve_session_by_prefix(&user_id, &switch.session_id)
                     .await
                 {
                     Ok(target_session) => {

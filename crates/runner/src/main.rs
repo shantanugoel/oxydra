@@ -495,7 +495,7 @@ fn run_daemon(startup: &mut runner::RunnerStartup) -> Result<(), CliError> {
                 result?;
             }
             _ = &mut shutdown_signal => {
-                startup.shutdown()?;
+                startup.shutdown_async().await?;
             }
         }
 

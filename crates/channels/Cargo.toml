@@ -3,12 +3,23 @@ name = "channels"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["telegram"]
+telegram = ["dep:frankenstein", "dep:gateway", "dep:tokio", "dep:tokio-util", "dep:uuid"]
+
 [dependencies]
 types = { path = "../types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 
+# Telegram feature-gated dependencies
+frankenstein = { version = "0.47", optional = true, features = ["client-reqwest"] }
+gateway = { path = "../gateway", optional = true }
+tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
+tokio-util = { version = "0.7", optional = true, features = ["rt"] }
+uuid = { version = "1", optional = true, features = ["v4"] }
+
 [dev-dependencies]
 async-trait = "0.1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

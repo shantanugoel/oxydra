@@ -370,6 +370,7 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 ## Current Limitations
 
 - **Per-user concurrent turn limit:** Configurable via `max_concurrent_turns` (default: 3). When exceeded, new turns are rejected with an error frame rather than queued
-- **No external channels yet:** The auth/identity pipeline is implemented (config types, sender auth policy, audit logging, bootstrap propagation) but the actual Telegram adapter is not yet built. See Chapter 12 for the full external channels architecture.
+- **No external channels yet:** The Telegram adapter is implemented (see Chapter 12) including sender auth, channel session mapping, edit-message streaming, and command interception. It runs in-process alongside the gateway, calling the internal API directly. Future channels (Discord, Slack, WhatsApp) follow the same pattern.
+- **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **Scheduled notifications are session-scoped:** If no user session is connected when a scheduled notification fires, the notification is lost (results persist in memory via the scheduled turn's session, but the push notification is not queued)

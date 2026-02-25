@@ -18,6 +18,7 @@ pub(crate) const REQUIRED_TABLES: &[&str] = &[
     "schedules",
     "schedule_runs",
     "gateway_sessions",
+    "channel_session_mappings",
 ];
 pub(crate) const REQUIRED_INDEXES: &[&str] = &[
     "idx_conversation_events_session_sequence",
@@ -126,6 +127,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: "0020_create_gateway_sessions",
         sql: include_str!("../migrations/0020_create_gateway_sessions.sql"),
+    },
+    Migration {
+        version: "0021_create_channel_session_mappings",
+        sql: include_str!("../migrations/0021_create_channel_session_mappings.sql"),
     },
 ];
 

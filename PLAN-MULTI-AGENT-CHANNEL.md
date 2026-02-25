@@ -911,7 +911,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 7: Channel Session Mapping
+### Step 7: Channel Session Mapping ✅ DONE
 
 **Goal:** Deterministic mapping from `(channel_id, channel_context_id)` to gateway session. Each Telegram chat/topic maps to a stable session so conversation context is preserved. Platform threading constructs (Telegram forum topics, Discord threads) map to separate sessions for natural concurrency (D14).
 
@@ -978,7 +978,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 8: Telegram Channel Adapter
+### Step 8: Telegram Channel Adapter ✅ DONE
 
 **Goal:** Working Telegram bot that receives messages, authenticates senders, and routes through gateway. Runs inside the VM as an in-process component alongside the gateway.
 

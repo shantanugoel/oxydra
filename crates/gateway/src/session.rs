@@ -54,7 +54,7 @@ pub(crate) struct ActiveTurnState {
 /// Per-session state. Each session has its own broadcast channel, active turn
 /// tracker, and metadata.
 pub struct SessionState {
-    pub(crate) session_id: String,
+    pub session_id: String,
     pub(crate) user_id: String,
     pub(crate) agent_name: String,
     pub(crate) parent_session_id: Option<String>,

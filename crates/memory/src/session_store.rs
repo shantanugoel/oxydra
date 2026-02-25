@@ -149,6 +149,56 @@ impl SessionStore for LibsqlSessionStore {
             .map_err(|e| query_error(format!("failed to update session display_name: {e}")))?;
         Ok(())
     }
+
+    async fn get_channel_session(
+        &self,
+        channel_id: &str,
+        channel_context_id: &str,
+    ) -> Result<Option<String>, MemoryError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT session_id FROM channel_session_mappings
+                 WHERE channel_id = ?1 AND channel_context_id = ?2
+                 LIMIT 1",
+                params![channel_id, channel_context_id],
+            )
+            .await
+            .map_err(|e| query_error(format!("failed to get channel session mapping: {e}")))?;
+
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| query_error(format!("failed to read channel session mapping row: {e}")))?
+        else {
+            return Ok(None);
+        };
+
+        let session_id = row
+            .get::<String>(0)
+            .map_err(|e| query_error(e.to_string()))?;
+        Ok(Some(session_id))
+    }
+
+    async fn set_channel_session(
+        &self,
+        channel_id: &str,
+        channel_context_id: &str,
+        session_id: &str,
+    ) -> Result<(), MemoryError> {
+        self.conn
+            .execute(
+                "INSERT INTO channel_session_mappings (channel_id, channel_context_id, session_id)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(channel_id, channel_context_id) DO UPDATE SET
+                     session_id = excluded.session_id,
+                     updated_at = datetime('now')",
+                params![channel_id, channel_context_id, session_id],
+            )
+            .await
+            .map_err(|e| query_error(format!("failed to set channel session mapping: {e}")))?;
+        Ok(())
+    }
 }
 
 fn record_from_row(row: &libsql::Row) -> Result<SessionRecord, MemoryError> {
@@ -209,7 +259,14 @@ mod tests {
             "../migrations/0020_create_gateway_sessions.sql"
         ))
         .await
-        .expect("migration");
+        .expect("migration 0020");
+
+        // Run the channel session mappings migration.
+        conn.execute_batch(include_str!(
+            "../migrations/0021_create_channel_session_mappings.sql"
+        ))
+        .await
+        .expect("migration 0021");
 
         LibsqlSessionStore::new(conn)
     }
@@ -385,5 +442,133 @@ mod tests {
 
         let got = store.get_session("ses-1").await.unwrap().unwrap();
         assert_eq!(got.display_name.as_deref(), Some("My Research Session"));
+    }
+
+    #[tokio::test]
+    async fn get_channel_session_returns_none_for_unknown_mapping() {
+        let store = test_store().await;
+        let result = store
+            .get_channel_session("telegram", "12345")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_and_get_channel_session_round_trips() {
+        let store = test_store().await;
+        store
+            .create_session(&sample_record("ses-1", "alice"))
+            .await
+            .unwrap();
+
+        store
+            .set_channel_session("telegram", "12345", "ses-1")
+            .await
+            .unwrap();
+
+        let got = store
+            .get_channel_session("telegram", "12345")
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("ses-1"));
+    }
+
+    #[tokio::test]
+    async fn set_channel_session_updates_existing_mapping() {
+        let store = test_store().await;
+        store
+            .create_session(&sample_record("ses-1", "alice"))
+            .await
+            .unwrap();
+        store
+            .create_session(&sample_record("ses-2", "alice"))
+            .await
+            .unwrap();
+
+        store
+            .set_channel_session("telegram", "12345", "ses-1")
+            .await
+            .unwrap();
+        store
+            .set_channel_session("telegram", "12345", "ses-2")
+            .await
+            .unwrap();
+
+        let got = store
+            .get_channel_session("telegram", "12345")
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("ses-2"));
+    }
+
+    #[tokio::test]
+    async fn channel_session_mapping_is_scoped_by_channel_and_context() {
+        let store = test_store().await;
+        store
+            .create_session(&sample_record("ses-t", "alice"))
+            .await
+            .unwrap();
+        store
+            .create_session(&sample_record("ses-d", "alice"))
+            .await
+            .unwrap();
+
+        store
+            .set_channel_session("telegram", "chat-1", "ses-t")
+            .await
+            .unwrap();
+        store
+            .set_channel_session("discord", "chat-1", "ses-d")
+            .await
+            .unwrap();
+
+        let telegram = store
+            .get_channel_session("telegram", "chat-1")
+            .await
+            .unwrap();
+        assert_eq!(telegram.as_deref(), Some("ses-t"));
+
+        let discord = store
+            .get_channel_session("discord", "chat-1")
+            .await
+            .unwrap();
+        assert_eq!(discord.as_deref(), Some("ses-d"));
+    }
+
+    #[tokio::test]
+    async fn forum_topic_maps_to_separate_session() {
+        let store = test_store().await;
+        store
+            .create_session(&sample_record("ses-main", "alice"))
+            .await
+            .unwrap();
+        store
+            .create_session(&sample_record("ses-topic", "alice"))
+            .await
+            .unwrap();
+
+        // Regular chat mapping.
+        store
+            .set_channel_session("telegram", "12345", "ses-main")
+            .await
+            .unwrap();
+        // Forum topic mapping (chat_id:topic_id).
+        store
+            .set_channel_session("telegram", "12345:42", "ses-topic")
+            .await
+            .unwrap();
+
+        let main = store
+            .get_channel_session("telegram", "12345")
+            .await
+            .unwrap();
+        assert_eq!(main.as_deref(), Some("ses-main"));
+
+        let topic = store
+            .get_channel_session("telegram", "12345:42")
+            .await
+            .unwrap();
+        assert_eq!(topic.as_deref(), Some("ses-topic"));
     }
 }

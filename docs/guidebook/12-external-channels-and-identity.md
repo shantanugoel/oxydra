@@ -218,6 +218,34 @@ Each unique `(channel_id, channel_context_id)` maps to one gateway session:
 
 This means each topic/thread gets its own session with its own `active_turn` — enabling true concurrency within a single chat. Within a single topic, "turn already active" still applies naturally.
 
+### Database-Backed Mapping
+
+Channel session mappings are persisted in the `channel_session_mappings` table (migration 0021):
+
+```sql
+CREATE TABLE channel_session_mappings (
+    channel_id          TEXT NOT NULL,
+    channel_context_id  TEXT NOT NULL,
+    session_id          TEXT NOT NULL REFERENCES gateway_sessions(session_id) ON DELETE CASCADE,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (channel_id, channel_context_id)
+);
+```
+
+The `SessionStore` trait (in `types`) provides `get_channel_session()` and `set_channel_session()` methods. The `ChannelSessionMap` wrapper (in `channels/src/session_map.rs`) provides a thin adapter-friendly API:
+
+```rust
+pub struct ChannelSessionMap {
+    store: Arc<dyn SessionStore>,
+}
+
+impl ChannelSessionMap {
+    pub async fn get_session_id(&self, channel_id: &str, channel_context_id: &str) -> Result<Option<String>, MemoryError>;
+    pub async fn set_session_id(&self, channel_id: &str, channel_context_id: &str, session_id: &str) -> Result<(), MemoryError>;
+}
+```
+
 ### Cross-Channel Continuity
 
 Different channels for the same user share the same workspace and memory namespace (keyed by `user_id`). Conversation threads are independent per channel — a user can start a task in the TUI and check on workspace state from Telegram, but the conversation histories are separate.
@@ -241,10 +269,105 @@ Dynamic onboarding can be added later as an enhancement on top of the static bin
 | Bot token env var forwarding | ✅ Implemented | `runner/src/lib.rs` |
 | `SenderAuthPolicy` | ✅ Implemented | `channels/src/sender_auth.rs` |
 | `AuditLogger` + `AuditEntry` | ✅ Implemented | `channels/src/audit.rs` |
-| Channel session mapping (DB-backed) | Planned (Step 7) | `memory/`, `channels/` |
-| Telegram adapter | Planned (Step 8) | `channels/src/telegram.rs` |
-| Edit-message streaming | Planned (Step 8) | `channels/src/telegram.rs` |
+| Channel session mapping (DB-backed) | ✅ Implemented | `types/src/session.rs`, `memory/src/session_store.rs`, `channels/src/session_map.rs` |
+| `channel_session_mappings` DB migration | ✅ Implemented | `memory/migrations/0021_create_channel_session_mappings.sql` |
+| `ChannelSessionMap` wrapper | ✅ Implemented | `channels/src/session_map.rs` |
+| Telegram adapter (`TelegramAdapter`) | ✅ Implemented | `channels/src/telegram.rs` |
+| Edit-message streaming (`ResponseStreamer`) | ✅ Implemented | `channels/src/telegram.rs` |
+| Markdown → Telegram HTML conversion | ✅ Implemented | `channels/src/telegram.rs` |
+| Telegram command interception (`/new`, `/sessions`, `/switch`, `/cancel`, `/status`) | ✅ Implemented | `channels/src/telegram.rs` |
+| Adapter spawning in oxydra-vm | ✅ Implemented | `runner/src/bin/oxydra-vm.rs` |
+| Feature-flagged `telegram` in channels + runner | ✅ Implemented | `channels/Cargo.toml`, `runner/Cargo.toml` |
 | Discord/Slack/WhatsApp adapters | Deferred | — |
+
+## Telegram Adapter
+
+### Overview
+
+The Telegram adapter (`channels/src/telegram.rs`, feature-gated behind `telegram`) is an in-process component that runs alongside the gateway inside the VM. It uses the `frankenstein` crate (v0.47, `client-reqwest` feature) for Telegram Bot API access.
+
+### Architecture
+
+```
+Telegram API (long-polling)
+    │
+    ▼
+TelegramAdapter::run() loop
+    ├── bot.get_updates() → Update list
+    │
+    ▼ per Update
+    ├── Extract sender ID (message.from.id)
+    ├── SenderAuthPolicy.is_authorized() → reject + audit, or continue
+    ├── derive_channel_context_id(chat_id, thread_id)
+    ├── Command interception (/new, /sessions, /switch, /cancel, /status, /help)
+    │    └── Call gateway internal API directly
+    ├── ChannelSessionMap.get_session_id() → resolve or create session
+    ├── gateway.subscribe_events() (before submit, to not miss frames)
+    ├── gateway.submit_turn() → start the turn
+    │
+    ▼
+ResponseStreamer (edit-message streaming)
+    ├── send_message("⏳ Working...") → placeholder
+    ├── TurnProgress → edit with status line
+    ├── AssistantDelta → accumulate + throttled edit (1.5s)
+    ├── Message splitting → new message at ~3896 chars
+    └── TurnCompleted → final edit with Markdown→HTML, fallback to plain text
+```
+
+### Edit-Message Streaming (D15)
+
+The adapter uses Telegram's `editMessageText` API to stream responses live:
+
+1. **Turn starts** → Send placeholder "⏳ Working..."
+2. **Progress events** → Edit message with status ("🔍 Searching the web...")
+3. **Token deltas** → Accumulate text, edit message every 1.5 seconds
+4. **Near char limit** → Stop editing, send new continuation message
+5. **Turn completed** → Final edit with complete response (Markdown→HTML)
+
+The 1.5-second throttle stays safely within Telegram's ~30 edits/minute rate limit.
+
+### Markdown → Telegram HTML
+
+The `markdown_to_telegram_html()` utility converts common Markdown to Telegram's HTML subset:
+
+| Markdown | Telegram HTML |
+|----------|--------------|
+| `**bold**` | `<b>bold</b>` |
+| `*italic*` | `<i>italic</i>` |
+| `` `code` `` | `<code>code</code>` |
+| ```` ```code``` ```` | `<pre>code</pre>` |
+| `[text](url)` | `<a href="url">text</a>` |
+| `~~strike~~` | `<s>strike</s>` |
+| `# Header` | `<b>Header</b>` |
+
+HTML conversion is used only in the final edit. Interim edits use plain text for speed. If HTML parsing fails (Telegram returns an error), the adapter falls back to plain text.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new [name]` | Create a new session (optionally named) |
+| `/sessions` | List active sessions |
+| `/switch <id>` | Switch to a different session |
+| `/cancel` | Cancel the active turn |
+| `/status` | Show current session info |
+| `/start`, `/help` | Show help text |
+
+### Feature Flag
+
+The Telegram adapter is behind the `telegram` feature flag in both the `channels` and `runner` crates. It's included in default features for both crates.
+
+```toml
+# channels/Cargo.toml
+[features]
+default = ["telegram"]
+telegram = ["dep:frankenstein", "dep:gateway", "dep:tokio", "dep:tokio-util", "dep:uuid"]
+
+# runner/Cargo.toml
+[features]
+default = ["telegram"]
+telegram = ["dep:channels", "channels/telegram"]
+```
 
 ## Design Boundaries
 

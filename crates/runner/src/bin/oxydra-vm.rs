@@ -152,6 +152,9 @@ async fn run() -> Result<(), VmError> {
     ));
 
     // Build the gateway with optional session store for persistence.
+    // Clone the session store reference before moving into gateway so the
+    // Telegram adapter (which also needs it) can receive a copy.
+    let session_store_for_channels = bootstrap.session_store.clone();
     let gateway = if let Some(session_store) = bootstrap.session_store {
         Arc::new(GatewayServer::with_session_store(
             turn_runner.clone(),
@@ -182,6 +185,29 @@ async fn run() -> Result<(), VmError> {
         info!("scheduler executor started");
     }
 
+    // Spawn the Telegram channel adapter when configured.
+    let telegram_cancellation = CancellationToken::new();
+    #[cfg(feature = "telegram")]
+    if let Some(channels_config) = bootstrap
+        .bootstrap
+        .as_ref()
+        .and_then(|b| b.channels.as_ref())
+        && let Some(ref telegram_config) = channels_config.telegram
+        && telegram_config.enabled
+    {
+        match spawn_telegram_adapter(
+            telegram_config,
+            &args.user_id,
+            Arc::clone(&gateway),
+            session_store_for_channels.clone(),
+            &args.workspace_root,
+            telegram_cancellation.child_token(),
+        ) {
+            Ok(()) => info!("telegram adapter started"),
+            Err(e) => warn!(error = %e, "failed to start telegram adapter"),
+        }
+    }
+
     let app = Arc::clone(&gateway).router();
 
     let listener = TcpListener::bind(&args.gateway_bind)
@@ -204,6 +230,7 @@ async fn run() -> Result<(), VmError> {
     let shutdown = async move {
         let _ = tokio::signal::ctrl_c().await;
         scheduler_cancellation.cancel();
+        telegram_cancellation.cancel();
     };
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -236,6 +263,54 @@ fn write_gateway_endpoint_marker(
 
 fn gateway_endpoint(address: SocketAddr) -> String {
     format!("ws://{address}/ws")
+}
+
+/// Spawn the Telegram adapter as a background task.
+///
+/// Reads the bot token from the environment, builds the sender auth policy
+/// and audit logger, then spawns the adapter's long-polling loop.
+#[cfg(feature = "telegram")]
+fn spawn_telegram_adapter(
+    config: &types::TelegramChannelConfig,
+    user_id: &str,
+    gateway: Arc<GatewayServer>,
+    session_store: Option<Arc<dyn types::SessionStore>>,
+    workspace_root: &Path,
+    cancel: CancellationToken,
+) -> Result<(), String> {
+    let bot_token_env = config
+        .bot_token_env
+        .as_deref()
+        .ok_or("telegram.bot_token_env is not configured")?;
+    let bot_token = std::env::var(bot_token_env).map_err(|_| {
+        format!("environment variable `{bot_token_env}` for telegram bot token is not set")
+    })?;
+
+    let session_store = session_store
+        .ok_or("session store is required for telegram adapter but memory backend is not available")?;
+
+    let sender_auth =
+        channels::SenderAuthPolicy::from_bindings(&config.senders);
+    if sender_auth.is_empty() {
+        warn!("telegram adapter has no authorized senders; all messages will be rejected");
+    }
+
+    let audit_logger = channels::AuditLogger::for_workspace(workspace_root);
+    let adapter = channels::telegram::TelegramAdapter::new(
+        bot_token,
+        sender_auth,
+        session_store,
+        gateway,
+        user_id.to_owned(),
+        config.clone(),
+        audit_logger,
+    );
+
+    tokio::spawn(async move {
+        adapter.run(cancel).await;
+    });
+
+    Ok(())
 }
 
 fn read_bootstrap_frame_from_file(path: &Path) -> Result<Vec<u8>, VmError> {

@@ -57,4 +57,25 @@ pub trait SessionStore: Send + Sync {
 
     /// Mark a session as archived (soft-delete).
     async fn archive_session(&self, session_id: &str) -> Result<(), MemoryError>;
+
+    /// Look up the gateway session ID mapped to a channel context.
+    ///
+    /// Returns `None` if no mapping exists for the given
+    /// `(channel_id, channel_context_id)` pair.
+    async fn get_channel_session(
+        &self,
+        channel_id: &str,
+        channel_context_id: &str,
+    ) -> Result<Option<String>, MemoryError>;
+
+    /// Create or update the mapping from a channel context to a gateway session.
+    ///
+    /// Uses `INSERT ... ON CONFLICT ... DO UPDATE` so an existing mapping for
+    /// the same `(channel_id, channel_context_id)` is atomically replaced.
+    async fn set_channel_session(
+        &self,
+        channel_id: &str,
+        channel_context_id: &str,
+        session_id: &str,
+    ) -> Result<(), MemoryError>;
 }

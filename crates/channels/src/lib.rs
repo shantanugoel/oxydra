@@ -7,9 +7,14 @@ use types::{Channel, ChannelError, ChannelHealthStatus};
 
 pub mod audit;
 pub mod sender_auth;
+pub mod session_map;
+
+#[cfg(feature = "telegram")]
+pub mod telegram;
 
 pub use audit::{AuditEntry, AuditLogger};
 pub use sender_auth::SenderAuthPolicy;
+pub use session_map::ChannelSessionMap;
 
 pub type SharedChannel = Arc<dyn Channel>;
 

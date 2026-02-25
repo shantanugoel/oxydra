@@ -552,6 +552,16 @@ pub struct WebSearchConfig {
     /// SearxNG safesearch level (0-2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safesearch: Option<u8>,
+    /// Hosts (and optional ports) that are allowed to resolve to
+    /// private/loopback addresses. Use this to reach self-hosted services
+    /// such as a local SearxNG instance.
+    ///
+    /// Examples: `["localhost:8888"]`, `["127.0.0.1:8888", "192.168.1.50:9000"]`
+    ///
+    /// Applies to all web tools (web_search and web_fetch). Maps to
+    /// `OXYDRA_WEB_EGRESS_ALLOWLIST`; explicit env var takes precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_allowlist: Option<Vec<String>>,
 }
 
 /// Scheduler system configuration.

@@ -670,12 +670,15 @@ async fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> 
 fn enforce_web_target_ips(
     host: &str,
     resolved_ips: &[IpAddr],
-    policy: &WebEgressPolicy,
+    _policy: &WebEgressPolicy,
     destination_allowlisted: bool,
 ) -> Result<(), String> {
     for ip in resolved_ips {
         if let Some(reason) = blocked_ip_reason(*ip) {
-            if policy.mode == WebEgressMode::StrictAllowlistProxy && destination_allowlisted {
+            // An explicitly allowlisted host bypasses the local/private IP block
+            // in all egress modes. This lets users reach self-hosted services
+            // (e.g. a local SearxNG instance) without switching to strict mode.
+            if destination_allowlisted {
                 continue;
             }
             return Err(format!(

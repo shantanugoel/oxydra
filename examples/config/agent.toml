@@ -97,6 +97,13 @@ jitter          = false # Add randomized jitter to backoff
 # engines = "google,bing"                     # SearxNG search engines
 # categories = "general"                      # SearxNG categories
 # safesearch = 1                              # SearxNG safesearch level (0-2)
+# # Self-hosted / local service access:
+# # List hosts (with optional port) that are allowed to resolve to private or
+# # loopback addresses. Required when pointing web_search or web_fetch at a
+# # local service such as a self-hosted SearxNG instance.
+# egress_allowlist = ["localhost:8888"]
+# # Multiple entries:
+# # egress_allowlist = ["localhost:8888", "192.168.1.50:9000"]
 
 # --- Shell command allowlist ---
 # Configure which commands the LLM is allowed to execute via shell_exec.

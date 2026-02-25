@@ -177,10 +177,31 @@ Hostnames are resolved to all associated IP addresses **before** any HTTP reques
 
 ### Egress Policies
 
-Two modes are supported:
+Two modes are supported, controlled by `OXYDRA_WEB_EGRESS_MODE`:
 
-- **`DefaultSafe`** — blocks internal IPs, allows all external destinations
-- **`StrictAllowlistProxy`** — only allows specific domains via a mandatory proxy
+- **`DefaultSafe`** (default) — blocks internal IPs, allows all external destinations
+- **`StrictAllowlistProxy`** — only allows explicitly listed domains, all traffic routed via a mandatory proxy (`OXYDRA_WEB_EGRESS_PROXY_URL`)
+
+### Local Service Allowlist
+
+If you run self-hosted web services (e.g. a local SearxNG instance) that resolve to private or loopback addresses, you can explicitly allowlist them. Allowlisted hosts bypass the blocked IP ranges above in both egress modes.
+
+Configure in `agent.toml`:
+
+```toml
+[tools.web_search]
+provider = "searxng"
+base_url = "http://localhost:8888"
+egress_allowlist = ["localhost:8888"]
+```
+
+Or via environment variable (comma-separated):
+
+```
+OXYDRA_WEB_EGRESS_ALLOWLIST=localhost:8888,192.168.1.50:9000
+```
+
+Entries may be `hostname`, `hostname:port`, or bare IP addresses. Only the explicitly listed host/port combinations bypass the block — all other private addresses remain blocked.
 
 ## Output Scrubbing
 

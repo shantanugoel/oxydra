@@ -653,6 +653,14 @@ fn apply_web_search_config(config: &WebSearchConfig) {
             &safesearch.to_string(),
         );
     }
+
+    // Egress allowlist — applies to all web tools (web_search + web_fetch).
+    if let Some(allowlist) = &config.egress_allowlist
+        && !allowlist.is_empty()
+    {
+        let joined = allowlist.join(",");
+        set_if_absent("OXYDRA_WEB_EGRESS_ALLOWLIST", &joined);
+    }
 }
 
 const SYSTEM_MD_FILE: &str = "SYSTEM.md";

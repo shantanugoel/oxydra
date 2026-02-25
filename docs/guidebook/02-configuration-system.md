@@ -174,6 +174,37 @@ pub struct ToolsConfig {
 }
 ```
 
+#### `WebSearchConfig` fields
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `provider` | `String` | `"duckduckgo"` (default), `"google"`, or `"searxng"` |
+| `base_url` | `String` | Override default base URL for the selected provider |
+| `base_urls` | `String` | Comma-separated fallback base URLs |
+| `api_key_env` | `String` | Env var name holding Google API key |
+| `engine_id_env` | `String` | Env var name holding Google engine/CX ID |
+| `query_params` | `String` | Extra query parameters (`key=value&key2=value2`) |
+| `engines` | `String` | SearxNG: comma-separated engines |
+| `categories` | `String` | SearxNG: categories |
+| `safesearch` | `u8` | SearxNG: safesearch level (0–2) |
+| `egress_allowlist` | `Vec<String>` | Hosts allowed to resolve to private/loopback IPs (see below) |
+
+#### Local service allowlist (`egress_allowlist`)
+
+By default all private and loopback IP ranges are blocked (SSRF protection). Use `egress_allowlist` to reach self-hosted services such as a local SearxNG instance:
+
+```toml
+[tools.web_search]
+provider = "searxng"
+base_url = "http://localhost:8888"
+egress_allowlist = ["localhost:8888"]
+
+# Multiple entries:
+# egress_allowlist = ["localhost:8888", "192.168.1.50:9000"]
+```
+
+Entries may be `hostname`, `hostname:port`, or bare IP addresses. Only the explicitly listed hosts bypass the block — all other private addresses remain blocked. This applies to both `web_search` and `web_fetch`. See [Security Model](07-security-model.md#local-service-allowlist) for details.
+
 ### `SchedulerConfig`
 
 Controls the scheduled task system:

@@ -71,7 +71,10 @@ impl TelegramAdapter {
 
     /// Run the long-polling loop until `cancel` fires.
     pub async fn run(self, cancel: CancellationToken) {
-        info!(user_id = %self.user_id, "telegram adapter started");
+        // Wrap in Arc so individual message handlers can be spawned as
+        // independent tasks, allowing different sessions to run concurrently.
+        let this = Arc::new(self);
+        info!(user_id = %this.user_id, "telegram adapter started");
         let mut offset: Option<i64> = None;
 
         loop {
@@ -81,14 +84,14 @@ impl TelegramAdapter {
 
             let params = GetUpdatesParams {
                 offset,
-                timeout: Some(self.config.polling_timeout_secs as u32),
+                timeout: Some(this.config.polling_timeout_secs as u32),
                 limit: None,
                 allowed_updates: Some(vec![AllowedUpdate::Message]),
             };
 
             let updates = tokio::select! {
                 _ = cancel.cancelled() => break,
-                result = self.bot.get_updates(&params) => {
+                result = this.bot.get_updates(&params) => {
                     match result {
                         Ok(response) => response.result,
                         Err(e) => {
@@ -112,11 +115,18 @@ impl TelegramAdapter {
                     continue;
                 };
 
-                self.handle_message(&message, &cancel).await;
+                // Spawn each message as an independent task so different
+                // sessions (topics/chats) run concurrently. Within a single
+                // session the gateway's active_turn mutex serializes turns.
+                let this = Arc::clone(&this);
+                let cancel = cancel.clone();
+                tokio::spawn(async move {
+                    this.handle_message(&message, &cancel).await;
+                });
             }
         }
 
-        info!(user_id = %self.user_id, "telegram adapter stopped");
+        info!(user_id = %this.user_id, "telegram adapter stopped");
     }
 
     async fn handle_message(&self, message: &TgMessage, cancel: &CancellationToken) {

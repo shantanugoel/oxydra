@@ -1,8 +1,9 @@
 # Final Plan: External Channels + Multi-Agent + Session Lifecycle + Auth/Identity
 
 **Date:** 2026-02-25
-**Status:** Consolidated from PLAN-MULTI-AGENT-CHANNEL.md, REPORT-GPT.MD, BEST-PLAN-EVER.md, codebase review, and auth/onboarding analysis.
+**Status:** Consolidated plan, codebase review, and auth/onboarding analysis.
 **Guidebook phases covered:** 14 (External Channels + Identity), 15 (Multi-Agent), 18 (Session Lifecycle)
+**Backward compatibility:** NOT required. All clients (TUI, adapters) are updated together. No v1 support.
 
 ---
 
@@ -23,21 +24,45 @@
 
 ## 1. Design Decisions & Arbitrations
 
+BACKWARD COMPATIBILITY IS NOT REQUIRED FOR ANY OF THE CHANGES BELOW!
+
 Issues raised across the three plans, resolved with rationale grounded in the actual codebase.
 
-### D1: Default session behavior (C1 from REPORT-GPT)
+### D0: Channels config is per-user; adapters run inside the VM
+
+**Rationale:** `agent.toml` (→ `AgentConfig`) is guest-side config discovered from CWD and copied identically into every user's VM. Channels config is per-user and contains:
+- Bot tokens (secrets that differ per user)
+- Sender identity bindings (access control that differs per user)
+- Per-user enable/disable toggles
+
+These belong in `RunnerUserConfig` (each user's `config.toml`, already per-user). The runner includes the channels config in the `RunnerBootstrapEnvelope` sent to the VM, and forwards bot token env vars (same as it forwards `ANTHROPIC_API_KEY` today).
+
+**Channel adapters run inside the VM** (same process as the gateway), not in the runner:
+- Gateway is in the same process — direct function calls, no WebSocket overhead
+- Adapter lifecycle matches VM lifecycle automatically — no separate management
+- Each VM handles only its own user's bot — no multi-user routing complexity
+- Follows the same pattern as provider, memory, scheduler — everything runs in the VM
+- Bot tokens are same trust level as LLM API keys, which already enter the VM
+
+**What remains outside the VM (host-side, in runner):**
+- `RunnerUserConfig` with `channels` section — config source of truth
+- `RunnerBootstrapEnvelope` carries channels config into the VM
+- Bot token env var forwarding (runner reads `bot_token_env`, forwards the value)
+- Everything else about channels (auth, adapters, session mapping, audit) runs inside the VM
+
+### D1: Default session behavior
 
 **Conflict:** Original plan said both "new session per TUI window" AND "resume most recent if session_id absent."
 
-**Resolution:** Server behavior is deterministic and version-aware. The _client_ decides what it wants:
+**Resolution:** Server behavior is deterministic. The _client_ decides what it wants:
 
-- **v1 clients** (current TUI): Omit `session_id` in Hello → gateway preserves current behavior (single stable `runtime-{user_id}` session, same as today).
-- **v2 clients**: Must be explicit — send `create_new_session: true` for a fresh session, or `session_id: "<id>"` to join an existing one. If neither is set, gateway creates a new session (no ambiguous resume heuristic).
-- **v2 TUI default**: New TUI launch without `--session` sends `create_new_session: true`. Reconnection sends the `session_id` received from prior HelloAck.
+- Send `create_new_session: true` in Hello for a fresh session
+- Send `session_id: "<id>"` to join an existing one
+- If neither is set, gateway creates a new session (no ambiguous resume heuristic)
 
-This eliminates all ambiguity.
+**TUI default:** New TUI launch without `--session` sends `create_new_session: true`. Reconnection sends the `session_id` received from prior HelloAck.
 
-### D2: Delegation tool crate boundary (C2 from REPORT-GPT)
+### D2: Delegation tool crate boundary
 
 **Conflict:** Plan places delegation in `tools` crate, but delegation needs runtime orchestration. `tools` cannot depend on `runtime` (dependency cycle).
 
@@ -54,16 +79,14 @@ types ← runtime (implements DelegationExecutor)
 runner wires tools + runtime together at bootstrap
 ```
 
-### D3: Protocol compatibility (C3 from REPORT-GPT)
+### D3: Protocol version
 
-**Resolution:**
-- Track `negotiated_protocol_version` per WebSocket connection after Hello handshake
-- Gateway accepts v1 AND v2 in the version check (instead of `!= 1`, check `> GATEWAY_MAX_SUPPORTED_VERSION`)
-- For v1 connections: never emit new frame variants; new `RuntimeProgressKind` variants are filtered out
-- For v2 connections: full new frame support
-- Bump `GATEWAY_PROTOCOL_VERSION` constant to `2`; add `GATEWAY_MIN_SUPPORTED_VERSION = 1`
+**Resolution:** Bump `GATEWAY_PROTOCOL_VERSION` to `2`. No v1 support needed — all clients (TUI, adapters) are updated together.
+- Remove the old `!= GATEWAY_PROTOCOL_VERSION` check
+- Gateway rejects anything other than `2`
+- All new frame types and `RuntimeProgressKind` variants are always emitted
 
-### D4: Session persistence (C4 from REPORT-GPT)
+### D4: Session persistence
 
 **Conflict:** Gateway currently has zero persistence; plan assumes DB access.
 
@@ -74,7 +97,7 @@ runner wires tools + runtime together at bootstrap
 - Update `memory/src/schema.rs` MIGRATIONS list AND `REQUIRED_TABLES`/`REQUIRED_INDEXES` arrays
 - In-memory session state is authoritative for active sessions; DB is for listing/resumption after restart
 
-### D5: Subagent progress transport (C5 from REPORT-GPT)
+### D5: Subagent progress transport
 
 **Conflict:** Plan uses both `TurnProgress` extension AND separate `SubagentProgress` frame.
 
@@ -85,7 +108,7 @@ RuntimeProgressKind::SubagentExecution {
     subagent_session_id: String,
 }
 ```
-Reuse existing `GatewayServerFrame::TurnProgress`. No new frame type. v1 connections skip this variant.
+Reuse existing `GatewayServerFrame::TurnProgress`. No new frame type.
 
 ### D6: Feature flag for Telegram (conflict between plan and guidebook)
 
@@ -103,7 +126,7 @@ Reuse existing `GatewayServerFrame::TurnProgress`. No new frame type. v1 connect
 telegram = ["teloxide", "tokio"]
 ```
 
-### D7: Tool execution context race (from BEST-PLAN-EVER)
+### D7: Tool execution context race
 
 **Conflict:** `AgentRuntime` stores `ToolExecutionContext` in shared `Arc<Mutex<>>`. `set_tool_execution_context()` is called per-turn in `RuntimeGatewayTurnRunner`. With concurrent sessions/turns, context can be overwritten.
 
@@ -123,7 +146,7 @@ If two turns call `set_tool_execution_context` back-to-back before either reache
 - Remove `set_tool_execution_context()` method
 - `RuntimeGatewayTurnRunner.run_turn()` constructs context and passes it directly
 
-### D8: Session lifetime and memory pressure (H4 from REPORT-GPT)
+### D8: Session lifetime and memory pressure
 
 **Resolution:**
 - Active session state (broadcast channels, turn locks) lives in memory
@@ -132,9 +155,9 @@ If two turns call `set_tool_execution_context` back-to-back before either reache
 - Evicted sessions can be resumed by reloading from DB
 - Gateway-level session registry (DB) tracks all sessions for listing/searching
 
-### D9: `runtime_session_id` naming (Decision 6 from original plan)
+### D9: `runtime_session_id` → `session_id` rename
 
-**Resolution:** Keep `runtime_session_id` in the wire protocol and existing types. The field appears in 150+ references across 15 files. Renaming has massive blast radius with zero functional benefit. New session lifecycle frames use `session_id` as the user-facing field, which maps to `runtime_session_id` internally.
+**Resolution:** Since no backward compatibility is needed, rename `runtime_session_id` to `session_id` throughout the codebase. The field appears in ~150 references across ~15 files — this is a mechanical rename but worthwhile for clarity. The wire protocol uses `session_id` and internal code should match.
 
 ---
 
@@ -161,74 +184,62 @@ The operator (who has local access to `agent.toml`) configures which platform id
 - IRC bot owner masks (configured in bot config)
 
 ```toml
+# users/alice/config.toml (RunnerUserConfig — per-user, host-side)
+
 [channels.telegram]
 enabled = true
-bot_token_env = "TELEGRAM_BOT_TOKEN"
+bot_token_env = "ALICE_TELEGRAM_BOT_TOKEN"
 
-# Sender identity bindings — maps platform sender IDs to Oxydra identity + role
+# Authorized senders — only these platform IDs can interact with alice's agent
 [[channels.telegram.senders]]
-platform_id = "12345678"        # Telegram user ID
-user_id = "alice"               # Oxydra user identity
-role = "owner"                  # Full access
+platform_ids = ["12345678"]       # Telegram user ID (this IS alice on Telegram)
 
 [[channels.telegram.senders]]
-platform_id = "87654321"
-user_id = "alice"               # Same Oxydra user — this is alice's friend
-role = "guest"                  # Limited access
-display_name = "Bob"            # Optional label for the agent to see
+platform_ids = ["87654321", "11223344"]  # Bob has two Telegram accounts
+display_name = "Bob"
 ```
 
-### Role Hierarchy
+Note: `user_id` is not in the sender binding — it's implicit from which user's config file this is in. The runner already knows the user_id from `global.toml`'s `[users]` map. All authorized senders are treated identically as the user.
 
-| Role | Description | Capabilities |
-|------|-------------|-------------|
-| `owner` | The primary Oxydra user. Full access. | All tools, all operations, budget as configured |
-| `member` | A trusted collaborator. Can interact normally. | All read tools, side-effecting tools gated by config |
-| `guest` | A known sender with limited access. | Read-only interactions; messages prefixed with sender identity for the agent |
+### Sender Authorization Model
 
-**Behavior per role:**
+Binary decision: a sender is either **authorized** or **rejected**.
 
-1. **Owner messages** → processed as normal user turns. The agent sees them as `MessageRole::User`.
-2. **Member messages** → processed as user turns but tools may be restricted (configurable tool allowlist per role).
-3. **Guest messages** → the agent receives the message with metadata indicating it's from a guest. The system prompt tells the agent how to handle guests. Guests cannot trigger side-effecting tools directly.
-4. **Unknown senders** → rejected silently. Audit log entry created. No response sent (prevents enumeration).
+- **Authorized senders** (listed in the user's `channels.*.senders`): Messages are processed as normal user turns. The agent sees them as `MessageRole::User`, identical to TUI input.
+- **Unknown senders** (not in the list): Rejected silently. Audit log entry created. No response sent (prevents enumeration).
+
+All authorized senders are treated as the user — there is no role hierarchy or permission differentiation. If alice authorizes Bob's Telegram ID, Bob's messages are processed exactly as if alice typed them in the TUI.
 
 ### Group Channel Scenario (Discord)
 
 When the bot is added to a Discord server/channel:
 
 ```toml
+# users/alice/config.toml
+
 [channels.discord]
 enabled = true
-bot_token_env = "DISCORD_BOT_TOKEN"
+bot_token_env = "ALICE_DISCORD_BOT_TOKEN"
 
 # Which Discord channels (guild+channel IDs) the bot should listen to
 allowed_channel_ids = ["1234567890123456"]
 
 [[channels.discord.senders]]
-platform_id = "111222333444555666"  # Discord user ID
-user_id = "alice"
-role = "owner"
+platform_ids = ["111222333444555666"]  # Discord user ID (this is alice)
 
 [[channels.discord.senders]]
-platform_id = "666555444333222111"
-user_id = "alice"                   # All senders map to same Oxydra user
-role = "guest"
+platform_ids = ["666555444333222111"]  # Charlie — authorized to interact
 display_name = "Charlie"
 ```
 
-In a group channel, the agent sees:
-```
-[alice (owner)]: Can you summarize the discussion?
-[Charlie (guest)]: I think the API should use REST
-[Dave (unknown)] → silently dropped, audit logged
-```
-
-The agent knows who is speaking and their trust level. The system prompt instructs the agent on how to handle different roles.
+In a group channel:
+- Messages from alice (111222333444555666) → processed as user turns
+- Messages from Charlie (666555444333222111) → processed as user turns (same as alice)
+- Messages from Dave (unknown) → silently dropped, audit logged
 
 ### Why Not Dynamic Onboarding?
 
-For v1, we deliberately avoid invite-code or OAuth flows because:
+For the initial implementation, we deliberately avoid invite-code or OAuth flows because:
 1. They add attack surface (invite code leakage, phishing)
 2. They require state management for pending invites
 3. They're unnecessary for the primary use case (personal agent)
@@ -239,69 +250,53 @@ Dynamic onboarding (invite codes, admin commands) can be added later as an enhan
 ### Config-Level Identity Types
 
 ```rust
-// In types/src/config.rs
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SenderRole {
-    Owner,
-    Member,
-    Guest,
-}
+// In types/src/runner.rs (per-user config, passed to VM via bootstrap envelope)
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SenderBinding {
-    /// Platform-specific sender identifier (Telegram user_id, Discord user_id, etc.)
-    pub platform_id: String,
-    /// Oxydra user identity this sender maps to
-    pub user_id: String,
-    /// Access level
-    pub role: SenderRole,
-    /// Optional human-readable name for the agent to see in group contexts
+    /// Platform-specific sender identifiers (Telegram user_id, Discord user_id, etc.)
+    /// A single person may have multiple platform IDs.
+    pub platform_ids: Vec<String>,
+    /// Optional human-readable name for logging/audit
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Optional tool allowlist override for this sender (None = role default)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_tools: Option<Vec<String>>,
 }
+// All authorized senders are treated as the user. No role differentiation.
 ```
 
 ### Runtime Identity Propagation
 
-When a message arrives from an external channel:
+Channel adapters run inside the VM alongside the gateway. Sender auth happens before any message reaches the gateway's turn processing.
 
 ```
 Platform message (Telegram user_id: 12345678)
     │
-    ▼
-Channel Adapter: extract sender platform_id
+    ▼ (via teloxide long-polling, inside the VM)
+    │
+Channel Adapter (in-process, same VM as gateway):
+    ├── Extract sender platform_id from Telegram update
+    ├── Look up platform_id in authorized sender set
+    │     │
+    │     ├── NOT FOUND → audit log + silent drop, done
+    │     │
+    │     └── FOUND → authorized, proceed
     │
     ▼
-Sender Auth Pipeline:
-    ├── Look up platform_id in channel's sender bindings
-    ├── NOT FOUND → reject, audit log, done
-    ├── FOUND → extract (user_id, role, display_name)
+Adapter calls gateway directly (no WebSocket — in-process):
+    ├── Resolve session for this chat (via session map)
+    ├── Start turn with message text
     │
     ▼
-Construct ChannelInboundEvent with identity metadata:
-    ChannelInboundEvent {
-        channel_id: "telegram",
-        connection_id: "tg-12345678",
-        sender_identity: SenderIdentity {
-            user_id: "alice",
-            role: Owner,
-            display_name: None,
-            platform_id: "12345678",
-        },
-        frame: GatewayClientFrame::SendTurn { ... }
-    }
+Gateway: processes turn normally
     │
     ▼
-Gateway: route to user_id's session
-    ├── Owner/Member → standard turn execution
-    └── Guest → turn execution with restricted tool set,
-                message prefixed with guest identity for agent awareness
+Gateway response (AssistantDelta, TurnCompleted, etc.)
+    │
+    ▼
+Adapter: accumulate deltas → format → send back via Telegram API
 ```
+
+The gateway doesn't need to know about Telegram at all. The adapter is an internal component that calls gateway methods directly.
 
 ---
 
@@ -314,12 +309,12 @@ Current state verified against actual code, not plan assumptions.
 | Type | Location | Current State |
 |------|----------|---------------|
 | `GatewaySession` | `types/src/channel.rs` | `{ user_id, runtime_session_id }` |
-| `GatewayClientHello` | `types/src/channel.rs` | `{ request_id, protocol_version, user_id, runtime_session_id? }` |
+| `GatewayClientHello` | `types/src/channel.rs` | `{ request_id, protocol_version, user_id, runtime_session_id? }` — will be updated: `runtime_session_id` → `session_id`, add `create_new_session` |
 | `GatewayClientFrame` | `types/src/channel.rs` | `Hello, SendTurn, CancelActiveTurn, HealthCheck` |
 | `GatewayServerFrame` | `types/src/channel.rs` | `HelloAck, TurnStarted, AssistantDelta, TurnCompleted, TurnCancelled, Error, HealthStatus, TurnProgress, ScheduledNotification` |
 | `RuntimeProgressKind` | `types/src/model.rs` | `ProviderCall, ToolExecution { tool_names }, RollingSummary` |
 | `GATEWAY_PROTOCOL_VERSION` | `types/src/channel.rs` | `1` |
-| `AgentConfig` | `types/src/config.rs` | No `gateway`, `channels`, or `agents` fields |
+| `AgentConfig` | `types/src/config.rs` | No `gateway`, `channels`, or `agents` fields. Channels config will go in `RunnerUserConfig` (host-side, per-user). Agent definitions will go here. |
 | `ToolExecutionContext` | `types/src/tool.rs` | `{ user_id?, session_id? }` |
 
 ### Actual Gateway State (as-is)
@@ -346,7 +341,7 @@ struct UserSessionState {
 
 ```
 types ← provider, tools, tools-macros, memory, runtime, channels, gateway, tui, runner
-channels ← types (only)
+channels ← types (only; will gain gateway + memory for in-process adapter integration)
 memory ← types
 provider ← types
 tools ← types
@@ -406,7 +401,6 @@ All crates currently use `uuid` v4. Session IDs would benefit from v7 (time-orde
 │  │  ├── connection_id: u64                                   │   │
 │  │  ├── user_id: String                                      │   │
 │  │  ├── channel_id: String                                   │   │
-│  │  ├── negotiated_protocol_version: u16                     │   │
 │  │  └── active_session_id: String                            │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
@@ -415,29 +409,39 @@ All crates currently use `uuid` v4. Session IDs would benefit from v7 (time-orde
 ### 4.2 Identity & Auth Flow
 
 ```
-External Channel Message
-        │
-        ▼
-Channel Adapter: extract sender platform_id
-        │
-        ▼
-Sender Auth Pipeline (in gateway):
-        │
-        ├── Lookup sender in channel config senders list
-        │     │
-        │     ├── NOT FOUND → audit log + silent drop
-        │     │
-        │     └── FOUND → SenderIdentity { user_id, role, ... }
-        │
-        ▼
-Role-Based Routing:
-        │
-        ├── Owner/Member → resolve session → start turn (full tools or role-scoped tools)
-        │
-        └── Guest → resolve session → start turn with:
-                - restricted tool registry (read-only by default)
-                - message prefixed with "[Guest: {display_name}]"
-                - lower budget limits (configurable)
+                          HOST SIDE (Runner process)
+┌─────────────────────────────────────────────────────────────────┐
+│  Runner:                                                        │
+│  ├── Reads RunnerUserConfig (channels config)                   │
+│  ├── Includes channels config in RunnerBootstrapEnvelope        │
+│  ├── Forwards bot token env vars to VM                          │
+│  └── That's it — no adapter logic, no WebSocket management      │
+└─────────────────────────────────────────────────────────────────┘
+                              │ Bootstrap envelope + env vars
+                              ▼
+                          GUEST SIDE (oxydra-vm)
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  GatewayServer                                                  │
+│  ├── UserState("alice")                                         │
+│  │   ├── Session from TUI (WebSocket connection)                │
+│  │   ├── Session from Telegram adapter (in-process)             │
+│  │   └── (sessions are independent)                             │
+│  └── Multi-session, protocol v2, session persistence            │
+│                                                                 │
+│  TelegramAdapter (in-process, spawned at startup)               │
+│  ├── bot: teloxide::Bot (alice's bot token from env)            │
+│  ├── authorized_senders: HashSet<platform_id>                   │
+│  ├── session_map: chat_id → session_id                          │
+│  └── Calls gateway methods directly (no WebSocket)              │
+│                                                                 │
+│  Message flow:                                                  │
+│  Telegram API → teloxide poll → auth check → gateway.start_turn │
+│                                                                 │
+│  Response flow:                                                 │
+│  gateway turn stream → accumulate deltas → bot.send_message()   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### 4.3 Multi-Agent Delegation
@@ -509,48 +513,52 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 2: Protocol Negotiation & v1/v2 Compatibility
+### Step 2: Protocol Update for Multi-Session + Channels
 
-**Goal:** Gateway accepts both v1 and v2 clients. Lay groundwork for new frames without breaking existing TUI.
+**Goal:** Update protocol version, add new Hello fields for session control, add new frame types. No backward compatibility with v1.
 
-**Crates:** `types`, `gateway`
+**Crates:** `types`, `gateway`, `tui`
 
 **Changes:**
 
 1. **`types/src/channel.rs`:**
    - Change `GATEWAY_PROTOCOL_VERSION` to `2`
-   - Add `const GATEWAY_MIN_PROTOCOL_VERSION: u16 = 1;`
-   - Add `const GATEWAY_MAX_PROTOCOL_VERSION: u16 = 2;`
+   - Remove `GATEWAY_MIN_SUPPORTED_VERSION` / `GATEWAY_MAX_SUPPORTED_VERSION` if they exist (just one constant)
+   - Update `GatewayClientHello`:
+     ```rust
+     pub struct GatewayClientHello {
+         pub request_id: String,
+         pub protocol_version: u16,
+         pub user_id: String,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         pub session_id: Option<String>,         // join existing session
+         #[serde(default)]
+         pub create_new_session: bool,            // create fresh session
+     }
+     ```
+     Note: `runtime_session_id` renamed to `session_id` (no backward compat needed)
 
 2. **`gateway/src/lib.rs`:**
-   - Change protocol version check from `!= GATEWAY_PROTOCOL_VERSION` to:
-     ```rust
-     if hello.protocol_version < GATEWAY_MIN_PROTOCOL_VERSION
-         || hello.protocol_version > GATEWAY_MAX_PROTOCOL_VERSION
-     ```
-   - Store `negotiated_protocol_version` alongside connection state (initially as a local variable in `handle_socket`, threaded through `handle_client_frame`)
-   - Before emitting any frame to a connection, check if the frame is supported at the negotiated version
-   - For v1 connections: filter out new `RuntimeProgressKind` variants in `TurnProgress` frames; skip new frame types entirely
+   - Update protocol version check: reject anything `!= GATEWAY_PROTOCOL_VERSION`
+   - Handle new Hello fields directly (no version negotiation logic)
 
-3. **`types/src/channel.rs`:**
-   - Add v2-only fields to `GatewayClientHello` (backward-compatible via `serde(default)`):
-     ```rust
-     #[serde(default)]
-     pub create_new_session: bool,
-     // session_id already exists as runtime_session_id
-     ```
+3. **`tui`:**
+   - Update Hello to send `protocol_version: 2`
+   - Use `session_id` field (was `runtime_session_id`)
+
+4. **`runner/src/lib.rs`:**
+   - Update `probe_gateway_health()` to send v2 Hello
 
 **Verification:**
-- Existing TUI (sends v1 Hello) still connects and works identically
-- New test: v2 Hello accepted, v0 and v3 rejected
-- New test: v1 connection does not receive v2-only frames
-- `runner --tui --probe` still works (it uses v1 Hello)
+- v2 Hello accepted
+- Non-v2 Hello rejected
+- `runner --tui --probe` works with updated Hello
 
 ---
 
 ### Step 3: Multi-Session Gateway Core
 
-**Goal:** Replace single-session-per-user with multi-session model. v1 clients see zero behavior change.
+**Goal:** Replace single-session-per-user with multi-session model.
 
 **Crates:** `gateway`
 
@@ -584,10 +592,9 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - To: `RwLock<HashMap<String, Arc<UserState>>>` (keyed by user_id, multiple sessions)
 
 3. **Update `resolve_session()`:**
-   - v1 Hello: preserve exact current behavior — use `runtime-{user_id}` as session_id, find-or-create single session for the user (backward compatible)
-   - v2 Hello with `create_new_session: true`: generate new UUID v7 session_id, create `SessionState`, add to user's session map
-   - v2 Hello with `runtime_session_id: Some(id)`: find existing session by that id, join it
-   - v2 Hello with neither: create a new session (no ambiguous resume)
+   - Hello with `create_new_session: true`: generate new UUID v7 session_id, create `SessionState`, add to user's session map
+   - Hello with `session_id: Some(id)`: find existing session by that id, join it
+   - Hello with neither: create a new session
 
 4. **Update `start_turn()`:**
    - Move `active_turn` check to session level (already is, just formalize)
@@ -602,10 +609,10 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - A connection's send/cancel operations only affect its active session
 
 **Verification:**
-- All existing gateway tests pass (v1 backward compatibility)
-- New test: two v2 connections for same user with different sessions can run turns concurrently
+- New test: two connections for same user with different sessions can run turns concurrently
 - New test: concurrent turn limit enforcement (third concurrent turn rejected)
-- New test: v1 client still gets stable `runtime-{user_id}` session
+- New test: `create_new_session` creates fresh session
+- New test: `session_id` joins existing session
 
 ---
 
@@ -717,7 +724,6 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 3. **`gateway/src/lib.rs`:**
    - Handle new client frame variants in `handle_client_frame()`
-   - v1 connections: these frames never arrive (old TUI doesn't send them)
    - `CreateSession`: create new SessionState, persist, switch connection's active session
    - `ListSessions`: read from SessionStore
    - `SwitchSession`: unsubscribe from current session broadcast, subscribe to target session
@@ -729,8 +735,8 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 5. **`tui/src/bin/oxydra-tui.rs`:**
    - Add `--session <id>` CLI flag
-   - If provided: send it as `runtime_session_id` in Hello
-   - If not provided: send `create_new_session: true` in v2 Hello
+   - If provided: send it as `session_id` in Hello
+   - If not provided: send `create_new_session: true` in Hello
 
 6. **`tui/src/widgets.rs` and `tui/src/ui_model.rs`:**
    - Show current session ID (shortened) in status bar
@@ -741,128 +747,156 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 - New test: `/sessions` returns list
 - New test: `/switch` changes active session
 - New test: two TUI windows with separate sessions work independently
-- Existing TUI integration tests still pass
+- TUI integration tests updated for v2 protocol and pass
 
 ---
 
 ### Step 6: Auth & Identity Pipeline
 
-**Goal:** Sender authentication and identity resolution for external channels. Framework before any specific adapter.
+**Goal:** Sender authentication for external channels. Runs inside the VM alongside the gateway.
 
-**Crates:** `types`, `gateway`, `memory`
+**Crates:** `types`, `channels`, `runner`
 
 **Changes:**
 
-1. **`types/src/config.rs`:**
-   - Add `SenderRole`, `SenderBinding` types (from Section 2)
-   - Add `ChannelsConfig` (initially just shared auth config structure)
-   - Add `channels: ChannelsConfig` field to `AgentConfig` with `#[serde(default)]`
-
-2. **`types/src/channel.rs`:**
-   - Add `SenderIdentity` struct:
+1. **`types/src/runner.rs`:**
+   - Add `SenderBinding` type (from Section 2)
+   - Add `ChannelsConfig` to `RunnerUserConfig`:
      ```rust
-     pub struct SenderIdentity {
-         pub user_id: String,
-         pub role: SenderRole,
-         pub platform_id: String,
-         pub display_name: Option<String>,
+     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+     pub struct RunnerUserConfig {
+         #[serde(default)]
+         pub mounts: RunnerMountPaths,
+         #[serde(default)]
+         pub resources: RunnerResourceLimits,
+         #[serde(default)]
+         pub credential_refs: BTreeMap<String, String>,
+         #[serde(default)]
+         pub behavior: RunnerBehaviorOverrides,
+         #[serde(default)]
+         pub channels: ChannelsConfig,  // NEW
+     }
+
+     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+     pub struct ChannelsConfig {
+         #[serde(default)]
+         pub telegram: Option<TelegramChannelConfig>,
+         // Future: discord, whatsapp, etc.
+     }
+
+     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+     pub struct TelegramChannelConfig {
+         #[serde(default)]
+         pub enabled: bool,
+         pub bot_token_env: Option<String>,
+         #[serde(default = "default_polling_timeout_secs")]
+         pub polling_timeout_secs: u64,
+         #[serde(default)]
+         pub senders: Vec<SenderBinding>,
+         #[serde(default = "default_max_message_length")]
+         pub max_message_length: usize,
      }
      ```
-   - Add `sender_identity: Option<SenderIdentity>` to `ChannelInboundEvent`
-     (None for TUI/WebSocket where identity is in the Hello handshake)
 
-3. **`gateway/src/sender_auth.rs` (new file):**
+2. **`types/src/runner.rs` — add channels to bootstrap envelope:**
+   - Add `channels: Option<ChannelsConfig>` field to `RunnerBootstrapEnvelope` with `#[serde(default)]`
+   - Runner populates it from the user's `RunnerUserConfig.channels`
+
+3. **`runner/src/lib.rs` — forward channels config + bot token env vars:**
+   - In `start_user_for_host()`: read `user_config.channels`, include in bootstrap envelope
+   - In `collect_config_env_vars()`: also collect `bot_token_env` values from channels config
+
+4. **`channels/src/sender_auth.rs` (new file):**
    - `SenderAuthPolicy` struct:
      ```rust
      pub struct SenderAuthPolicy {
-         bindings: HashMap<String, HashMap<String, SenderBinding>>, // channel_id → platform_id → binding
+         authorized: HashSet<String>, // all platform_ids from all sender bindings
      }
 
      impl SenderAuthPolicy {
-         pub fn authenticate(&self, channel_id: &str, platform_id: &str) -> Option<&SenderBinding> { ... }
+         pub fn from_bindings(bindings: &[SenderBinding]) -> Self {
+             let authorized = bindings.iter()
+                 .flat_map(|b| b.platform_ids.iter().cloned())
+                 .collect();
+             Self { authorized }
+         }
+         pub fn is_authorized(&self, platform_id: &str) -> bool {
+             self.authorized.contains(platform_id)
+         }
      }
      ```
-   - Build from config at startup
 
-4. **`memory/migrations/0021_create_sender_audit_log.sql` (new file):**
-   - Audit table for rejected senders
-
-5. **`memory/src/session_store.rs`:**
-   - Add `log_rejected_sender()` method to `SessionStore` trait
-   - Add `LibsqlSessionStore` implementation
-
-6. **`memory/src/schema.rs`:**
-   - Add migration 0021 to MIGRATIONS
-   - Add `"sender_audit_log"` to REQUIRED_TABLES
-
-7. **`gateway/src/lib.rs`:**
-   - Add `sender_auth: Option<SenderAuthPolicy>` to `GatewayServer`
-   - Add channel inbound routing method:
-     ```rust
-     pub async fn handle_channel_inbound(&self, event: ChannelInboundEvent) { ... }
-     ```
-   - This method: validates sender → resolves session → starts turn
+5. **`channels/src/audit.rs` (new file):**
+   - `AuditLogger` for recording rejected senders
+   - File-based implementation (writes to workspace log dir inside VM)
 
 **Verification:**
-- New test: known sender authenticates successfully
-- New test: unknown sender rejected, audit log created
-- New test: guest sender gets restricted tool set
-- New test: owner sender gets full access
+- New test: known sender is authorized
+- New test: unknown sender rejected, audit entry created
+- Config test: channels config is optional (default = no channels)
+- Config test: empty senders list means nobody can interact
+- Config test: multiple platform_ids in one binding all authorize
 
 ---
 
 ### Step 7: Channel Session Mapping
 
-**Goal:** Deterministic mapping from `(user_id, channel_id, channel_context_id)` to session_id.
+**Goal:** Deterministic mapping from `(channel_id, channel_context_id)` to gateway session. Each Telegram chat maps to a stable session so conversation context is preserved.
 
-**Crates:** `types`, `memory`, `gateway`
+**Crates:** `channels`, `memory`
 
 **Changes:**
 
-1. **`memory/migrations/0022_create_channel_session_mappings.sql` (new file):**
-   - See [Section 6](#6-database-migrations)
+1. **`memory/migrations/0021_create_channel_session_mappings.sql` (new file):**
+   ```sql
+   CREATE TABLE IF NOT EXISTS channel_session_mappings (
+       channel_id          TEXT NOT NULL,       -- e.g. "telegram"
+       channel_context_id  TEXT NOT NULL,       -- e.g. Telegram chat_id
+       session_id          TEXT NOT NULL REFERENCES gateway_sessions(session_id)
+                               ON DELETE CASCADE,
+       created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+       updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+       PRIMARY KEY (channel_id, channel_context_id)
+   );
+   ```
 
 2. **`memory/src/schema.rs`:**
-   - Add migration 0022
+   - Add migration 0021 to MIGRATIONS
    - Add `"channel_session_mappings"` to REQUIRED_TABLES
 
-3. **`types/src/session.rs`:**
-   - Add to `SessionStore` trait:
+3. **`memory/src/session_store.rs` (or `channels` via trait):**
+   - Add channel session mapping methods to `SessionStore` trait:
      ```rust
      async fn get_channel_session(
-         &self,
-         user_id: &str,
-         channel_id: &str,
-         channel_context_id: &str,
+         &self, channel_id: &str, channel_context_id: &str,
      ) -> Result<Option<String>, MemoryError>;
 
      async fn set_channel_session(
-         &self,
-         user_id: &str,
-         channel_id: &str,
-         channel_context_id: &str,
-         session_id: &str,
+         &self, channel_id: &str, channel_context_id: &str, session_id: &str,
      ) -> Result<(), MemoryError>;
      ```
 
-4. **`gateway/src/lib.rs`:**
-   - Channel inbound routing uses the mapping:
-     - Incoming Telegram message from chat_id `12345` for user "alice"
-     - Lookup `("alice", "telegram", "12345")` → found session_id → use it
-     - Not found → create new session, store mapping
+4. **`channels/src/session_map.rs` (new file):**
+   - Thin wrapper around `SessionStore` methods for adapter use
+   - Adapter uses it to:
+     - Look up existing session for this chat: found → use that session
+     - Not found → create new session via gateway, save mapping
+   - `/new` command → create new session, update mapping
+   - `/switch` command → update mapping to different session_id
 
 **Verification:**
-- New test: first message from a channel creates mapping
-- New test: subsequent messages from same channel reuse session
-- New test: `/new` on channel creates new session and updates mapping
+- New test: first message from a chat creates mapping
+- New test: subsequent messages from same chat reuse session
+- New test: `/new` on Telegram creates new session and updates mapping
+- New test: mapping survives adapter/VM restart (DB-backed)
 
 ---
 
 ### Step 8: Telegram Channel Adapter
 
-**Goal:** Working Telegram bot that receives messages, authenticates senders, and routes through gateway.
+**Goal:** Working Telegram bot that receives messages, authenticates senders, and routes through gateway. Runs inside the VM as an in-process component alongside the gateway.
 
-**Crates:** `channels`, `gateway`, `runner`
+**Crates:** `channels`, `runner`
 
 **Changes:**
 
@@ -873,64 +907,61 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    telegram = ["teloxide", "tokio"]
 
    [dependencies]
+   types = { path = "../types" }
    teloxide = { version = "0.13", optional = true }
    tokio = { version = "1", features = ["full"], optional = true }
+   serde = { version = "1", features = ["derive"] }
+   serde_json = "1"
+   tracing = "0.1"
    ```
 
 2. **`channels/src/telegram.rs` (new file, behind `#[cfg(feature = "telegram")]`):**
-   - `TelegramAdapter` implementing `Channel` trait
-   - Long-polling update listener via teloxide
-   - Telegram `Update` → `ChannelInboundEvent` conversion:
+   - `TelegramAdapter` struct:
+     ```rust
+     pub struct TelegramAdapter {
+         bot: teloxide::Bot,
+         sender_auth: SenderAuthPolicy,
+         session_store: Arc<dyn SessionStore>,   // for channel session mappings
+         gateway: Arc<GatewayServer>,            // direct reference, in-process
+         user_id: String,
+         config: TelegramChannelConfig,
+     }
+     ```
+   - `run()` method — long-polls Telegram updates, runs until cancellation token fires
+   - Per incoming `Update`:
      - Extract `sender_id` from `message.from.id`
-     - Set `connection_id` to `tg-{chat_id}`
-     - Map message text to `GatewayClientFrame::SendTurn`
-   - `ChannelOutboundEvent` → `bot.send_message()` conversion:
-     - Accumulate `AssistantDelta` frames until `TurnCompleted`
-     - Split messages at 4096 char Telegram limit at paragraph boundaries
-     - Use Telegram HTML formatting (more forgiving than MarkdownV2)
+     - `sender_auth.is_authorized(sender_id)` → false = drop + audit, true = proceed
+     - Command interception: `/new`, `/sessions`, `/switch`, `/cancel`, `/status`
+       - These map to direct gateway method calls (create session, list sessions, etc.)
+     - Normal message: resolve session via `session_store.get_channel_session()`, call `gateway.start_turn()` directly
+   - Response handling:
+     - Subscribe to session's broadcast channel (same mechanism TUI WebSocket uses internally)
+     - Accumulate `AssistantDelta` text fragments
+     - On `TurnCompleted`: format accumulated text, split at 4096 char limit at paragraph boundaries
+     - Send via `bot.send_message()` with HTML formatting
      - Fallback to plain text on formatting errors
-   - Command interception: `/new`, `/sessions`, `/switch`, `/cancel`, `/status`
    - Rate limiting: respect Telegram's `retry_after` header on 429 responses
    - Per-chat message queue to avoid out-of-order delivery
 
-3. **`types/src/config.rs`:**
-   - Add `TelegramChannelConfig`:
-     ```rust
-     pub struct TelegramChannelConfig {
-         pub enabled: bool,                    // default: false
-         pub bot_token_env: Option<String>,    // env var name for bot token
-         pub polling_timeout_secs: u64,        // default: 30
-         pub senders: Vec<SenderBinding>,      // sender identity bindings
-         pub max_message_length: usize,        // default: 4096
-     }
-     ```
-   - Add to `ChannelsConfig`:
-     ```rust
-     pub struct ChannelsConfig {
-         #[serde(default)]
-         pub telegram: TelegramChannelConfig,
-     }
-     ```
+3. **`runner/src/bin/oxydra-vm.rs`:**
+   - After gateway + runtime construction:
+     - Read `ChannelsConfig` from bootstrap envelope
+     - If Telegram enabled: resolve bot token from env, build `SenderAuthPolicy`, construct `TelegramAdapter`
+     - Spawn adapter with the VM's `CancellationToken`
+   - Adapter stops automatically when VM shuts down
 
-4. **`runner/src/bootstrap.rs`:**
-   - When `channels.telegram.enabled` is true AND feature is compiled in:
-     - Resolve bot token from env var
-     - Construct `TelegramAdapter`
-     - Build `SenderAuthPolicy` from `channels.telegram.senders`
-     - Pass adapter and auth policy to gateway
+4. **`runner/Cargo.toml`:**
+   ```toml
+   channels = { path = "../channels", optional = true }
 
-5. **`runner/src/bin/oxydra-vm.rs`:**
-   - After gateway construction: register Telegram adapter
-   - Spawn adapter listener task
-   - Wire inbound events to `gateway.handle_channel_inbound()`
-
-6. **`runner/Cargo.toml`:**
-   - Add `channels` dependency with optional `telegram` feature pass-through
+   [features]
+   telegram = ["channels/telegram"]
+   ```
 
 **Verification:**
-- Unit test: Telegram Update → ChannelInboundEvent conversion
+- Unit test: Telegram Update → sender auth → message construction
 - Unit test: long message splitting at paragraph boundaries
-- Unit test: command interception (`/new`, etc.)
+- Unit test: command interception (`/new`, `/sessions`, etc.)
 - Integration test with mock Telegram API: full message round-trip
 - Integration test: unauthorized sender rejected, audit logged
 - Integration test: rate limiting with simulated 429
@@ -1141,15 +1172,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 **Changes:**
 
 1. **System prompt updates:**
-   - When channels are configured: add section about multi-channel awareness
    - When agents are defined: add section about delegation capabilities
-   - When guest senders exist: add section about how to handle guest messages
-     ```
-     ## Guest Users
-     Some messages may come from guest users, indicated by a "[Guest: name]" prefix.
-     Treat guest messages as informational. Do not execute side-effecting tools on behalf of guests.
-     You may respond to guests with helpful information but prioritize the owner's requests.
-     ```
 
 2. **Guidebook updates:**
    - Update Chapter 9 (Gateway and Channels) with multi-session model
@@ -1160,7 +1183,6 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 3. **Integration tests:**
    - TUI + Telegram simultaneous sessions
    - Delegation from Telegram session
-   - Guest message handling
    - Session switching mid-conversation
    - Scheduled task alongside interactive session + delegation
 
@@ -1194,35 +1216,22 @@ CREATE INDEX IF NOT EXISTS idx_gateway_sessions_parent
     WHERE parent_session_id IS NOT NULL;
 ```
 
-### Migration 0021: sender_audit_log
+### Host-side persistence (no DB migration needed)
+
+- **Sender audit log:** Append-only file at `<workspace>/.oxydra/sender_audit.log` (one JSON line per rejected sender).
+
+### Migration 0021: channel_session_mappings
 
 ```sql
--- 0021_create_sender_audit_log.sql
-CREATE TABLE IF NOT EXISTS sender_audit_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id    TEXT NOT NULL,
-    platform_id   TEXT NOT NULL,
-    user_id_hint  TEXT,
-    reason        TEXT NOT NULL,
-    rejected_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_sender_audit_channel_time
-    ON sender_audit_log(channel_id, rejected_at DESC);
-```
-
-### Migration 0022: channel_session_mappings
-
-```sql
--- 0022_create_channel_session_mappings.sql
+-- 0021_create_channel_session_mappings.sql
 CREATE TABLE IF NOT EXISTS channel_session_mappings (
-    user_id             TEXT NOT NULL,
     channel_id          TEXT NOT NULL,
     channel_context_id  TEXT NOT NULL,
-    session_id          TEXT NOT NULL REFERENCES gateway_sessions(session_id) ON DELETE CASCADE,
+    session_id          TEXT NOT NULL REFERENCES gateway_sessions(session_id)
+                            ON DELETE CASCADE,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, channel_id, channel_context_id)
+    PRIMARY KEY (channel_id, channel_context_id)
 );
 ```
 
@@ -1231,7 +1240,6 @@ CREATE TABLE IF NOT EXISTS channel_session_mappings (
 In `memory/src/schema.rs`, add to `REQUIRED_TABLES`:
 ```rust
 "gateway_sessions",
-"sender_audit_log",
 "channel_session_mappings",
 ```
 
@@ -1239,37 +1247,36 @@ Add to `REQUIRED_INDEXES`:
 ```rust
 "idx_gateway_sessions_user_active",
 "idx_gateway_sessions_parent",
-"idx_sender_audit_channel_time",
 ```
 
 ---
 
-## 7. Protocol Evolution
+## 7. Protocol Changes
 
-### Modified Client Frame Types
+### Updated Client Frame Types
 
 ```rust
-// GatewayClientHello (v1 fields unchanged, v2 adds create_new_session)
+// GatewayClientHello — session_id replaces runtime_session_id
 pub struct GatewayClientHello {
     pub request_id: String,
-    pub protocol_version: u16,
+    pub protocol_version: u16,       // must be 2
     pub user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_session_id: Option<String>,
+    pub session_id: Option<String>,  // join existing session (renamed from runtime_session_id)
     #[serde(default)]
-    pub create_new_session: bool,  // NEW: v2 only, ignored by v1 gateway path
+    pub create_new_session: bool,    // create fresh session
 }
 
-// New v2 client frames (added to GatewayClientFrame enum)
+// New client frames (added to GatewayClientFrame enum)
 CreateSession(GatewayCreateSession),
 ListSessions(GatewayListSessions),
 SwitchSession(GatewaySwitchSession),
 ```
 
-### Modified Server Frame Types
+### Updated Server Frame Types
 
 ```rust
-// New v2 server frames (added to GatewayServerFrame enum)
+// New server frames (added to GatewayServerFrame enum)
 SessionCreated(GatewaySessionCreated),
 SessionList(GatewaySessionList),
 SessionSwitched(GatewaySessionSwitched),
@@ -1281,33 +1288,71 @@ SubagentExecution {
 }
 ```
 
-### v1/v2 Compatibility Matrix
+### Full Frame Summary
 
-| Frame | v1 Client | v2 Client |
-|-------|-----------|-----------|
-| Hello (v1 fields) | ✅ Normal | ✅ Accepted |
-| Hello (create_new_session) | Ignored (serde default) | ✅ Processed |
-| SendTurn | ✅ Unchanged | ✅ Unchanged |
-| CancelActiveTurn | ✅ Unchanged | ✅ Unchanged |
-| HealthCheck | ✅ Unchanged | ✅ Unchanged |
-| CreateSession | N/A (old TUI never sends) | ✅ Processed |
-| ListSessions | N/A | ✅ Processed |
-| SwitchSession | N/A | ✅ Processed |
-| HelloAck | ✅ Unchanged | ✅ Unchanged |
-| AssistantDelta | ✅ Unchanged | ✅ Unchanged |
-| TurnCompleted | ✅ Unchanged | ✅ Unchanged |
-| TurnProgress (new kinds) | **Filtered out** | ✅ Emitted |
-| SessionCreated | **Never emitted** | ✅ Emitted |
-| SessionList | **Never emitted** | ✅ Emitted |
-| SessionSwitched | **Never emitted** | ✅ Emitted |
+| Client Frame | Description |
+|-------------|-------------|
+| Hello | Session selection (create new or join existing) |
+| SendTurn | Send user message |
+| CancelActiveTurn | Cancel running turn |
+| HealthCheck | Liveness check |
+| CreateSession | Create a new named session |
+| ListSessions | List user's sessions |
+| SwitchSession | Switch connection to a different session |
 
-**Critical rule:** The gateway tracks negotiated version per connection. For v1 connections, new server frame variants are never serialized to the wire. This prevents `serde` deserialization failures in old TUI binaries.
+| Server Frame | Description |
+|-------------|-------------|
+| HelloAck | Session confirmed |
+| TurnStarted | Turn processing began |
+| AssistantDelta | Streaming token |
+| TurnCompleted | Turn finished |
+| TurnCancelled | Turn was cancelled |
+| TurnProgress | Progress update (including SubagentExecution) |
+| Error | Error notification |
+| HealthStatus | Health response |
+| ScheduledNotification | Scheduled task notification |
+| SessionCreated | New session created |
+| SessionList | Session listing response |
+| SessionSwitched | Session switch confirmed |
 
 ---
 
 ## 8. Configuration Schema
 
-### Full Example
+### Per-User Host Config (users/alice/config.toml → RunnerUserConfig)
+
+```toml
+# ── Sandbox & Resources (existing) ──────────────────────────
+[mounts]
+shared = "/home/alice/shared"
+
+[resources]
+max_vcpus = 2
+max_memory_mib = 4096
+
+[credential_refs]
+anthropic = "ANTHROPIC_API_KEY"
+
+[behavior]
+shell_enabled = true
+
+# ── Channels (NEW — per-user, host-side) ────────────────────
+[channels.telegram]
+enabled = true
+bot_token_env = "ALICE_TELEGRAM_BOT_TOKEN"
+polling_timeout_secs = 30
+max_message_length = 4096
+
+# Sender identity bindings
+[[channels.telegram.senders]]
+platform_ids = ["12345678"]
+
+[[channels.telegram.senders]]
+platform_ids = ["87654321"]
+display_name = "Bob"
+```
+
+### Agent Config (agent.toml → AgentConfig, shared or per-workspace)
 
 ```toml
 config_version = "1.0.0"
@@ -1338,25 +1383,6 @@ max_sessions_per_user = 10
 max_concurrent_turns_per_user = 3
 session_idle_ttl_hours = 24
 
-# ── Channels ────────────────────────────────────────────────
-[channels.telegram]
-enabled = true
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-polling_timeout_secs = 30
-max_message_length = 4096
-
-# Telegram sender bindings
-[[channels.telegram.senders]]
-platform_id = "12345678"
-user_id = "alice"
-role = "owner"
-
-[[channels.telegram.senders]]
-platform_id = "87654321"
-user_id = "alice"
-role = "guest"
-display_name = "Bob"
-
 # ── Agent Definitions (optional) ────────────────────────────
 [agents.researcher]
 system_prompt = "You are a research specialist..."
@@ -1379,13 +1405,24 @@ enabled = true
 enabled = true
 ```
 
+### What Lives Where
+
+| Config Section | File | Scope | Rationale |
+|---------------|------|-------|-----------|
+| `channels.*` | `config.toml` (RunnerUserConfig) | Per-user, host-side config; delivered to VM via bootstrap envelope | Bot tokens, sender bindings differ per user |
+| `gateway.*` | `agent.toml` (AgentConfig) | Per-workspace, guest-side | Session limits are agent behavior; gateway runs in VM |
+| `agents.*` | `agent.toml` (AgentConfig) | Per-workspace, guest-side | Agent definitions are agent behavior |
+| `selection`, `providers`, `runtime`, `memory`, `scheduler`, `tools` | `agent.toml` (AgentConfig) | Per-workspace, guest-side | Existing config, unchanged |
+| `mounts`, `resources`, `credential_refs`, `behavior` | `config.toml` (RunnerUserConfig) | Per-user, host-side | Existing config, unchanged |
+
 ### Defaults
 
-All new config sections use `#[serde(default)]` so existing configs continue to work without modification:
-- `gateway`: defaults defined in impl, no sessions limit = 10, no concurrency limit = 3
-- `channels.telegram.enabled`: `false`
-- `channels.telegram.senders`: empty vec (no senders allowed)
-- `agents`: empty BTreeMap (no named agents, no delegation tool registered)
+All new config sections use `#[serde(default)]` so existing configs work without modification:
+- `RunnerUserConfig.channels`: default = no channels (empty struct, all None)
+- `AgentConfig.gateway`: defaults defined in impl, sessions limit = 10, concurrency limit = 3
+- `AgentConfig.agents`: empty BTreeMap (no named agents, no delegation tool registered)
+- `TelegramChannelConfig.enabled`: `false`
+- `TelegramChannelConfig.senders`: empty vec (no senders allowed)
 
 ---
 
@@ -1396,17 +1433,17 @@ All new config sections use `#[serde(default)]` so existing configs continue to 
 | Step | Required Tests |
 |------|---------------|
 | 1: Context fix | Concurrent tool execution with different user_ids produces isolated contexts |
-| 2: Protocol | v1 Hello works unchanged; v2 Hello accepted; v0/v3 rejected; v1 client doesn't receive v2 frames |
-| 3: Multi-session | Two v2 sessions run turns concurrently; v1 backward compat; concurrent turn limit |
+| 2: Protocol | v2 Hello accepted; non-v2 rejected; session_id and create_new_session fields work |
+| 3: Multi-session | Two sessions run turns concurrently; concurrent turn limit; create_new_session and session_id paths |
 | 4: Persistence | Session create → DB verify; restart recovery; touch/archive operations |
 | 5: Lifecycle UX | /new creates session; /sessions lists; /switch changes; two TUI windows independent |
-| 6: Auth pipeline | Known sender authenticates; unknown rejected + audit; role-based routing |
-| 7: Channel mapping | First message creates mapping; subsequent reuse; /new updates mapping |
-| 8: Telegram | Update conversion; message splitting; command interception; mock API round-trip; 429 handling |
+| 6: Auth pipeline | Known sender authorized; unknown rejected + audit; channels config optional; empty senders = nobody |
+| 7: Channel mapping | First message creates mapping; subsequent reuse; /new updates mapping; file persists across restarts |
+| 8: Telegram | Update→auth→message construction; message splitting; command interception; mock API round-trip; 429 handling; reconnect |
 | 9: Agent defs | Config parsing; tool validation; system prompt augmentation |
 | 10: Delegation | Round-trip delegation; budget cascading; cancel cascade; depth limit; cycle prevention |
 | 11: Concurrency | Semaphore enforcement; subagent counting; TTL cleanup |
-| 12: Integration | TUI + Telegram; delegation from Telegram; guest handling; scheduled + interactive |
+| 12: Integration | TUI + Telegram; delegation from Telegram; scheduled + interactive |
 
 ### Mock Strategy
 
@@ -1437,8 +1474,8 @@ All new config sections use `#[serde(default)]` so existing configs continue to 
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Gateway complexity increase | High | High | Strong session/connection separation; comprehensive integration tests; incremental steps with separate verification |
-| Protocol breakage for v1 TUI | Medium | High | Negotiated version tracking; compatibility tests; v1 behavior is the default path |
+| Gateway complexity increase | Medium | Medium | Gateway gains multi-session + persistence. Adapters are in-process but separate components calling gateway methods |
+| Protocol version bump | Low | Low | All clients updated together; single version, no negotiation complexity |
 | Telegram rate limits | Medium | Low | Accumulate deltas; respect `retry_after`; per-chat message queue |
 | Subagent infinite loops | Low | High | Budget cascading; max depth; cycle prevention; parent cancel cascade |
 | Session memory leak | Medium | Medium | TTL-based cleanup; bounded session map; semaphore for turn permits |
@@ -1452,7 +1489,7 @@ All new config sections use `#[serde(default)]` so existing configs continue to 
 2. **Cross-agent communication** — Agents talking to each other without a parent. Delegation through parent only.
 3. **Webhook mode for Telegram** — Long polling first. Webhook requires public URL.
 4. **Slack/Discord/WhatsApp adapters** — Same `Channel` trait pattern. Trivially addable after Telegram proves the pattern.
-5. **Dynamic onboarding** — Invite codes, OAuth flows. Pre-configured binding is sufficient for v1.
+5. **Dynamic onboarding** — Invite codes, OAuth flows. Pre-configured binding is sufficient for now.
 6. **Session migration across channels** — Starting a TUI session and continuing in Telegram. Sessions are independent per channel binding.
 7. **Hot channel reload** — Adding/removing channels requires gateway restart.
 8. **Observability/OpenTelemetry** — Phase 16 in guidebook; separate from this plan.
@@ -1461,38 +1498,43 @@ All new config sections use `#[serde(default)]` so existing configs continue to 
 
 | File | Change Type | Step |
 |------|------------|------|
-| `crates/types/src/channel.rs` | Modified — protocol v2, new frames, sender identity | 2, 5, 6 |
-| `crates/types/src/config.rs` | Modified — GatewayConfig, ChannelsConfig, AgentDefinition, SenderBinding | 6, 8, 9, 11 |
+| `crates/types/src/channel.rs` | Modified — protocol v2, new frames | 2, 5 |
+| `crates/types/src/config.rs` | Modified — GatewayConfig, AgentDefinition | 9, 11 |
+| `crates/types/src/runner.rs` | Modified — ChannelsConfig, SenderBinding in RunnerUserConfig | 6, 8 |
 | `crates/types/src/session.rs` | **New** — SessionStore trait, SessionRecord | 4 |
 | `crates/types/src/delegation.rs` | **New** — DelegationExecutor trait, request/result types | 10 |
 | `crates/types/src/error.rs` | Modified — add delegation error variants | 10 |
 | `crates/types/src/model.rs` | Modified — SubagentExecution progress kind | 10 |
-| `crates/types/src/lib.rs` | Modified — re-export new modules | 4, 6, 10 |
+| `crates/types/src/lib.rs` | Modified — re-export new modules | 4, 10 |
 | `crates/runtime/src/lib.rs` | Modified — remove shared tool context, add context parameter | 1 |
 | `crates/runtime/src/tool_execution.rs` | Modified — accept tool context parameter | 1 |
 | `crates/runtime/src/delegation.rs` | **New** — RuntimeDelegationExecutor | 10 |
-| `crates/gateway/src/lib.rs` | **Major evolution** — multi-session, auth, channel routing | 3, 4, 5, 6, 11 |
+| `crates/gateway/src/lib.rs` | **Major evolution** — multi-session, protocol v2 | 3, 4, 5, 11 |
 | `crates/gateway/src/session.rs` | **New** — UserState, SessionState | 3 |
-| `crates/gateway/src/sender_auth.rs` | **New** — SenderAuthPolicy | 6 |
 | `crates/gateway/src/turn_runner.rs` | Modified — pass tool context directly | 1 |
 | `crates/channels/Cargo.toml` | Modified — add telegram feature + deps | 8 |
-| `crates/channels/src/lib.rs` | Modified — re-export telegram module | 8 |
-| `crates/channels/src/telegram.rs` | **New** — TelegramAdapter | 8 |
-| `crates/memory/src/session_store.rs` | **New** — LibsqlSessionStore | 4, 6, 7 |
-| `crates/memory/src/schema.rs` | Modified — add migrations 0020-0022, required tables/indexes | 4, 6, 7 |
+| `crates/channels/src/lib.rs` | Modified — re-export telegram, sender_auth, session_map modules | 6, 7, 8 |
+| `crates/channels/src/sender_auth.rs` | **New** — SenderAuthPolicy | 6 |
+| `crates/channels/src/audit.rs` | **New** — AuditLogger for rejected senders | 6 |
+| `crates/channels/src/session_map.rs` | **New** — ChannelSessionMap (wraps SessionStore) | 7 |
+| `crates/channels/src/telegram.rs` | **New** — TelegramAdapter (in-process, calls gateway directly) | 8 |
+| `crates/memory/src/session_store.rs` | **New** — LibsqlSessionStore | 4, 7 |
+| `crates/memory/src/schema.rs` | Modified — add migrations 0020-0021, required tables/indexes | 4, 7 |
 | `crates/memory/migrations/0020_*.sql` | **New** — gateway_sessions | 4 |
-| `crates/memory/migrations/0021_*.sql` | **New** — sender_audit_log | 6 |
-| `crates/memory/migrations/0022_*.sql` | **New** — channel_session_mappings | 7 |
+| `crates/memory/migrations/0021_*.sql` | **New** — channel_session_mappings | 7 |
 | `crates/tools/src/delegation_tools.rs` | **New** — delegate_to_agent tool | 10 |
 | `crates/tools/src/lib.rs` | Modified — register_delegation_tools() | 10 |
-| `crates/runner/src/bootstrap.rs` | Modified — channel/auth/delegation wiring | 4, 6, 8, 9, 10 |
-| `crates/runner/src/bin/oxydra-vm.rs` | Modified — channel adapter startup, session store | 4, 8 |
+| `crates/runner/src/bootstrap.rs` | Modified — delegation wiring, agent definitions | 9, 10 |
+| `crates/runner/src/lib.rs` | Modified — channels config in bootstrap envelope, bot token env forwarding, session store wiring | 4, 6 |
+| `crates/runner/src/bin/oxydra-vm.rs` | Modified — read channels from envelope, spawn adapters, session store | 4, 7, 8 |
 | `crates/runner/Cargo.toml` | Modified — add channels dep with telegram feature | 8 |
 | `crates/tui/src/app.rs` | Modified — /new, /sessions, /switch handling | 5 |
 | `crates/tui/src/bin/oxydra-tui.rs` | Modified — --session flag, v2 Hello | 5 |
 | `crates/tui/src/ui_model.rs` | Modified — session info display | 5 |
 | `crates/tui/src/widgets.rs` | Modified — session info in status bar | 5 |
 | `crates/tui/src/channel_adapter.rs` | Modified — new frame handling | 5 |
+
+**Architecture:** Channel adapters run inside the VM alongside the gateway. They call gateway methods directly (no WebSocket). The runner's only channel responsibility is including `ChannelsConfig` in the bootstrap envelope and forwarding bot token env vars.
 
 ### New Crate Dependencies
 

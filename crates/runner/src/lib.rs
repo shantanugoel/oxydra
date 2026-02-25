@@ -192,7 +192,10 @@ impl Runner {
             copy_agent_config_to_workspace(&workspace)?;
             let mut config_env = collect_config_env_vars();
             // Also forward bot token env vars from channel config.
-            let bot_token_env = collect_channel_bot_token_env_vars(&user_config.channels);
+            // Pass CLI extra_env so we can suppress false warnings when the token
+            // is already being forwarded via -e / --env-file.
+            let bot_token_env =
+                collect_channel_bot_token_env_vars(&user_config.channels, &request.extra_env);
             config_env.extend(bot_token_env);
             let shell_config_env = collect_shell_config_env_keys();
             (config_env, shell_config_env)
@@ -2270,13 +2273,43 @@ fn collect_shell_config_env_keys() -> Vec<String> {
 /// Collect bot token environment variables from the user's channel config.
 /// For each enabled channel with a `bot_token_env` field, resolve the value
 /// from the runner's environment and return `KEY=VALUE` pairs.
-fn collect_channel_bot_token_env_vars(channels: &types::ChannelsConfig) -> Vec<String> {
+///
+/// `cli_extra_env` is the set of `KEY=VALUE` pairs already supplied via
+/// `-e` / `--env-file` CLI flags.  If a token is already covered there, we
+/// skip the process-env lookup (and don't warn) because Docker will receive
+/// the value through the CLI path.
+fn collect_channel_bot_token_env_vars(
+    channels: &types::ChannelsConfig,
+    cli_extra_env: &[String],
+) -> Vec<String> {
     let mut result = Vec::new();
     for env_name in channels.bot_token_env_refs() {
-        if let Ok(value) = std::env::var(&env_name)
-            && !value.is_empty()
-        {
-            result.push(format!("{env_name}={value}"));
+        // If the caller already provided the value via -e / --env-file, don't
+        // duplicate it and don't warn — Docker will get it via that path.
+        let cli_prefix = format!("{env_name}=");
+        if cli_extra_env.iter().any(|e| e.starts_with(&cli_prefix)) {
+            continue;
+        }
+
+        match std::env::var(&env_name) {
+            Ok(value) if !value.is_empty() => {
+                result.push(format!("{env_name}={value}"));
+            }
+            Ok(_) => {
+                warn!(
+                    env_var = %env_name,
+                    "channel bot_token_env is set but the environment variable is empty; \
+                     export the token before launching the runner, or pass it via -e {env_name}=<token>"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    env_var = %env_name,
+                    "channel bot_token_env references an environment variable that is not set in \
+                     the runner process; export it before launching, or pass it via \
+                     -e {env_name}=<token> or --env-file"
+                );
+            }
         }
     }
     result

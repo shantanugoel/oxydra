@@ -145,8 +145,27 @@ async fn run() -> Result<(), VmError> {
         runtime = runtime.with_memory_retrieval(memory);
     }
 
+    // Wrap runtime in Arc so it can be shared with the turn runner and
+    // the delegation executor.
+    let runtime_arc = Arc::new(runtime);
+
+    // If agents are defined in config, wire a runtime-backed delegation
+    // executor into the global holder so the delegation tool (registered
+    // during bootstrap) can invoke it at runtime.
+    if !bootstrap.config.agents.is_empty() {
+        let exec = runtime::RuntimeDelegationExecutor::new(
+            runtime_arc.clone(),
+            bootstrap.config.agents.clone(),
+        );
+        let boxed: Arc<dyn types::DelegationExecutor> = Arc::new(exec);
+        match types::set_global_delegation_executor(boxed) {
+            Ok(()) => info!("delegation executor initialized"),
+            Err(()) => warn!("delegation executor already initialized"),
+        }
+    }
+
     let turn_runner = Arc::new(RuntimeGatewayTurnRunner::new(
-        Arc::new(runtime),
+        runtime_arc,
         provider_id,
         model_id,
     ));

@@ -6512,10 +6512,12 @@ name = "types"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "once_cell",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",

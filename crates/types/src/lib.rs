@@ -1,5 +1,6 @@
 mod channel;
 mod config;
+mod delegation;
 mod error;
 mod memory;
 mod model;
@@ -21,10 +22,14 @@ pub use channel::{
     GatewayTurnState, GatewayTurnStatus,
 };
 pub use config::{
-    AgentConfig, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
+    AgentConfig, AgentDefinition, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
     ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig,
     RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SchedulerConfig, ShellConfig,
     SummarizationConfig, ToolsConfig, UnknownModelCaps, WebSearchConfig, validate_config_version,
+};
+pub use delegation::{
+    DelegationExecutor, DelegationRequest, DelegationResult, DelegationStatus, DelegationProgressSender,
+    set_global_delegation_executor, get_global_delegation_executor,
 };
 pub use error::{
     ChannelError, MemoryError, ProviderError, RuntimeError, SchedulerError, ToolError,

@@ -27,6 +27,8 @@ pub struct AgentConfig {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentDefinition>,
 }
 
 impl Default for AgentConfig {
@@ -41,6 +43,7 @@ impl Default for AgentConfig {
             catalog: CatalogConfig::default(),
             tools: ToolsConfig::default(),
             scheduler: SchedulerConfig::default(),
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -432,6 +435,23 @@ impl ProviderConfigs {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentDefinition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ProviderSelection>,
+    /// Tool allowlist for this agent. `None` means all tools are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliabilityConfig {
     #[serde(default = "default_max_attempts")]
@@ -679,6 +699,10 @@ pub enum ConfigError {
     InvalidReliabilityBackoff { base_ms: u64, max_ms: u64 },
     #[error("memory remote mode requires an auth token for `{remote_url}`")]
     MissingMemoryAuthToken { remote_url: String },
+    #[error("agent `{agent}` references unknown tool `{tool}`")]
+    UnknownAgentTool { agent: String, tool: String },
+    #[error("agent `{agent}` references system_prompt_file `{file}` which does not exist")]
+    SystemPromptFileNotFound { agent: String, file: String },
 }
 
 pub fn validate_config_version(config_version: &str) -> Result<(), ConfigError> {

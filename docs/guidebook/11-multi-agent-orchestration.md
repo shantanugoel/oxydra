@@ -8,6 +8,10 @@ This chapter describes the planned design for subagent spawning, delegation, sta
 
 ## Subagent Delegation Model
 
+Status (update): Partial implementation complete — Agent definitions and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap and the VM wires a `RuntimeDelegationExecutor` into the global executor at startup. This provides a working end-to-end delegation path (parent → subagent → result) as described below. Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
+
+
+
 ### SubagentBrief
 
 Cross-agent delegation uses a structured contract rather than raw transcript copying. This reduces token waste and makes delegation explicit and auditable.

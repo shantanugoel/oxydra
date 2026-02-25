@@ -23,10 +23,12 @@ mod memory;
 mod provider_response;
 mod scheduler_executor;
 mod scrubbing;
+mod delegation;
 mod tool_execution;
 
 pub use scheduler_executor::{SchedulerExecutor, SchedulerNotifier};
 pub use scrubbing::PathScrubMapping;
+pub use delegation::RuntimeDelegationExecutor;
 
 /// Trait that the gateway layer implements so the scheduler executor can
 /// trigger agent turns without depending on the gateway crate directly.

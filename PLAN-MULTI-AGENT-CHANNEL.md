@@ -1090,7 +1090,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 9: Agent Definitions & Registry
+### Step 9: Agent Definitions & Registry ✅ DONE
 
 **Goal:** Multiple agent configurations (system prompt, model, tools) defined in config.
 
@@ -1138,7 +1138,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 10: Multi-Agent Delegation
+### Step 10: Multi-Agent Delegation ✅ DONE
 
 **Goal:** Parent agent can delegate to named subagents and receive results.
 

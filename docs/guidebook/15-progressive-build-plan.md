@@ -22,7 +22,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring. **Resolved:** multi-line input (Alt+Enter), runtime activity visibility (`TurnProgress`). **Protocol v2:** `runtime_session_id` renamed to `session_id` throughout; `GatewayClientHello` gains `create_new_session` field; `ToolExecutionContext` threaded as parameter (not shared state) for concurrent-session safety. |
 | 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides, cached catalog resolution, `skip_catalog_validation` escape hatch, updated CLI (`fetch --pinned`, unfiltered cache) |
 | 14 | External channels + identity mapping | **In Progress** | Auth/identity pipeline implemented: `ChannelsConfig`, `TelegramChannelConfig`, `SenderBinding` types; `SenderAuthPolicy` (default-deny); `AuditLogger` (JSON-lines); bootstrap envelope propagation; bot token env var forwarding. Channel session mapping and Telegram adapter remaining. |
-| 15 | Multi-agent orchestration | Planned | |
+| 15 | Multi-agent orchestration | In Progress | Agent definitions and delegation primitives implemented (delegate_to_agent tool, RuntimeDelegationExecutor). Remaining: state graph engine, lane-based queueing, session tree tracking. |
 | 16 | Observability (OpenTelemetry) | Planned | |
 | 17 | MCP support | Planned | |
 | 18 | Session lifecycle controls | **Complete** | |

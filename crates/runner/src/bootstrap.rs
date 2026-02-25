@@ -19,7 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tools::{
     RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
-    register_memory_tools, register_scheduler_tools,
+    register_memory_tools, register_scheduler_tools, register_delegation_tools,
 };
 use types::{
     AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
@@ -539,6 +539,62 @@ pub async fn bootstrap_vm_runtime_with_paths(
     } else {
         None
     };
+
+    // Validate agent definitions (if any) against available providers/tools and local prompt files.
+    if !config.agents.is_empty() {
+        for (agent_name, def) in config.agents.iter() {
+            if let Some(selection) = &def.selection {
+                // Validate provider exists in the registry
+                config
+                    .providers
+                    .resolve(&selection.provider.0)
+                    .map_err(|_| BootstrapError::UnsupportedProvider {
+                        provider: selection.provider.0.clone(),
+                    })?;
+                if selection.model.0.trim().is_empty() {
+                    return Err(BootstrapError::ConfigValidation(
+                        ConfigError::EmptyModelForProvider {
+                            provider: selection.provider.0.clone(),
+                        },
+                    ));
+                }
+            }
+
+            if let Some(tool_list) = &def.tools {
+                for tool_name in tool_list.iter() {
+                    if registry.get(tool_name).is_none() {
+                        return Err(BootstrapError::ConfigValidation(
+                            ConfigError::UnknownAgentTool {
+                                agent: agent_name.clone(),
+                                tool: tool_name.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+
+            if let Some(prompt_file) = &def.system_prompt_file {
+                let candidate = workspace_root
+                    .as_ref()
+                    .map(|r| r.join(prompt_file))
+                    .unwrap_or_else(|| PathBuf::from(prompt_file));
+                if !candidate.is_file() {
+                    return Err(BootstrapError::ConfigValidation(
+                        ConfigError::SystemPromptFileNotFound {
+                            agent: agent_name.clone(),
+                            file: prompt_file.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    // Register delegation tool so it is visible in the runtime tool registry.
+    // The actual executor is still only wired when agent definitions exist; the
+    // tool will return a clear error if invoked without a concrete executor.
+    register_delegation_tools(&mut registry);
+    tracing::info!("delegation tools registered");
 
     let startup_status = availability.startup_status(bootstrap.as_ref());
     let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());

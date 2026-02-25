@@ -6,6 +6,7 @@ mod model;
 mod provider;
 mod runner;
 mod scheduler;
+mod session;
 mod tool;
 mod tracing;
 
@@ -54,5 +55,6 @@ pub use scheduler::{
     NotificationPolicy, ScheduleCadence, ScheduleDefinition, SchedulePatch, ScheduleRunRecord,
     ScheduleRunStatus, ScheduleSearchFilters, ScheduleSearchResult, ScheduleStatus,
 };
+pub use session::{SessionRecord, SessionStore};
 pub use tool::{FunctionDecl, SafetyTier, Tool, ToolExecutionContext, ToolParameterSchema};
 pub use tracing::init_tracing;

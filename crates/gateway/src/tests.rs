@@ -779,3 +779,422 @@ async fn health_check_includes_startup_status_when_gateway_has_bootstrap_state()
 
     server_task.abort();
 }
+
+// ===================================================================
+// Multi-session tests (Step 3)
+// ===================================================================
+
+#[tokio::test]
+async fn create_new_session_creates_fresh_session_with_uuid() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+    let mut socket = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+
+    let frame = receive_server_frame(&mut socket).await;
+    match frame {
+        GatewayServerFrame::HelloAck(ack) => {
+            assert_eq!(ack.session.user_id, "alice");
+            assert_ne!(ack.session.session_id, "runtime-alice");
+            assert_eq!(ack.session.session_id.len(), 36);
+        }
+        other => panic!("expected hello_ack, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn two_sessions_for_same_user_run_turns_concurrently() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![
+        ScriptedTurn::completed_with_delay(
+            vec![(Duration::from_millis(0), "ses1-delta")],
+            "ses1-done",
+            Duration::from_millis(200),
+        ),
+        ScriptedTurn::completed(
+            vec![(Duration::from_millis(0), "ses2-delta")],
+            "ses2-done",
+        ),
+    ]));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+
+    let mut socket1 = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-1".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let session_id_1 = match receive_server_frame(&mut socket1).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    let mut socket2 = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket2,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-2".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let session_id_2 = match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+    assert_ne!(session_id_1, session_id_2);
+
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-1".to_owned(),
+            session_id: session_id_1,
+            turn_id: "turn-1".to_owned(),
+            prompt: "task 1".to_owned(),
+        }),
+    )
+    .await;
+    send_client_frame(
+        &mut socket2,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-2".to_owned(),
+            session_id: session_id_2,
+            turn_id: "turn-2".to_owned(),
+            prompt: "task 2".to_owned(),
+        }),
+    )
+    .await;
+
+    match receive_server_frame(&mut socket1).await {
+        GatewayServerFrame::TurnStarted(s) => assert_eq!(s.turn.turn_id, "turn-1"),
+        other => panic!("expected turn_started on socket1, got {other:?}"),
+    }
+    match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::TurnStarted(s) => assert_eq!(s.turn.turn_id, "turn-2"),
+        other => panic!("expected turn_started on socket2, got {other:?}"),
+    }
+
+    let _ = receive_server_frame(&mut socket2).await;
+    match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::TurnCompleted(c) => assert_eq!(c.turn.turn_id, "turn-2"),
+        other => panic!("expected turn_completed on socket2, got {other:?}"),
+    }
+
+    let _ = receive_server_frame(&mut socket1).await;
+    match receive_server_frame(&mut socket1).await {
+        GatewayServerFrame::TurnCompleted(c) => assert_eq!(c.turn.turn_id, "turn-1"),
+        other => panic!("expected turn_completed on socket1, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn session_id_in_hello_joins_existing_session() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![ScriptedTurn::completed(
+        vec![(Duration::from_millis(0), "delta")],
+        "done",
+    )]));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+
+    let mut socket1 = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-1".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let session_id = match receive_server_frame(&mut socket1).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn".to_owned(),
+            session_id: session_id.clone(),
+            turn_id: "turn-1".to_owned(),
+            prompt: "hello".to_owned(),
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket1).await;
+    let _ = receive_server_frame(&mut socket1).await;
+    let _ = receive_server_frame(&mut socket1).await;
+    drop(socket1);
+
+    let mut socket2 = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket2,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-2".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: Some(session_id.clone()),
+            create_new_session: false,
+        }),
+    )
+    .await;
+    match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::HelloAck(ack) => assert_eq!(ack.session.session_id, session_id),
+        other => panic!("expected hello_ack, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn concurrent_turn_limit_enforced() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![
+        ScriptedTurn::cancellation_aware(vec![(Duration::from_millis(5), "working")]),
+    ]));
+    let gateway = Arc::new(GatewayServer::with_options(
+        runtime as Arc<dyn GatewayTurnRunner>,
+        None,
+        None,
+        1,
+    ));
+    let app = Arc::clone(&gateway).router();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("local addr");
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.ok(); });
+
+    let mut socket1 = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-1".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let sid1 = match receive_server_frame(&mut socket1).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-1".to_owned(),
+            session_id: sid1,
+            turn_id: "turn-1".to_owned(),
+            prompt: "long".to_owned(),
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket1).await;
+
+    let mut socket2 = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket2,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-2".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let sid2 = match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+    send_client_frame(
+        &mut socket2,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-2".to_owned(),
+            session_id: sid2,
+            turn_id: "turn-2".to_owned(),
+            prompt: "blocked".to_owned(),
+        }),
+    )
+    .await;
+
+    match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::Error(e) => {
+            assert!(e.message.contains("too many concurrent turns"), "got: {}", e.message);
+        }
+        other => panic!("expected error frame, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+// ===================================================================
+// Session persistence tests (Step 4)
+// ===================================================================
+
+async fn build_gateway_with_session_store(
+    runtime: Arc<dyn GatewayTurnRunner>,
+) -> (Arc<GatewayServer>, Arc<dyn types::SessionStore>) {
+    let db = libsql::Builder::new_local(":memory:").build().await.expect("db");
+    let conn = db.connect().expect("connect");
+    conn.execute_batch(include_str!("../../memory/migrations/0020_create_gateway_sessions.sql"))
+        .await
+        .expect("migration");
+    let store: Arc<dyn types::SessionStore> = Arc::new(memory::LibsqlSessionStore::new(conn));
+    let gateway = Arc::new(GatewayServer::with_session_store(runtime, None, store.clone()));
+    (gateway, store)
+}
+
+async fn spawn_gateway_with_session_store(
+    runtime: Arc<dyn GatewayTurnRunner>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<dyn types::SessionStore>) {
+    let (gateway, store) = build_gateway_with_session_store(runtime).await;
+    let app = Arc::clone(&gateway).router();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.ok(); });
+    (address, task, store)
+}
+
+#[tokio::test]
+async fn session_persisted_to_store_on_creation() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (address, server_task, store) =
+        spawn_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
+    let mut socket = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let sid = match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+    let record = store.get_session(&sid).await.expect("get").expect("exists");
+    assert_eq!(record.user_id, "alice");
+    assert_eq!(record.agent_name, "default");
+    assert!(!record.archived);
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn touch_session_called_on_turn_completion() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![ScriptedTurn::completed(
+        vec![(Duration::from_millis(0), "hi")],
+        "hello",
+    )]));
+    let (address, server_task, store) =
+        spawn_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
+    let mut socket = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let sid = match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+    let before = store.get_session(&sid).await.unwrap().unwrap().last_active_at.clone();
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn".to_owned(),
+            session_id: sid.clone(),
+            turn_id: "turn-1".to_owned(),
+            prompt: "greet".to_owned(),
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket).await;
+    let _ = receive_server_frame(&mut socket).await;
+    match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::TurnCompleted(_) => {}
+        other => panic!("expected turn_completed, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let after = store.get_session(&sid).await.unwrap().unwrap().last_active_at;
+    assert!(after >= before, "last_active_at should be updated");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn internal_api_create_and_list_sessions() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (gateway, store) =
+        build_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
+    let _s1 = gateway.create_or_get_session("alice", None, "default", "tui").await.unwrap();
+    let _s2 = gateway.create_or_get_session("alice", None, "default", "tui").await.unwrap();
+    assert_eq!(store.list_sessions("alice", false).await.unwrap().len(), 2);
+    assert_eq!(gateway.list_user_sessions("alice", false).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn internal_api_get_existing_session_by_id() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (gateway, _store) =
+        build_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
+    let ses = gateway.create_or_get_session("alice", None, "default", "tui").await.unwrap();
+    let sid = ses.session_id.clone();
+    let same = gateway.create_or_get_session("alice", Some(&sid), "default", "tui").await.unwrap();
+    assert_eq!(same.session_id, sid);
+}
+
+#[tokio::test]
+async fn default_session_backward_compat() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+    let mut socket = connect_gateway(address).await;
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: false,
+        }),
+    )
+    .await;
+    match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::HelloAck(ack) => assert_eq!(ack.session.session_id, "runtime-alice"),
+        other => panic!("expected hello_ack, got {other:?}"),
+    }
+    server_task.abort();
+}

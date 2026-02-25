@@ -17,6 +17,7 @@ pub(crate) const REQUIRED_TABLES: &[&str] = &[
     "chunks_fts",
     "schedules",
     "schedule_runs",
+    "gateway_sessions",
 ];
 pub(crate) const REQUIRED_INDEXES: &[&str] = &[
     "idx_conversation_events_session_sequence",
@@ -30,6 +31,8 @@ pub(crate) const REQUIRED_INDEXES: &[&str] = &[
     "idx_schedules_status",
     "idx_schedules_name",
     "idx_schedule_runs_lookup",
+    "idx_gateway_sessions_user_active",
+    "idx_gateway_sessions_parent",
 ];
 pub(crate) const REQUIRED_TRIGGERS: &[&str] = &[
     "trg_chunks_fts_ai",
@@ -119,6 +122,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: "0019_create_schedule_runs_table",
         sql: include_str!("../migrations/0019_create_schedule_runs_table.sql"),
+    },
+    Migration {
+        version: "0020_create_gateway_sessions",
+        sql: include_str!("../migrations/0020_create_gateway_sessions.sql"),
     },
 ];
 

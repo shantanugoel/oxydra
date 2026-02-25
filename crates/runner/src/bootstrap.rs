@@ -62,6 +62,7 @@ pub struct VmBootstrapRuntime {
     pub provider: Box<dyn Provider>,
     pub memory: Option<Arc<dyn MemoryRetrieval>>,
     pub scheduler_store: Option<Arc<dyn memory::SchedulerStore>>,
+    pub session_store: Option<Arc<dyn types::SessionStore>>,
     pub runtime_limits: RuntimeLimits,
     pub tool_registry: ToolRegistry,
     pub tool_availability: ToolAvailability,
@@ -543,12 +544,33 @@ pub async fn bootstrap_vm_runtime_with_paths(
     let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());
     let system_prompt = build_system_prompt(paths, bootstrap.as_ref(), scheduler_store.is_some());
 
+    // Build session store for gateway session persistence.
+    let session_store: Option<Arc<dyn types::SessionStore>> = if let Some(ref backend) =
+        memory_backend
+    {
+        match backend.connect_for_scheduler().await {
+            Ok(conn) => {
+                let store: Arc<dyn types::SessionStore> =
+                    Arc::new(memory::LibsqlSessionStore::new(conn));
+                tracing::info!("session store initialized");
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to create session store; session persistence disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(VmBootstrapRuntime {
         bootstrap,
         config,
         provider,
         memory,
         scheduler_store,
+        session_store,
         runtime_limits,
         tool_registry: registry,
         tool_availability: availability,

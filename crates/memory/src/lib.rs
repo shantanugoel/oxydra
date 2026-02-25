@@ -4,9 +4,11 @@ mod errors;
 mod indexing;
 pub mod scheduler_store;
 mod schema;
+pub mod session_store;
 
 pub use cadence::{format_in_timezone, next_run_for_cadence, parse_cadence, validate_cadence};
 pub use scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
+pub use session_store::LibsqlSessionStore;
 
 use std::collections::HashMap;
 

@@ -87,11 +87,44 @@ Channel Adapter                Gateway                    Runtime
 
 ### Session Management
 
-Sessions are managed via `UserSessionState`, identified by `user_id`:
+The gateway uses a two-level session model: users contain sessions, and each session tracks its own state independently.
 
-- Each session maintains its own `session_id`
-- A broadcast channel delivers server frames to all connected clients for that session
-- An `active_turn: Mutex<Option<ActiveTurnState>>` tracks the current turn
+**User State** (`UserState`):
+- Keyed by `user_id`
+- Contains a `RwLock<HashMap<String, Arc<SessionState>>>` of all sessions for that user
+- Tracks per-user concurrent turn count via `AtomicU32` for concurrency limiting
+
+**Session State** (`SessionState`):
+- Keyed by `session_id` (UUID v7 for new sessions, deterministic `runtime-{user_id}` for backward compatibility)
+- Each session has its own broadcast channel, active turn tracker, agent name, and optional parent session ID (for subagent sessions)
+- A `latest_terminal_frame` buffer per session supports reconnection
+
+**Session creation follows three paths:**
+- `create_new_session: true` in Hello → generates a UUID v7 session ID
+- `session_id: Some(id)` in Hello → joins an existing session (in-memory or resumed from the session store)
+- Neither set → backward-compatible deterministic session ID `runtime-{user_id}`
+
+**Session persistence:**
+- The `SessionStore` trait (defined in the `types` crate, implemented as `LibsqlSessionStore` in the `memory` crate) persists session metadata to a `gateway_sessions` SQLite table
+- Sessions are persisted on creation and touched (`last_active_at` updated) on turn completion
+- Sessions can be resumed from the store when not found in memory (e.g., after gateway restart)
+- The store supports listing, archiving, and parent-child relationships
+
+### Internal API for Channel Adapters
+
+The `GatewayServer` exposes a programmatic internal API for in-process channel adapters (Telegram, Discord, etc.) that runs alongside the WebSocket handler:
+
+```rust
+impl GatewayServer {
+    pub async fn create_or_get_session(...) -> Result<Arc<SessionState>, String>;
+    pub async fn submit_turn(...) -> Option<GatewayServerFrame>;
+    pub async fn cancel_session_turn(...) -> Option<GatewayServerFrame>;
+    pub fn subscribe_events(...) -> broadcast::Receiver<GatewayServerFrame>;
+    pub async fn list_user_sessions(...) -> Result<Vec<SessionRecord>, String>;
+}
+```
+
+Both the WebSocket handler and in-process adapters call these same methods, ensuring identical behavior regardless of transport. The existing `Channel` trait is for WebSocket-based client adapters (TUI); in-process adapters use the internal API directly and do not implement `Channel`.
 
 ### Turn Execution
 
@@ -294,7 +327,8 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 
 ## Current Limitations
 
-- **Single-user isolation:** Sessions are isolated per user but true lane-based queueing (where background tasks don't block real-time chat) is implemented as mutex-based rejection — a new turn is rejected if one is already active, rather than queued
+- **Per-user concurrent turn limit:** Configurable via `max_concurrent_turns` (default: 3). When exceeded, new turns are rejected with an error frame rather than queued
 - **No external channels yet:** Only the TUI adapter is implemented; external channel adapters (Telegram, Discord, Slack) are planned for Phase 14
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **Scheduled notifications are session-scoped:** If no user session is connected when a scheduled notification fires, the notification is lost (results persist in memory via the scheduled turn's session, but the push notification is not queued)
+- **No session lifecycle UX:** `/new`, `/sessions`, `/switch` commands are planned for Phase 18

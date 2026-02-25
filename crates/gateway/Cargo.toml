@@ -14,8 +14,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tools = { path = "../tools" }
 tracing = "0.1"
 types = { path = "../types" }
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
+libsql = "0.9"
+memory = { path = "../memory" }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.28"
 url = "2"

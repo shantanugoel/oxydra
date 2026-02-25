@@ -150,10 +150,20 @@ async fn run() -> Result<(), VmError> {
         provider_id,
         model_id,
     ));
-    let gateway = Arc::new(GatewayServer::with_startup_status(
-        turn_runner.clone(),
-        startup_status,
-    ));
+
+    // Build the gateway with optional session store for persistence.
+    let gateway = if let Some(session_store) = bootstrap.session_store {
+        Arc::new(GatewayServer::with_session_store(
+            turn_runner.clone(),
+            Some(startup_status),
+            session_store,
+        ))
+    } else {
+        Arc::new(GatewayServer::with_startup_status(
+            turn_runner.clone(),
+            startup_status,
+        ))
+    };
 
     // Spawn the scheduler executor as a background task when enabled.
     let scheduler_cancellation = CancellationToken::new();

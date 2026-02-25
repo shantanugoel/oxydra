@@ -87,7 +87,7 @@ impl SchedulerExecutor {
 
     async fn execute_schedule(&self, schedule: ScheduleDefinition) {
         let run_id = uuid::Uuid::new_v4().to_string();
-        let runtime_session_id = format!("scheduled:{}", schedule.schedule_id);
+        let session_id = format!("scheduled:{}", schedule.schedule_id);
         let started_at = Utc::now().to_rfc3339();
 
         let prompt = if schedule.notification_policy == NotificationPolicy::Conditional {
@@ -107,7 +107,7 @@ impl SchedulerExecutor {
             .turn_runner
             .run_scheduled_turn(
                 &schedule.user_id,
-                &runtime_session_id,
+                &session_id,
                 prompt,
                 child_cancellation,
             )

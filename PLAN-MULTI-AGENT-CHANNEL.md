@@ -405,16 +405,16 @@ Current state verified against actual code, not plan assumptions.
 
 | Type | Location | Current State |
 |------|----------|---------------|
-| `GatewaySession` | `types/src/channel.rs` | `{ user_id, runtime_session_id }` |
-| `GatewayClientHello` | `types/src/channel.rs` | `{ request_id, protocol_version, user_id, runtime_session_id? }` — will be updated: `runtime_session_id` → `session_id`, add `create_new_session` |
+| `GatewaySession` | `types/src/channel.rs` | `{ user_id, session_id }` ✅ renamed from `runtime_session_id` |
+| `GatewayClientHello` | `types/src/channel.rs` | `{ request_id, protocol_version, user_id, session_id?, create_new_session }` ✅ updated |
 | `GatewayClientFrame` | `types/src/channel.rs` | `Hello, SendTurn, CancelActiveTurn, HealthCheck` |
 | `GatewayServerFrame` | `types/src/channel.rs` | `HelloAck, TurnStarted, AssistantDelta, TurnCompleted, TurnCancelled, Error, HealthStatus, TurnProgress, ScheduledNotification` |
 | `RuntimeProgressKind` | `types/src/model.rs` | `ProviderCall, ToolExecution { tool_names }, RollingSummary` |
-| `GATEWAY_PROTOCOL_VERSION` | `types/src/channel.rs` | `1` |
+| `GATEWAY_PROTOCOL_VERSION` | `types/src/channel.rs` | `2` ✅ bumped from 1 |
 | `AgentConfig` | `types/src/config.rs` | No `gateway`, `channels`, or `agents` fields. Channels config will go in `RunnerUserConfig` (host-side, per-user). Agent definitions will go here. |
-| `ToolExecutionContext` | `types/src/tool.rs` | `{ user_id?, session_id? }` |
+| `ToolExecutionContext` | `types/src/tool.rs` | `{ user_id?, session_id? }` ✅ now threaded as parameter, not shared state |
 
-### Actual Gateway State (as-is)
+### Actual Gateway State (as-is, post Steps 1-2)
 
 ```rust
 // gateway/src/lib.rs
@@ -427,7 +427,7 @@ pub struct GatewayServer {
 
 struct UserSessionState {
     user_id: String,
-    runtime_session_id: String,                       // single session per user
+    session_id: String,                               // ✅ renamed from runtime_session_id
     events: broadcast::Sender<GatewayServerFrame>,
     active_turn: Mutex<Option<ActiveTurnState>>,      // one turn at a time
     latest_terminal_frame: Mutex<Option<GatewayServerFrame>>,
@@ -578,82 +578,72 @@ DelegationExecutor trait (in types, impl in runtime):
 
 Each step is self-contained, testable, and does not require rewriting any prior step.
 
-### Step 1: Fix Tool Execution Context Race
+### Step 1: Fix Tool Execution Context Race ✅ DONE
 
 **Goal:** Eliminate the shared mutable `ToolExecutionContext` before enabling concurrent sessions.
 
 **Crates:** `types`, `runtime`, `gateway`
 
-**Changes:**
+**Changes applied:**
 
 1. **`runtime/src/lib.rs`:**
-   - Remove the `tool_execution_context: Arc<Mutex<ToolExecutionContext>>` field from `AgentRuntime`
-   - Remove the `set_tool_execution_context()` method
-   - Add `tool_context: &ToolExecutionContext` parameter to `run_session_internal()`
-   - Thread it through to `execute_tool_call()` and `execute_tool_and_format()`
+   - Removed the `tool_execution_context: Arc<Mutex<ToolExecutionContext>>` field from `AgentRuntime`
+   - Removed the `set_tool_execution_context()` method
+   - Added `tool_context: &ToolExecutionContext` parameter to `run_session_internal()`
+   - `run_session()` passes `ToolExecutionContext::default()`
+   - `run_session_for_session()` constructs context from session_id
+   - `run_session_for_session_with_stream_events()` accepts `tool_context` parameter from caller
 
 2. **`runtime/src/tool_execution.rs`:**
-   - Change `execute_tool_call()` to accept `tool_context: &ToolExecutionContext` instead of reading from `self.tool_execution_context`
-   - Change `execute_tool_and_format()` similarly
+   - `execute_tool_call()` accepts `tool_context: &ToolExecutionContext` parameter and passes it to `execute_with_context()`
+   - `execute_tool_and_format()` accepts and threads `tool_context` parameter
 
-3. **`runtime/src/lib.rs` public API:**
-   - `run_session()` → add optional `tool_context` parameter (or new method variant)
-   - `run_session_for_session()` → construct context from `session_id` parameter
-   - `run_session_for_session_with_stream_events()` → construct context from parameters
+3. **`gateway/src/turn_runner.rs`:**
+   - `RuntimeGatewayTurnRunner::run_turn()` constructs `ToolExecutionContext { user_id, session_id }` locally and passes it to runtime
 
-4. **`gateway/src/turn_runner.rs`:**
-   - `RuntimeGatewayTurnRunner::run_turn()` → construct `ToolExecutionContext { user_id, session_id }` locally and pass it to runtime, instead of calling `set_tool_execution_context()`
-
-5. **`runtime/src/scheduler_executor.rs`:**
-   - Update scheduled turn execution to pass context explicitly
-
-**Verification:**
-- All existing tests pass (`cargo test -p runtime -p gateway`)
-- `cargo clippy --all-targets -D warnings` clean
-- Add test: two concurrent `run_session_internal` calls with different user_ids produce isolated tool contexts
+**Verification:** ✅ All tests pass, clippy clean
 
 ---
 
-### Step 2: Protocol Update for Multi-Session + Channels
+### Step 2: Protocol Update for Multi-Session + Channels ✅ DONE
 
-**Goal:** Update protocol version, add new Hello fields for session control, add new frame types. No backward compatibility with v1.
+**Goal:** Update protocol version, add new Hello fields for session control, rename `runtime_session_id` → `session_id` throughout.
 
-**Crates:** `types`, `gateway`, `tui`
+**Crates:** `types`, `gateway`, `tui`, `runner`
 
-**Changes:**
+**Changes applied:**
 
 1. **`types/src/channel.rs`:**
-   - Change `GATEWAY_PROTOCOL_VERSION` to `2`
-   - Remove `GATEWAY_MIN_SUPPORTED_VERSION` / `GATEWAY_MAX_SUPPORTED_VERSION` if they exist (just one constant)
-   - Update `GatewayClientHello`:
-     ```rust
-     pub struct GatewayClientHello {
-         pub request_id: String,
-         pub protocol_version: u16,
-         pub user_id: String,
-         #[serde(default, skip_serializing_if = "Option::is_none")]
-         pub session_id: Option<String>,         // join existing session
-         #[serde(default)]
-         pub create_new_session: bool,            // create fresh session
-     }
-     ```
-     Note: `runtime_session_id` renamed to `session_id` (no backward compat needed)
+   - `GATEWAY_PROTOCOL_VERSION` changed from `1` to `2`
+   - `GatewaySession.runtime_session_id` → `session_id`
+   - `GatewayClientHello.runtime_session_id` → `session_id`, added `create_new_session: bool` with `#[serde(default)]`
+   - `GatewaySendTurn.runtime_session_id` → `session_id`
+   - `GatewayCancelActiveTurn.runtime_session_id` → `session_id`
 
 2. **`gateway/src/lib.rs`:**
-   - Update protocol version check: reject anything `!= GATEWAY_PROTOCOL_VERSION`
-   - Handle new Hello fields directly (no version negotiation logic)
+   - `UserSessionState.runtime_session_id` → `session_id`
+   - `default_runtime_session_id()` → `default_session_id()`
+   - All internal references updated
 
-3. **`tui`:**
-   - Update Hello to send `protocol_version: 2`
-   - Use `session_id` field (was `runtime_session_id`)
+3. **`gateway/src/turn_runner.rs`:**
+   - `GatewayTurnRunner::run_turn()` parameter `runtime_session_id` → `session_id`
+   - `ScheduledTurnRunner::run_scheduled_turn()` parameter renamed
 
-4. **`runner/src/lib.rs`:**
-   - Update `probe_gateway_health()` to send v2 Hello
+4. **`tui/src/channel_adapter.rs`:**
+   - `TuiUiState.runtime_session_id` → `session_id`
+   - `build_hello_frame()` uses `session_id` field with `create_new_session: false`
+   - All frame handlers updated
 
-**Verification:**
-- v2 Hello accepted
-- Non-v2 Hello rejected
-- `runner --tui --probe` works with updated Hello
+5. **`runner/src/lib.rs`:**
+   - `RunnerTuiConnection.runtime_session_id` → `session_id`
+   - `probe_gateway_health()` sends v2 Hello with `create_new_session: false`
+
+6. **`runtime/src/lib.rs`:**
+   - `ScheduledTurnRunner` trait parameter renamed
+
+7. **All test files updated across all crates**
+
+**Verification:** ✅ All tests pass, clippy clean, zero remaining `runtime_session_id` references
 
 ---
 

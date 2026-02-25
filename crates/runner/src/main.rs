@@ -156,7 +156,7 @@ fn run() -> Result<(), CliError> {
             println!("mode=tui");
             println!("user_id={}", connection.user_id);
             println!("gateway_endpoint={}", connection.gateway_endpoint);
-            println!("runtime_session_id={}", connection.runtime_session_id);
+            println!("session_id={}", connection.session_id);
             println!("workspace_root={}", connection.workspace.root.display());
             return Ok(());
         }

@@ -610,6 +610,7 @@ async fn run_session_for_session_with_stream_events_forwards_provider_deltas() {
             &mut context,
             &CancellationToken::new(),
             events_tx,
+            &ToolExecutionContext::default(),
         )
         .await
         .expect("runtime turn should complete with stream observer");
@@ -2615,7 +2616,7 @@ mod scheduler_executor_tests {
         async fn run_scheduled_turn(
             &self,
             _user_id: &str,
-            _runtime_session_id: &str,
+            _session_id: &str,
             _prompt: String,
             _cancellation: CancellationToken,
         ) -> Result<String, RuntimeError> {

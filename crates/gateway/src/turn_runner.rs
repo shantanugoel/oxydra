@@ -6,7 +6,7 @@ pub trait GatewayTurnRunner: Send + Sync {
     async fn run_turn(
         &self,
         user_id: &str,
-        runtime_session_id: &str,
+        session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
@@ -45,25 +45,20 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
     async fn run_turn(
         &self,
         user_id: &str,
-        runtime_session_id: &str,
+        session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
     ) -> Result<Response, RuntimeError> {
-        // Set the per-turn tool execution context so memory tools resolve
-        // to the correct user namespace. This is safe for concurrent turns
-        // because the context is cloned per tool invocation in the runtime.
-        self.runtime
-            .set_tool_execution_context(types::ToolExecutionContext {
-                user_id: Some(user_id.to_owned()),
-                session_id: Some(runtime_session_id.to_owned()),
-            })
-            .await;
+        let tool_context = types::ToolExecutionContext {
+            user_id: Some(user_id.to_owned()),
+            session_id: Some(session_id.to_owned()),
+        };
 
         let mut context = {
             let mut contexts = self.contexts.lock().await;
             contexts
-                .entry(runtime_session_id.to_owned())
+                .entry(session_id.to_owned())
                 .or_insert_with(|| self.base_context())
                 .clone()
         };
@@ -83,16 +78,17 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         let (stream_events_tx, mut stream_events_rx): (RuntimeStreamEventSender, _) =
             mpsc::unbounded_channel();
         let runtime = Arc::clone(&self.runtime);
-        let runtime_session_id_owned = runtime_session_id.to_owned();
+        let session_id_owned = session_id.to_owned();
         let runtime_cancellation = cancellation.clone();
         let runtime_future = async move {
             let mut run_context = context;
             let result = runtime
                 .run_session_for_session_with_stream_events(
-                    &runtime_session_id_owned,
+                    &session_id_owned,
                     &mut run_context,
                     &runtime_cancellation,
                     stream_events_tx,
+                    &tool_context,
                 )
                 .await;
             (result, run_context)
@@ -126,7 +122,7 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         }
 
         let mut contexts = self.contexts.lock().await;
-        contexts.insert(runtime_session_id.to_owned(), context);
+        contexts.insert(session_id.to_owned(), context);
         result
     }
 }
@@ -136,13 +132,13 @@ impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
     async fn run_scheduled_turn(
         &self,
         user_id: &str,
-        runtime_session_id: &str,
+        session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
     ) -> Result<String, RuntimeError> {
         let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
         let response = self
-            .run_turn(user_id, runtime_session_id, prompt, cancellation, delta_tx)
+            .run_turn(user_id, session_id, prompt, cancellation, delta_tx)
             .await?;
         Ok(response.message.content.unwrap_or_default())
     }

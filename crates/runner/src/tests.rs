@@ -620,7 +620,7 @@ fn tui_connect_only_succeeds_against_running_gateway_endpoint() {
     assert_eq!(connection.user_id, "alice");
     assert_eq!(connection.workspace.root, workspace.root);
     assert_eq!(connection.gateway_endpoint, gateway_endpoint);
-    assert_eq!(connection.runtime_session_id, "runtime-alice");
+    assert_eq!(connection.session_id, "runtime-alice");
     assert!(backend.recorded_launches().is_empty());
 
     server_task.join().expect("mock gateway should shut down");
@@ -734,7 +734,7 @@ fn spawn_mock_gateway_probe_server(healthy: bool) -> (String, thread::JoinHandle
                 protocol_version: GATEWAY_PROTOCOL_VERSION,
                 session: types::GatewaySession {
                     user_id: user_id.clone(),
-                    runtime_session_id: format!("runtime-{user_id}"),
+                    session_id: format!("runtime-{user_id}"),
                 },
                 active_turn: None,
             }),
@@ -756,7 +756,7 @@ fn spawn_mock_gateway_probe_server(healthy: bool) -> (String, thread::JoinHandle
                 healthy,
                 session: Some(types::GatewaySession {
                     user_id: user_id.clone(),
-                    runtime_session_id: format!("runtime-{user_id}"),
+                    session_id: format!("runtime-{user_id}"),
                 }),
                 active_turn: None,
                 startup_status: None,

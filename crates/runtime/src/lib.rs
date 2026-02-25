@@ -35,7 +35,7 @@ pub trait ScheduledTurnRunner: Send + Sync {
     async fn run_scheduled_turn(
         &self,
         user_id: &str,
-        runtime_session_id: &str,
+        session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
     ) -> Result<String, RuntimeError>;
@@ -113,7 +113,6 @@ pub struct AgentRuntime {
     stream_buffer_size: usize,
     memory: Option<Arc<dyn Memory>>,
     memory_retrieval: Option<Arc<dyn MemoryRetrieval>>,
-    tool_execution_context: std::sync::Arc<tokio::sync::Mutex<ToolExecutionContext>>,
     path_scrub_mappings: Vec<PathScrubMapping>,
     system_prompt: Option<String>,
 }
@@ -131,9 +130,6 @@ impl AgentRuntime {
             stream_buffer_size: DEFAULT_STREAM_BUFFER_SIZE,
             memory: None,
             memory_retrieval: None,
-            tool_execution_context: std::sync::Arc::new(tokio::sync::Mutex::new(
-                ToolExecutionContext::default(),
-            )),
             path_scrub_mappings: Vec::new(),
             system_prompt: None,
         }
@@ -178,12 +174,6 @@ impl AgentRuntime {
         self
     }
 
-    /// Set the per-turn tool execution context (user_id, session_id) that
-    /// memory tools use to scope operations to the correct user namespace.
-    pub async fn set_tool_execution_context(&self, context: ToolExecutionContext) {
-        *self.tool_execution_context.lock().await = context;
-    }
-
     pub fn limits(&self) -> &RuntimeLimits {
         &self.limits
     }
@@ -193,8 +183,14 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
-        self.run_session_internal(None, context, cancellation, None)
-            .await
+        self.run_session_internal(
+            None,
+            context,
+            cancellation,
+            None,
+            &ToolExecutionContext::default(),
+        )
+        .await
     }
 
     pub async fn run_session_for_session(
@@ -203,7 +199,11 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
-        self.run_session_internal(Some(session_id), context, cancellation, None)
+        let tool_context = ToolExecutionContext {
+            user_id: None,
+            session_id: Some(session_id.to_owned()),
+        };
+        self.run_session_internal(Some(session_id), context, cancellation, None, &tool_context)
             .await
     }
 
@@ -213,9 +213,16 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
         stream_events: RuntimeStreamEventSender,
+        tool_context: &ToolExecutionContext,
     ) -> Result<Response, RuntimeError> {
-        self.run_session_internal(Some(session_id), context, cancellation, Some(stream_events))
-            .await
+        self.run_session_internal(
+            Some(session_id),
+            context,
+            cancellation,
+            Some(stream_events),
+            tool_context,
+        )
+        .await
     }
 
     pub async fn restore_session(
@@ -256,6 +263,7 @@ impl AgentRuntime {
         context: &mut Context,
         cancellation: &CancellationToken,
         stream_events: Option<RuntimeStreamEventSender>,
+        tool_context: &ToolExecutionContext,
     ) -> Result<Response, RuntimeError> {
         if context.tools.is_empty() {
             context.tools = self.tool_registry.schemas();
@@ -391,7 +399,7 @@ impl AgentRuntime {
                     if !current_batch.is_empty() {
                         let futures = current_batch
                             .drain(..)
-                            .map(|tc| self.execute_tool_and_format(tc, cancellation));
+                            .map(|tc| self.execute_tool_and_format(tc, cancellation, tool_context));
                         let batch_results = futures::future::join_all(futures).await;
                         for result in batch_results {
                             let message = result?;
@@ -416,7 +424,7 @@ impl AgentRuntime {
                     }
 
                     let result = self
-                        .execute_tool_and_format(tool_call, cancellation)
+                        .execute_tool_and_format(tool_call, cancellation, tool_context)
                         .await?;
                     context.messages.push(result.clone());
                     self.persist_message_if_needed(session_id, &mut next_memory_sequence, &result)
@@ -427,7 +435,7 @@ impl AgentRuntime {
             if !current_batch.is_empty() {
                 let futures = current_batch
                     .drain(..)
-                    .map(|tc| self.execute_tool_and_format(tc, cancellation));
+                    .map(|tc| self.execute_tool_and_format(tc, cancellation, tool_context));
                 let batch_results = futures::future::join_all(futures).await;
                 for result in batch_results {
                     let message = result?;

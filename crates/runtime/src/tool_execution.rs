@@ -60,6 +60,7 @@ impl AgentRuntime {
         name: &str,
         arguments: &serde_json::Value,
         cancellation: &CancellationToken,
+        tool_context: &ToolExecutionContext,
     ) -> Result<String, RuntimeError> {
         let tool = self.tool_registry.get(name).ok_or_else(|| {
             RuntimeError::Tool(ToolError::ExecutionFailed {
@@ -106,11 +107,10 @@ impl AgentRuntime {
             translate_tool_arg_paths(name, &validation_args, &self.path_scrub_mappings);
 
         let arg_str = serde_json::to_string(&validation_args).map_err(ToolError::Serialization)?;
-        let context = self.tool_execution_context.lock().await.clone();
 
         tokio::select! {
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
-            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute_with_context(name, &arg_str, &context)) => match timed {
+            timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute_with_context(name, &arg_str, tool_context)) => match timed {
                 Ok(output) => output.map_err(RuntimeError::from),
                 Err(_) => Err(RuntimeError::BudgetExceeded),
             }
@@ -121,11 +121,12 @@ impl AgentRuntime {
         &self,
         tool_call: &ToolCall,
         cancellation: &CancellationToken,
+        tool_context: &ToolExecutionContext,
     ) -> Result<Message, RuntimeError> {
         tracing::debug!(tool = %tool_call.name, "executing tool call");
         let start = std::time::Instant::now();
         let output = match self
-            .execute_tool_call(&tool_call.name, &tool_call.arguments, cancellation)
+            .execute_tool_call(&tool_call.name, &tool_call.arguments, cancellation, tool_context)
             .await
         {
             Ok(out) => {

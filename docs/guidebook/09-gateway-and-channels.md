@@ -27,10 +27,10 @@ Communication between channels and the gateway uses typed JSON frames over WebSo
 
 ```rust
 pub enum GatewayClientFrame {
-    Hello { user_id: String },
-    SendTurn { content: String },
-    CancelActiveTurn,
-    HealthCheck,
+    Hello(GatewayClientHello),      // { user_id, session_id?, create_new_session }
+    SendTurn(GatewaySendTurn),      // { session_id, turn_id, prompt }
+    CancelActiveTurn(GatewayCancelActiveTurn),  // { session_id, turn_id }
+    HealthCheck(GatewayHealthCheck),
 }
 ```
 
@@ -38,17 +38,19 @@ pub enum GatewayClientFrame {
 
 ```rust
 pub enum GatewayServerFrame {
-    HelloAck { runtime_session_id: String },
-    TurnStarted { turn_id: String },
-    AssistantDelta { text: String },
-    TurnCompleted { final_message: String, usage: Option<UsageUpdate> },
-    TurnCancelled,
-    TurnProgress { progress: RuntimeProgressEvent },  // ← runtime activity notification
+    HelloAck(GatewayHelloAck),              // { session: GatewaySession, active_turn? }
+    TurnStarted(GatewayTurnStarted),
+    AssistantDelta(GatewayAssistantDelta),   // { delta: String }
+    TurnCompleted(GatewayTurnCompleted),     // { response: Response }
+    TurnCancelled(GatewayTurnCancelled),
+    TurnProgress(GatewayTurnProgress),       // ← runtime activity notification
     ScheduledNotification(GatewayScheduledNotification),  // ← scheduled task result
-    Error { message: String },
-    HealthStatus { ... },
+    Error(GatewayErrorFrame),
+    HealthStatus(GatewayHealthStatus),
 }
 ```
+
+`GatewaySession` contains `{ user_id, session_id }` and is included in most server frames for routing context.
 
 `TurnProgress` carries a `RuntimeProgressEvent` (provider call starting, tools executing, etc.) emitted by the runtime during multi-step execution. Channels decide how to surface it; the TUI shows the `progress.message` in the input bar title.
 
@@ -87,7 +89,7 @@ Channel Adapter                Gateway                    Runtime
 
 Sessions are managed via `UserSessionState`, identified by `user_id`:
 
-- Each session maintains its own `runtime_session_id`
+- Each session maintains its own `session_id`
 - A broadcast channel delivers server frames to all connected clients for that session
 - An `active_turn: Mutex<Option<ActiveTurnState>>` tracks the current turn
 
@@ -98,7 +100,7 @@ When a `SendTurn` frame arrives:
 1. The gateway locates the user's session
 2. If an active turn exists, the request is rejected with an error
 3. A `RuntimeGatewayTurnRunner` is created to bridge gateway and runtime
-4. The runner constructs a `Context` and calls `AgentRuntime::run_session`
+4. The runner constructs a `Context` and a per-turn `ToolExecutionContext` (with user_id and session_id), then calls `AgentRuntime::run_session_for_session_with_stream_events`, passing the tool context as a parameter (not stored as shared state)
 5. Stream items from the runtime are forwarded according to type:
    - `StreamItem::Text(delta)` → published as an `AssistantDelta` frame
    - `StreamItem::Progress(event)` → published as a `TurnProgress` frame (channels display it however fits their UX; the TUI shows it in the input bar title)
@@ -146,8 +148,8 @@ The `TuiChannelAdapter` implements the `Channel` trait as a WebSocket client to 
 Uses `tokio-tungstenite` to establish a WebSocket connection to the gateway's `/ws` endpoint. The connection flow:
 
 1. Connect to WebSocket URL (from `gateway-endpoint` marker file)
-2. Send `Hello { user_id }` frame
-3. Receive `HelloAck { runtime_session_id }`
+2. Send `Hello { user_id, session_id?, create_new_session }` frame
+3. Receive `HelloAck { session: GatewaySession }`
 4. Begin listening for server frames
 
 ### State Management
@@ -226,7 +228,7 @@ When the reader task's channel closes (WebSocket disconnect):
 
 1. `ConnectionState` transitions to `Disconnected`, then `Reconnecting` with exponential backoff (250ms → 5s cap, with jitter).
 2. Old reader/writer task handles are aborted.
-3. On successful reconnect: new socket is split, new tasks spawned, `Hello` is sent with the prior `runtime_session_id` for session resume.
+3. On successful reconnect: new socket is split, new tasks spawned, `Hello` is sent with the prior `session_id` for session resume.
 4. On `HelloAck`: `ConnectionState` returns to `Connected`, input re-enabled.
 5. Queued outbound frames are dropped during reconnection — the user must re-submit.
 

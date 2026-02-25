@@ -22,10 +22,10 @@ use tui::{ChatMessage, ConnectionState, TuiChannelAdapter, TuiViewModel};
 
 // ── Test helpers ────────────────────────────────────────────────────────
 
-fn session(runtime_session_id: &str) -> GatewaySession {
+fn session(session_id: &str) -> GatewaySession {
     GatewaySession {
         user_id: "alice".to_owned(),
-        runtime_session_id: runtime_session_id.to_owned(),
+        session_id: session_id.to_owned(),
     }
 }
 
@@ -37,29 +37,29 @@ fn turn_status(turn_id: &str, state: GatewayTurnState) -> GatewayTurnStatus {
 }
 
 fn hello_ack_frame(
-    runtime_session_id: &str,
+    session_id: &str,
     active_turn: Option<GatewayTurnStatus>,
 ) -> GatewayServerFrame {
     GatewayServerFrame::HelloAck(GatewayHelloAck {
         request_id: "req-hello".to_owned(),
         protocol_version: GATEWAY_PROTOCOL_VERSION,
-        session: session(runtime_session_id),
+        session: session(session_id),
         active_turn,
     })
 }
 
-fn turn_started_frame(turn_id: &str, runtime_session_id: &str) -> GatewayServerFrame {
+fn turn_started_frame(turn_id: &str, session_id: &str) -> GatewayServerFrame {
     GatewayServerFrame::TurnStarted(GatewayTurnStarted {
         request_id: "req-turn".to_owned(),
-        session: session(runtime_session_id),
+        session: session(session_id),
         turn: turn_status(turn_id, GatewayTurnState::Running),
     })
 }
 
-fn delta_frame(turn_id: &str, runtime_session_id: &str, text: &str) -> GatewayServerFrame {
+fn delta_frame(turn_id: &str, session_id: &str, text: &str) -> GatewayServerFrame {
     GatewayServerFrame::AssistantDelta(GatewayAssistantDelta {
         request_id: "req-turn".to_owned(),
-        session: session(runtime_session_id),
+        session: session(session_id),
         turn: turn_status(turn_id, GatewayTurnState::Running),
         delta: text.to_owned(),
     })
@@ -67,12 +67,12 @@ fn delta_frame(turn_id: &str, runtime_session_id: &str, text: &str) -> GatewaySe
 
 fn completed_frame(
     turn_id: &str,
-    runtime_session_id: &str,
+    session_id: &str,
     final_text: &str,
 ) -> GatewayServerFrame {
     GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
         request_id: "req-turn".to_owned(),
-        session: session(runtime_session_id),
+        session: session(session_id),
         turn: turn_status(turn_id, GatewayTurnState::Completed),
         response: Response {
             message: Message {
@@ -200,15 +200,15 @@ async fn spawn_reconnecting_mock_server(
                 .expect("should have message")
                 .expect("should decode");
 
-            // Verify the reconnect Hello carries the runtime_session_id.
+            // Verify the reconnect Hello carries the session_id.
             if let WsMessage::Text(payload) = msg {
                 let client_frame: GatewayClientFrame = serde_json::from_str(payload.as_ref())
                     .expect("reconnect client frame should deserialize");
                 match client_frame {
                     GatewayClientFrame::Hello(hello) => {
                         assert!(
-                            hello.runtime_session_id.is_some(),
-                            "reconnect Hello should carry runtime_session_id"
+                            hello.session_id.is_some(),
+                            "reconnect Hello should carry session_id"
                         );
                     }
                     other => panic!("expected Hello frame on reconnect, got {other:?}"),
@@ -296,9 +296,9 @@ async fn full_handshake_prompt_delta_completion_cycle() {
     let state = adapter.state_snapshot().await;
     assert!(state.connected, "should be connected after HelloAck");
     assert_eq!(
-        state.runtime_session_id.as_deref(),
+        state.session_id.as_deref(),
         Some("runtime-alice"),
-        "should have runtime session id"
+        "should have session id"
     );
 
     // Simulate user sending a prompt.
@@ -464,9 +464,9 @@ async fn reconnection_resumes_session_and_streaming() {
         "rendered output should accumulate across reconnection"
     );
     assert_eq!(
-        state.runtime_session_id.as_deref(),
+        state.session_id.as_deref(),
         Some("runtime-alice"),
-        "runtime session should be stable across reconnect"
+        "session should be stable across reconnect"
     );
 
     server_handle.abort();

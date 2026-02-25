@@ -6,14 +6,14 @@ use crate::StartupStatusReport;
 use crate::model::RuntimeProgressEvent;
 use crate::{ChannelError, Response};
 
-pub const GATEWAY_PROTOCOL_VERSION: u16 = 1;
+pub const GATEWAY_PROTOCOL_VERSION: u16 = 2;
 
 pub type ChannelListenStream = mpsc::Receiver<Result<ChannelInboundEvent, ChannelError>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySession {
     pub user_id: String,
-    pub runtime_session_id: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,13 +37,15 @@ pub struct GatewayClientHello {
     pub protocol_version: u16,
     pub user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_session_id: Option<String>,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub create_new_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySendTurn {
     pub request_id: String,
-    pub runtime_session_id: String,
+    pub session_id: String,
     pub turn_id: String,
     pub prompt: String,
 }
@@ -51,7 +53,7 @@ pub struct GatewaySendTurn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayCancelActiveTurn {
     pub request_id: String,
-    pub runtime_session_id: String,
+    pub session_id: String,
     pub turn_id: String,
 }
 

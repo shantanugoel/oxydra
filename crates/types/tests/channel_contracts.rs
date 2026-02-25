@@ -11,7 +11,7 @@ use types::{
 fn sample_session() -> GatewaySession {
     GatewaySession {
         user_id: "user-1".to_owned(),
-        runtime_session_id: "session-1".to_owned(),
+        session_id: "session-1".to_owned(),
     }
 }
 
@@ -43,17 +43,18 @@ fn gateway_client_frames_round_trip_through_serde() {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "user-1".to_owned(),
-            runtime_session_id: Some("session-1".to_owned()),
+            session_id: Some("session-1".to_owned()),
+            create_new_session: false,
         }),
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-send".to_owned(),
-            runtime_session_id: "session-1".to_owned(),
+            session_id: "session-1".to_owned(),
             turn_id: "turn-1".to_owned(),
             prompt: "Summarize README".to_owned(),
         }),
         GatewayClientFrame::CancelActiveTurn(GatewayCancelActiveTurn {
             request_id: "req-cancel".to_owned(),
-            runtime_session_id: "session-1".to_owned(),
+            session_id: "session-1".to_owned(),
             turn_id: "turn-1".to_owned(),
         }),
         GatewayClientFrame::HealthCheck(GatewayHealthCheck {

@@ -28,7 +28,7 @@ pub enum TuiCtrlCOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TuiUiState {
     pub connected: bool,
-    pub runtime_session_id: Option<String>,
+    pub session_id: Option<String>,
     pub active_turn_id: Option<String>,
     pub prompt_buffer: String,
     pub rendered_output: String,
@@ -83,12 +83,13 @@ impl TuiChannelAdapter {
     }
 
     pub async fn build_hello_frame(&self, request_id: impl Into<String>) -> GatewayClientFrame {
-        let runtime_session_id = self.state.lock().await.runtime_session_id.clone();
+        let session_id = self.state.lock().await.session_id.clone();
         GatewayClientFrame::Hello(GatewayClientHello {
             request_id: request_id.into(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: self.user_id.clone(),
-            runtime_session_id,
+            session_id,
+            create_new_session: false,
         })
     }
 
@@ -101,11 +102,11 @@ impl TuiChannelAdapter {
         let request_id = request_id.into();
         let turn_id = turn_id.into();
         let prompt = prompt.into();
-        let runtime_session_id = {
+        let session_id = {
             let mut state = self.state.lock().await;
             state.prompt_buffer = prompt.clone();
             state
-                .runtime_session_id
+                .session_id
                 .clone()
                 .ok_or_else(|| ChannelError::Unavailable {
                     channel: TUI_CHANNEL_ID.to_owned(),
@@ -114,7 +115,7 @@ impl TuiChannelAdapter {
 
         self.enqueue_client_frame(GatewayClientFrame::SendTurn(types::GatewaySendTurn {
             request_id,
-            runtime_session_id,
+            session_id,
             turn_id,
             prompt,
         }))
@@ -125,12 +126,10 @@ impl TuiChannelAdapter {
         request_id: impl Into<String>,
     ) -> Result<TuiCtrlCOutcome, ChannelError> {
         let request_id = request_id.into();
-        let (runtime_session_id, turn_id) = {
+        let (session_id, turn_id) = {
             let state = self.state.lock().await;
-            match (&state.runtime_session_id, &state.active_turn_id) {
-                (Some(runtime_session_id), Some(turn_id)) => {
-                    (runtime_session_id.clone(), turn_id.clone())
-                }
+            match (&state.session_id, &state.active_turn_id) {
+                (Some(session_id), Some(turn_id)) => (session_id.clone(), turn_id.clone()),
                 _ => return Ok(TuiCtrlCOutcome::Exit),
             }
         };
@@ -138,7 +137,7 @@ impl TuiChannelAdapter {
         self.enqueue_client_frame(GatewayClientFrame::CancelActiveTurn(
             GatewayCancelActiveTurn {
                 request_id,
-                runtime_session_id,
+                session_id,
                 turn_id,
             },
         ))?;
@@ -163,7 +162,7 @@ impl TuiChannelAdapter {
         match frame {
             GatewayServerFrame::HelloAck(ack) => {
                 state.connected = true;
-                state.runtime_session_id = Some(ack.session.runtime_session_id.clone());
+                state.session_id = Some(ack.session.session_id.clone());
                 state.last_error = None;
                 if let Some(turn) = &ack.active_turn {
                     state.mark_active_turn(turn);
@@ -173,7 +172,7 @@ impl TuiChannelAdapter {
             }
             GatewayServerFrame::TurnStarted(started) => {
                 state.connected = true;
-                state.runtime_session_id = Some(started.session.runtime_session_id.clone());
+                state.session_id = Some(started.session.session_id.clone());
                 state.mark_active_turn(&started.turn);
                 state.rendered_output.clear();
                 state.last_error = None;
@@ -181,14 +180,14 @@ impl TuiChannelAdapter {
             }
             GatewayServerFrame::AssistantDelta(delta) => {
                 state.connected = true;
-                state.runtime_session_id = Some(delta.session.runtime_session_id.clone());
+                state.session_id = Some(delta.session.session_id.clone());
                 state.mark_active_turn(&delta.turn);
                 state.rendered_output.push_str(&delta.delta);
                 state.last_error = None;
             }
             GatewayServerFrame::TurnCompleted(completed) => {
                 state.connected = true;
-                state.runtime_session_id = Some(completed.session.runtime_session_id.clone());
+                state.session_id = Some(completed.session.session_id.clone());
                 state.clear_active_turn();
                 if state.rendered_output.is_empty()
                     && let Some(content) = completed.response.message.content.as_deref()
@@ -201,7 +200,7 @@ impl TuiChannelAdapter {
             }
             GatewayServerFrame::TurnCancelled(cancelled) => {
                 state.connected = true;
-                state.runtime_session_id = Some(cancelled.session.runtime_session_id.clone());
+                state.session_id = Some(cancelled.session.session_id.clone());
                 state.clear_active_turn();
                 state.last_error = None;
                 state.activity_status = None;
@@ -209,7 +208,7 @@ impl TuiChannelAdapter {
             GatewayServerFrame::Error(error) => {
                 state.connected = true;
                 if let Some(session) = &error.session {
-                    state.runtime_session_id = Some(session.runtime_session_id.clone());
+                    state.session_id = Some(session.session_id.clone());
                 }
                 if let Some(turn) = &error.turn {
                     if turn.state == GatewayTurnState::Running {
@@ -226,7 +225,7 @@ impl TuiChannelAdapter {
             GatewayServerFrame::HealthStatus(status) => {
                 state.connected = status.healthy;
                 if let Some(session) = &status.session {
-                    state.runtime_session_id = Some(session.runtime_session_id.clone());
+                    state.session_id = Some(session.session_id.clone());
                 }
                 if let Some(turn) = &status.active_turn {
                     state.mark_active_turn(turn);
@@ -249,7 +248,7 @@ impl TuiChannelAdapter {
                 ..
             }) => {
                 state.connected = true;
-                state.runtime_session_id = Some(session.runtime_session_id.clone());
+                state.session_id = Some(session.session_id.clone());
                 state.mark_active_turn(turn);
                 state.activity_status = Some(progress.message.clone());
             }
@@ -465,7 +464,7 @@ mod tests {
     fn assert_channel_impl<T: Channel>() {}
 
     fn hello_ack(
-        runtime_session_id: &str,
+        session_id: &str,
         active_turn: Option<GatewayTurnStatus>,
     ) -> GatewayServerFrame {
         GatewayServerFrame::HelloAck(GatewayHelloAck {
@@ -473,18 +472,18 @@ mod tests {
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             session: GatewaySession {
                 user_id: "alice".to_owned(),
-                runtime_session_id: runtime_session_id.to_owned(),
+                session_id: session_id.to_owned(),
             },
             active_turn,
         })
     }
 
-    fn turn_started(turn_id: &str, runtime_session_id: &str) -> GatewayServerFrame {
+    fn turn_started(turn_id: &str, session_id: &str) -> GatewayServerFrame {
         GatewayServerFrame::TurnStarted(GatewayTurnStarted {
             request_id: "req-turn".to_owned(),
             session: GatewaySession {
                 user_id: "alice".to_owned(),
-                runtime_session_id: runtime_session_id.to_owned(),
+                session_id: session_id.to_owned(),
             },
             turn: GatewayTurnStatus {
                 turn_id: turn_id.to_owned(),
@@ -493,12 +492,12 @@ mod tests {
         })
     }
 
-    fn assistant_delta(turn_id: &str, runtime_session_id: &str, delta: &str) -> GatewayServerFrame {
+    fn assistant_delta(turn_id: &str, session_id: &str, delta: &str) -> GatewayServerFrame {
         GatewayServerFrame::AssistantDelta(GatewayAssistantDelta {
             request_id: "req-turn".to_owned(),
             session: GatewaySession {
                 user_id: "alice".to_owned(),
-                runtime_session_id: runtime_session_id.to_owned(),
+                session_id: session_id.to_owned(),
             },
             turn: GatewayTurnStatus {
                 turn_id: turn_id.to_owned(),
@@ -510,14 +509,14 @@ mod tests {
 
     fn turn_completed(
         turn_id: &str,
-        runtime_session_id: &str,
+        session_id: &str,
         message: &str,
     ) -> GatewayServerFrame {
         GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
             request_id: "req-turn".to_owned(),
             session: GatewaySession {
                 user_id: "alice".to_owned(),
-                runtime_session_id: runtime_session_id.to_owned(),
+                session_id: session_id.to_owned(),
             },
             turn: GatewayTurnStatus {
                 turn_id: turn_id.to_owned(),
@@ -547,7 +546,7 @@ mod tests {
         let adapter = TuiChannelAdapter::new("alice", "conn-1");
         let encoded = encode_gateway_client_frame(&GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn".to_owned(),
-            runtime_session_id: "runtime-alice".to_owned(),
+            session_id: "runtime-alice".to_owned(),
             turn_id: "turn-1".to_owned(),
             prompt: "hello".to_owned(),
         }))
@@ -594,7 +593,7 @@ mod tests {
 
         let state = adapter.state_snapshot().await;
         assert!(state.connected);
-        assert_eq!(state.runtime_session_id.as_deref(), Some("runtime-alice"));
+        assert_eq!(state.session_id.as_deref(), Some("runtime-alice"));
         assert_eq!(state.active_turn_id, None);
         assert_eq!(state.rendered_output, "hello");
         assert!(state.last_error.is_none());
@@ -628,7 +627,7 @@ mod tests {
         match event.frame {
             GatewayClientFrame::CancelActiveTurn(cancel) => {
                 assert_eq!(cancel.request_id, "req-cancel");
-                assert_eq!(cancel.runtime_session_id, "runtime-alice");
+                assert_eq!(cancel.session_id, "runtime-alice");
                 assert_eq!(cancel.turn_id, "turn-1");
             }
             other => panic!("expected cancel frame, got {other:?}"),
@@ -640,7 +639,7 @@ mod tests {
                     request_id: "req-cancel".to_owned(),
                     session: GatewaySession {
                         user_id: "alice".to_owned(),
-                        runtime_session_id: "runtime-alice".to_owned(),
+                        session_id: "runtime-alice".to_owned(),
                     },
                     turn: GatewayTurnStatus {
                         turn_id: "turn-1".to_owned(),
@@ -673,7 +672,7 @@ mod tests {
         let reconnect_hello = adapter.build_hello_frame("req-hello-2").await;
         match reconnect_hello {
             GatewayClientFrame::Hello(hello) => {
-                assert_eq!(hello.runtime_session_id.as_deref(), Some("runtime-alice"));
+                assert_eq!(hello.session_id.as_deref(), Some("runtime-alice"));
             }
             other => panic!("expected hello frame, got {other:?}"),
         }
@@ -696,7 +695,7 @@ mod tests {
 
         let state = adapter.state_snapshot().await;
         assert_eq!(state.active_turn_id, None);
-        assert_eq!(state.runtime_session_id.as_deref(), Some("runtime-alice"));
+        assert_eq!(state.session_id.as_deref(), Some("runtime-alice"));
         assert_eq!(state.rendered_output, "firstsecond");
     }
 
@@ -722,7 +721,7 @@ mod tests {
                 request_id: "req-turn".to_owned(),
                 session: GatewaySession {
                     user_id: "alice".to_owned(),
-                    runtime_session_id: "runtime-alice".to_owned(),
+                    session_id: "runtime-alice".to_owned(),
                 },
                 turn: GatewayTurnStatus {
                     turn_id: "turn-1".to_owned(),

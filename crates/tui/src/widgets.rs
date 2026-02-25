@@ -522,7 +522,7 @@ pub fn render_app(frame: &mut Frame, model: &mut TuiViewModel, adapter_state: &T
     frame.render_widget(
         StatusBar::new(
             &model.connection_state,
-            adapter_state.runtime_session_id.as_deref(),
+            adapter_state.session_id.as_deref(),
             None, // Model name not yet available in adapter state.
             adapter_state.active_turn_id.as_deref(),
         ),
@@ -568,7 +568,7 @@ mod tests {
     fn default_connected_state() -> TuiUiState {
         TuiUiState {
             connected: true,
-            runtime_session_id: Some("rt-1".to_owned()),
+            session_id: Some("rt-1".to_owned()),
             active_turn_id: None,
             ..TuiUiState::default()
         }
@@ -618,7 +618,7 @@ mod tests {
 
         let adapter = TuiUiState {
             connected: true,
-            runtime_session_id: Some("rt-1".to_owned()),
+            session_id: Some("rt-1".to_owned()),
             active_turn_id: Some("turn-1".to_owned()),
             ..TuiUiState::default()
         };
@@ -763,7 +763,7 @@ mod tests {
         let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
-            runtime_session_id: Some("rt-1".to_owned()),
+            session_id: Some("rt-1".to_owned()),
             active_turn_id: Some("turn-1".to_owned()),
             ..TuiUiState::default()
         };
@@ -805,7 +805,7 @@ mod tests {
         let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
-            runtime_session_id: Some("rt-1".to_owned()),
+            session_id: Some("rt-1".to_owned()),
             active_turn_id: Some("turn-1".to_owned()),
             activity_status: Some("[2/8] Executing tools: file_read".to_owned()),
             ..TuiUiState::default()
@@ -829,7 +829,7 @@ mod tests {
         let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
-            runtime_session_id: Some("rt-1".to_owned()),
+            session_id: Some("rt-1".to_owned()),
             active_turn_id: Some("turn-1".to_owned()),
             activity_status: None,
             ..TuiUiState::default()
@@ -852,7 +852,7 @@ mod tests {
 
         let adapter = TuiUiState {
             connected: true,
-            runtime_session_id: Some("rt-1".to_owned()),
+            session_id: Some("rt-1".to_owned()),
             ..TuiUiState::default()
         };
 
@@ -878,7 +878,7 @@ mod tests {
         let mut model = TuiViewModel::new();
         let adapter = TuiUiState {
             connected: true,
-            runtime_session_id: Some("my-session-42".to_owned()),
+            session_id: Some("my-session-42".to_owned()),
             ..TuiUiState::default()
         };
         let buf = render(&mut model, &adapter, 80, 24);

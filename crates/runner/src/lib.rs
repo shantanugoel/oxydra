@@ -288,7 +288,7 @@ impl Runner {
         let workspace = self.provision_user_workspace(&user_id)?;
         let endpoint_path = workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
         let gateway_endpoint = read_gateway_endpoint_marker(&endpoint_path, &user_id)?;
-        let runtime_session_id =
+        let session_id =
             probe_gateway_health(&gateway_endpoint, &user_id).map_err(|error| {
                 if let RunnerError::GatewayProbeFailed { endpoint, message } = error {
                     RunnerError::StaleGatewayEndpoint {
@@ -305,7 +305,7 @@ impl Runner {
             user_id,
             workspace,
             gateway_endpoint,
-            runtime_session_id,
+            session_id,
         })
     }
 
@@ -733,7 +733,7 @@ pub struct RunnerTuiConnection {
     pub user_id: String,
     pub workspace: UserWorkspace,
     pub gateway_endpoint: String,
-    pub runtime_session_id: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2215,15 +2215,16 @@ fn probe_gateway_health(gateway_endpoint: &str, user_id: &str) -> Result<String,
                 request_id: "runner-connect-hello".to_owned(),
                 protocol_version: GATEWAY_PROTOCOL_VERSION,
                 user_id,
-                runtime_session_id: None,
+                session_id: None,
+                create_new_session: false,
             }),
             &gateway_endpoint,
         )
         .await?;
 
-        let runtime_session_id =
+        let session_id =
             match receive_gateway_server_frame(&mut socket, &gateway_endpoint).await? {
-                GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+                GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
                 GatewayServerFrame::Error(error) => {
                     return Err(RunnerError::GatewayProbeFailed {
                         endpoint: gateway_endpoint,
@@ -2266,7 +2267,7 @@ fn probe_gateway_health(gateway_endpoint: &str, user_id: &str) -> Result<String,
                         );
                     }
                     let _ = socket.close(None).await;
-                    return Ok(runtime_session_id);
+                    return Ok(session_id);
                 }
                 GatewayServerFrame::HealthStatus(status) => {
                     return Err(RunnerError::GatewayProbeFailed {

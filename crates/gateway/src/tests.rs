@@ -35,7 +35,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
     async fn run_turn(
         &self,
         _user_id: &str,
-        runtime_session_id: &str,
+        session_id: &str,
         prompt: String,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
@@ -43,7 +43,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         self.recorded_calls
             .lock()
             .await
-            .push((runtime_session_id.to_owned(), prompt));
+            .push((session_id.to_owned(), prompt));
 
         let scripted_turn = self
             .scripted_turns
@@ -232,7 +232,7 @@ async fn receive_server_frame(socket: &mut ClientSocket) -> GatewayServerFrame {
 }
 
 #[tokio::test]
-async fn handshake_returns_hello_ack_with_stable_runtime_session() {
+async fn handshake_returns_hello_ack_with_stable_session() {
     let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
     let (address, server_task) = spawn_gateway_server(runtime).await;
     let mut socket = connect_gateway(address).await;
@@ -243,7 +243,8 @@ async fn handshake_returns_hello_ack_with_stable_runtime_session() {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
@@ -253,7 +254,7 @@ async fn handshake_returns_hello_ack_with_stable_runtime_session() {
         GatewayServerFrame::HelloAck(ack) => {
             assert_eq!(ack.protocol_version, GATEWAY_PROTOCOL_VERSION);
             assert_eq!(ack.session.user_id, "alice");
-            assert_eq!(ack.session.runtime_session_id, "runtime-alice");
+            assert_eq!(ack.session.session_id, "runtime-alice");
             assert!(ack.active_turn.is_none());
         }
         other => panic!("expected hello_ack, got {other:?}"),
@@ -274,7 +275,8 @@ async fn handshake_rejects_unsupported_protocol_version() {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION + 1,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
@@ -309,14 +311,15 @@ async fn send_turn_streams_deltas_and_completes() {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
     let hello_ack = receive_server_frame(&mut socket).await;
-    let runtime_session_id = match hello_ack {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let session_id = match hello_ack {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
 
@@ -324,7 +327,7 @@ async fn send_turn_streams_deltas_and_completes() {
         &mut socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn".to_owned(),
-            runtime_session_id,
+            session_id,
             turn_id: "turn-1".to_owned(),
             prompt: "say hello".to_owned(),
         }),
@@ -375,14 +378,15 @@ async fn cancel_active_turn_cancels_only_current_turn() {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
     let hello_ack = receive_server_frame(&mut socket).await;
-    let runtime_session_id = match hello_ack {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let session_id = match hello_ack {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
 
@@ -390,7 +394,7 @@ async fn cancel_active_turn_cancels_only_current_turn() {
         &mut socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn-1".to_owned(),
-            runtime_session_id: runtime_session_id.clone(),
+            session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "long task".to_owned(),
         }),
@@ -404,7 +408,7 @@ async fn cancel_active_turn_cancels_only_current_turn() {
         &mut socket,
         GatewayClientFrame::CancelActiveTurn(GatewayCancelActiveTurn {
             request_id: "req-cancel".to_owned(),
-            runtime_session_id: runtime_session_id.clone(),
+            session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
         }),
     )
@@ -426,7 +430,7 @@ async fn cancel_active_turn_cancels_only_current_turn() {
         &mut socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn-2".to_owned(),
-            runtime_session_id,
+            session_id,
             turn_id: "turn-2".to_owned(),
             prompt: "short task".to_owned(),
         }),
@@ -467,14 +471,15 @@ async fn reconnect_during_active_turn_reports_running_and_continues_streaming() 
             request_id: "req-hello-1".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
     let hello_ack = receive_server_frame(&mut first_socket).await;
-    let runtime_session_id = match hello_ack {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let session_id = match hello_ack {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
 
@@ -482,7 +487,7 @@ async fn reconnect_during_active_turn_reports_running_and_continues_streaming() 
         &mut first_socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn".to_owned(),
-            runtime_session_id: runtime_session_id.clone(),
+            session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "stream".to_owned(),
         }),
@@ -502,7 +507,8 @@ async fn reconnect_during_active_turn_reports_running_and_continues_streaming() 
             request_id: "req-hello-2".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: Some(runtime_session_id),
+            session_id: Some(session_id),
+            create_new_session: false,
         }),
     )
     .await;
@@ -552,14 +558,15 @@ async fn reconnect_after_disconnected_completion_receives_terminal_outcome() {
             request_id: "req-hello-1".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
     let hello_ack = receive_server_frame(&mut first_socket).await;
-    let runtime_session_id = match hello_ack {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let session_id = match hello_ack {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
 
@@ -567,7 +574,7 @@ async fn reconnect_after_disconnected_completion_receives_terminal_outcome() {
         &mut first_socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn".to_owned(),
-            runtime_session_id: runtime_session_id.clone(),
+            session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "stream".to_owned(),
         }),
@@ -587,7 +594,8 @@ async fn reconnect_after_disconnected_completion_receives_terminal_outcome() {
             request_id: "req-hello-2".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: Some(runtime_session_id),
+            session_id: Some(session_id),
+            create_new_session: false,
         }),
     )
     .await;
@@ -611,7 +619,7 @@ async fn reconnect_after_disconnected_completion_receives_terminal_outcome() {
 }
 
 #[tokio::test]
-async fn runtime_session_id_remains_stable_for_user() {
+async fn session_id_remains_stable_for_user() {
     let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
     let (address, server_task) =
         spawn_gateway_server(Arc::clone(&runtime) as Arc<dyn GatewayTurnRunner>).await;
@@ -623,13 +631,14 @@ async fn runtime_session_id_remains_stable_for_user() {
             request_id: "req-hello-1".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
-    let first_runtime_session_id = match receive_server_frame(&mut first_socket).await {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let first_session_id = match receive_server_frame(&mut first_socket).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
     drop(first_socket);
@@ -641,17 +650,18 @@ async fn runtime_session_id_remains_stable_for_user() {
             request_id: "req-hello-2".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
-    let second_runtime_session_id = match receive_server_frame(&mut second_socket).await {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let second_session_id = match receive_server_frame(&mut second_socket).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
 
-    assert_eq!(first_runtime_session_id, second_runtime_session_id);
+    assert_eq!(first_session_id, second_session_id);
 
     let recorded_calls = runtime.recorded_calls().await;
     assert!(recorded_calls.is_empty());
@@ -676,14 +686,15 @@ async fn runner_failure_maps_to_gateway_error_frame() {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;
 
     let hello_ack = receive_server_frame(&mut socket).await;
-    let runtime_session_id = match hello_ack {
-        GatewayServerFrame::HelloAck(ack) => ack.session.runtime_session_id,
+    let session_id = match hello_ack {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
 
@@ -691,7 +702,7 @@ async fn runner_failure_maps_to_gateway_error_frame() {
         &mut socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn".to_owned(),
-            runtime_session_id,
+            session_id,
             turn_id: "turn-1".to_owned(),
             prompt: "fail".to_owned(),
         }),
@@ -736,7 +747,8 @@ async fn health_check_includes_startup_status_when_gateway_has_bootstrap_state()
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: "alice".to_owned(),
-            runtime_session_id: None,
+            session_id: None,
+            create_new_session: false,
         }),
     )
     .await;

@@ -343,10 +343,10 @@ mod tests {
 
     // ── Test helpers ────────────────────────────────────────────────────
 
-    fn session(runtime_session_id: &str) -> GatewaySession {
+    fn session(session_id: &str) -> GatewaySession {
         GatewaySession {
             user_id: "alice".to_owned(),
-            runtime_session_id: runtime_session_id.to_owned(),
+            session_id: session_id.to_owned(),
         }
     }
 

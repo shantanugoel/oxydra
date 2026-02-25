@@ -277,34 +277,34 @@ impl GatewayServer {
     ) -> Result<Arc<UserSessionState>, String> {
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get(&hello.user_id) {
-            if let Some(runtime_session_id) = &hello.runtime_session_id
-                && runtime_session_id != &existing.runtime_session_id
+            if let Some(session_id) = &hello.session_id
+                && session_id != &existing.session_id
             {
                 return Err(format!(
-                    "runtime_session_id mismatch for user `{}`",
+                    "session_id mismatch for user `{}`",
                     hello.user_id
                 ));
             }
             tracing::debug!(
                 user_id = %hello.user_id,
-                runtime_session_id = %existing.runtime_session_id,
+                session_id = %existing.session_id,
                 "client reconnected to existing gateway session"
             );
             return Ok(Arc::clone(existing));
         }
 
-        let runtime_session_id = hello
-            .runtime_session_id
+        let session_id = hello
+            .session_id
             .clone()
-            .unwrap_or_else(|| default_runtime_session_id(&hello.user_id));
+            .unwrap_or_else(|| default_session_id(&hello.user_id));
         tracing::info!(
             user_id = %hello.user_id,
-            runtime_session_id = %runtime_session_id,
+            session_id = %session_id,
             "gateway session created"
         );
         let session = Arc::new(UserSessionState::new(
             hello.user_id.clone(),
-            runtime_session_id,
+            session_id,
         ));
         sessions.insert(hello.user_id.clone(), Arc::clone(&session));
         Ok(session)
@@ -315,12 +315,12 @@ impl GatewayServer {
         session: Arc<UserSessionState>,
         send_turn: GatewaySendTurn,
     ) -> Option<GatewayServerFrame> {
-        if send_turn.runtime_session_id != session.runtime_session_id {
+        if send_turn.session_id != session.session_id {
             return Some(GatewayServerFrame::Error(GatewayErrorFrame {
                 request_id: Some(send_turn.request_id),
                 session: Some(session.gateway_session()),
                 turn: None,
-                message: "runtime_session_id does not match active session".to_owned(),
+                message: "session_id does not match active session".to_owned(),
             }));
         }
 
@@ -356,7 +356,7 @@ impl GatewayServer {
         }));
         tracing::info!(
             turn_id = %send_turn.turn_id,
-            runtime_session_id = %session.runtime_session_id,
+            session_id = %session.session_id,
             "turn started"
         );
 
@@ -365,7 +365,7 @@ impl GatewayServer {
             let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
             let runtime_future = runtime.run_turn(
                 &session.user_id,
-                &session.runtime_session_id,
+                &session.session_id,
                 send_turn.prompt,
                 cancellation,
                 delta_tx,
@@ -494,12 +494,12 @@ impl GatewayServer {
         session: Arc<UserSessionState>,
         cancel_turn: GatewayCancelActiveTurn,
     ) -> Option<GatewayServerFrame> {
-        if cancel_turn.runtime_session_id != session.runtime_session_id {
+        if cancel_turn.session_id != session.session_id {
             return Some(GatewayServerFrame::Error(GatewayErrorFrame {
                 request_id: Some(cancel_turn.request_id),
                 session: Some(session.gateway_session()),
                 turn: None,
-                message: "runtime_session_id does not match active session".to_owned(),
+                message: "session_id does not match active session".to_owned(),
             }));
         }
 
@@ -550,7 +550,7 @@ impl GatewayServer {
             .unwrap_or_else(|| format!("{GATEWAY_CHANNEL_ID} gateway ready"));
         tracing::info!(
             user_id = %session.user_id,
-            runtime_session_id = %session.runtime_session_id,
+            session_id = %session.session_id,
             startup_degraded = startup_status.as_ref().is_some_and(StartupStatusReport::is_degraded),
             "gateway health check handled"
         );
@@ -573,18 +573,18 @@ struct ActiveTurnState {
 
 struct UserSessionState {
     user_id: String,
-    runtime_session_id: String,
+    session_id: String,
     events: broadcast::Sender<GatewayServerFrame>,
     active_turn: Mutex<Option<ActiveTurnState>>,
     latest_terminal_frame: Mutex<Option<GatewayServerFrame>>,
 }
 
 impl UserSessionState {
-    fn new(user_id: String, runtime_session_id: String) -> Self {
+    fn new(user_id: String, session_id: String) -> Self {
         let (events, _) = broadcast::channel(EVENT_BUFFER_CAPACITY);
         Self {
             user_id,
-            runtime_session_id,
+            session_id,
             events,
             active_turn: Mutex::new(None),
             latest_terminal_frame: Mutex::new(None),
@@ -594,7 +594,7 @@ impl UserSessionState {
     fn gateway_session(&self) -> GatewaySession {
         GatewaySession {
             user_id: self.user_id.clone(),
-            runtime_session_id: self.runtime_session_id.clone(),
+            session_id: self.session_id.clone(),
         }
     }
 
@@ -630,7 +630,7 @@ impl SchedulerNotifier for GatewayServer {
     }
 }
 
-fn default_runtime_session_id(user_id: &str) -> String {
+fn default_session_id(user_id: &str) -> String {
     let normalized = user_id
         .chars()
         .map(|ch| {

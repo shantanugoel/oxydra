@@ -159,6 +159,102 @@ If two turns call `set_tool_execution_context` back-to-back before either reache
 
 **Resolution:** Since no backward compatibility is needed, rename `runtime_session_id` to `session_id` throughout the codebase. The field appears in ~150 references across ~15 files — this is a mechanical rename but worthwhile for clarity. The wire protocol uses `session_id` and internal code should match.
 
+### D10: Internal Gateway API for channel adapters
+
+**Problem:** The plan says channel adapters "call gateway methods directly," but `GatewayServer` only exposes WebSocket-facing methods (`handle_socket`, `handle_client_frame`). In-process adapters (Telegram, future Discord/Slack) need a programmatic API.
+
+**Resolution:** Extract an internal API from `GatewayServer` during Step 3 (multi-session gateway core). The WebSocket handler becomes a thin wrapper around this API:
+
+```rust
+impl GatewayServer {
+    // Internal API for in-process channel adapters
+    pub async fn create_or_get_session(
+        &self, user_id: &str, agent_name: &str, channel_origin: &str,
+    ) -> Result<Arc<SessionState>, GatewayError>;
+
+    pub async fn submit_turn(
+        &self, session: &Arc<SessionState>, prompt: String,
+    ) -> Result<broadcast::Receiver<GatewayServerFrame>, GatewayError>;
+
+    pub async fn cancel_session_turn(
+        &self, session: &Arc<SessionState>,
+    ) -> Result<(), GatewayError>;
+
+    pub async fn subscribe_events(
+        &self, session: &Arc<SessionState>,
+    ) -> broadcast::Receiver<GatewayServerFrame>;
+
+    pub async fn list_user_sessions(
+        &self, user_id: &str, include_archived: bool,
+    ) -> Result<Vec<SessionRecord>, GatewayError>;
+}
+```
+
+Both the WebSocket handler and the Telegram adapter call these same methods. This ensures identical behavior regardless of transport.
+
+### D11: Subagent semaphore accounting
+
+**Problem:** Step 11 originally said "Subagent turns also acquire parent user's permit." This creates a deadlock risk: with `max_concurrent_turns_per_user = 3` and max delegation depth = 3, a depth-3 chain consumes all permits, blocking any other concurrent session.
+
+**Resolution:** Subagents run under the parent turn's permit. They are logically part of the parent's turn — the parent tool call synchronously awaits the result. The semaphore counts **top-level user-initiated turns only** (gateway `start_turn()` calls), not internal delegation executions. The delegation depth limit (max 3) and budget cascading already prevent fan-out abuse.
+
+### D12: Scheduled tasks vs session model
+
+**Problem:** Scheduled tasks create ad-hoc session IDs (`scheduled:{schedule_id}`) that are not tracked in the gateway's session map, not persisted in `gateway_sessions`, don't appear in `/sessions`, and bypass the concurrency semaphore.
+
+**Resolution:** Scheduled tasks remain outside the gateway session model for now. They are system-initiated, not user-initiated, and should not compete with user permits. Document this explicitly:
+- Scheduled task sessions are invisible to `/sessions`
+- They do not count toward `max_sessions_per_user` or `max_concurrent_turns_per_user`
+- Their conversation history is persisted via `conversation_events` (existing behavior)
+- This may be revisited when scheduled tasks gain user-facing visibility
+
+### D13: Channel trait evolution
+
+**Problem:** Guidebook Chapter 9 defines a `Channel` trait with `send()`, `listen()`, `health_check()`. Chapter 12 says adapters implement this trait. But the plan's Telegram adapter doesn't implement this trait — it calls the gateway's internal API directly.
+
+**Resolution:** The existing `Channel` trait is for **WebSocket-based client adapters** (TUI). In-process adapters (Telegram, future Discord/Slack) use the internal gateway API (D10) directly and do not implement `Channel`. The `Channel` trait may be deprecated or renamed to `WebSocketChannelClient` in a future cleanup pass. Document this distinction in the guidebook update (Step 12) so future contributors don't try to force-fit in-process adapters into the WebSocket client trait.
+
+### D14: Thread/topic-based session mapping for external channels
+
+**Problem:** The plan maps one Telegram chat to one session. Within a single chat, only one turn can be active, blocking the user from working on multiple tasks concurrently. This is the primary concurrency UX issue for external channels.
+
+**Resolution:** Use platform-native threading constructs as separate sessions:
+
+- **Telegram Forum Topics:** `channel_context_id = "{chat_id}:{message_thread_id}"` for forum groups, `channel_context_id = "{chat_id}"` for regular chats/DMs
+- **Discord:** `channel_context_id = "{guild_id}:{channel_id}:{thread_id?}"`
+- **WhatsApp:** Each community group thread gets its own `channel_context_id`
+
+Each unique `(channel_id, channel_context_id)` maps to one session. This means:
+- Each topic/thread = separate session = separate `active_turn` = true concurrency
+- User creates Telegram topics like "Research", "Coding", "General" — each runs independently
+- Within a single topic, "turn already active" still applies (natural: one thread, one conversation)
+- Topic/thread names auto-populate `session.display_name` when available
+- No protocol or gateway changes needed — purely in how the adapter derives `channel_context_id`
+
+For Telegram, the adapter detects whether a group has forum mode enabled and adjusts the `channel_context_id` derivation accordingly. In DMs (no topics), the single-session behavior remains.
+
+### D15: Edit-message streaming for external channels
+
+**Problem:** The plan accumulates all `AssistantDelta` fragments and sends one final message on `TurnCompleted`. This means 2+ minutes of silence during complex turns — poor UX compared to the TUI's live streaming.
+
+**Resolution:** External channel adapters use platform edit-message APIs to stream responses live:
+
+1. Turn starts → adapter sends a placeholder message ("⏳ Working...")
+2. `TurnProgress` arrives → edit message to show status ("🔍 Searching the web...", "🤖 Delegating to researcher...")
+3. `AssistantDelta` tokens arrive → accumulate text, edit message every ~1.5 seconds with accumulated content
+4. `TurnCompleted` → final edit with complete response (progress status lines removed)
+
+**Telegram specifics:**
+- `editMessageText()` rate limit is ~30 edits/minute per chat (1 edit/1.5s is safe)
+- 4096 char limit per message; when approaching limit, stop editing current message, send a new continuation message, continue editing the new one
+- Progress events shown as a status line at the top during processing, removed in final edit
+- Throttle mechanism: `Instant::elapsed()` check before each edit, skip if < 1.5s since last edit
+
+**Platform adaptation pattern:**
+- Each adapter implements a `ResponseStreamer` that handles the platform-specific edit semantics
+- Common logic: throttle interval, text accumulation, progress formatting
+- Platform differences: edit API call, char limits, formatting rules
+
 ---
 
 ## 2. Auth, Identity & Onboarding Model
@@ -432,14 +528,18 @@ All crates currently use `uuid` v4. Session IDs would benefit from v7 (time-orde
 │  TelegramAdapter (in-process, spawned at startup)               │
 │  ├── bot: teloxide::Bot (alice's bot token from env)            │
 │  ├── authorized_senders: HashSet<platform_id>                   │
-│  ├── session_map: chat_id → session_id                          │
-│  └── Calls gateway methods directly (no WebSocket)              │
+│  ├── session_map: (chat_id, topic_id?) → session_id             │
+│  ├── Calls gateway internal API directly (D10, no WebSocket)    │
+│  └── ResponseStreamer: edit-message streaming (D15)              │
 │                                                                 │
 │  Message flow:                                                  │
-│  Telegram API → teloxide poll → auth check → gateway.start_turn │
+│  Telegram API → teloxide poll → auth check                      │
+│    → derive channel_context_id (D14: chat_id or chat_id:topic)  │
+│    → gateway.submit_turn()                                      │
 │                                                                 │
 │  Response flow:                                                 │
-│  gateway turn stream → accumulate deltas → bot.send_message()   │
+│  gateway.subscribe_events() → ResponseStreamer                  │
+│    → send placeholder → throttled edits → final edit            │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -608,11 +708,23 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - In `handle_socket`, track `active_session_id` per connection
    - A connection's send/cancel operations only affect its active session
 
+7. **Extract internal API (D10):**
+   - Refactor `start_turn`, `cancel_turn`, session creation into public methods on `GatewayServer`
+   - WebSocket handler (`handle_client_frame`) becomes a thin wrapper around these methods
+   - Same methods will be called by in-process channel adapters (Step 8)
+   - API: `create_or_get_session()`, `submit_turn()`, `cancel_session_turn()`, `subscribe_events()`, `list_user_sessions()`
+
+8. **Increase broadcast channel capacity:**
+   - Increase `EVENT_BUFFER_CAPACITY` from 256 to 1024
+   - With subagent progress events and delegation, event volume per session increases significantly
+   - Channel adapters (Telegram) that are rate-limited should buffer via an intermediate unbounded `mpsc` channel between the broadcast subscription and their rate-limited platform sends — losing progress events is acceptable, losing `TurnCompleted` is not
+
 **Verification:**
 - New test: two connections for same user with different sessions can run turns concurrently
 - New test: concurrent turn limit enforcement (third concurrent turn rejected)
 - New test: `create_new_session` creates fresh session
 - New test: `session_id` joins existing session
+- New test: internal API (`submit_turn`, `cancel_session_turn`) produces identical behavior to WebSocket path
 
 ---
 
@@ -673,6 +785,14 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - Pass to `GatewayServer` constructor
    - Update `GatewayServer::new()` signature
 
+7. **Session resumption path (clarification):**
+   - When an evicted/archived session is resumed (by `session_id` in Hello or channel mapping), the following is restored:
+     - `SessionRecord` from `gateway_sessions` table (metadata, agent_name, display_name)
+     - Conversation history from `conversation_events` table (existing infrastructure)
+     - `SessionState` recreated fresh (new `broadcast::Sender`, empty `active_turn`, no `latest_terminal_frame`)
+   - `Context` in `RuntimeGatewayTurnRunner.contexts` is NOT in DB — it's rebuilt by the runtime from `conversation_events` on the next `run_session_for_session()` call (existing code path)
+   - Active turns are lost on restart — this is expected and acceptable
+
 **Verification:**
 - New test: create session, verify it exists in DB
 - New test: restart gateway (reconstruct from DB), session is listed
@@ -706,6 +826,8 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    pub struct GatewayListSessions {
        pub request_id: String,
        pub include_archived: bool,
+       #[serde(default)]
+       pub include_subagent_sessions: bool,  // default false — hide subagent sessions
    }
 
    pub struct GatewaySwitchSession {
@@ -725,7 +847,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 3. **`gateway/src/lib.rs`:**
    - Handle new client frame variants in `handle_client_frame()`
    - `CreateSession`: create new SessionState, persist, switch connection's active session
-   - `ListSessions`: read from SessionStore
+   - `ListSessions`: read from SessionStore, filter out `parent_session_id IS NOT NULL` by default (subagent sessions hidden unless `include_subagent_sessions` is true)
    - `SwitchSession`: unsubscribe from current session broadcast, subscribe to target session
 
 4. **`tui/src/app.rs`:**
@@ -841,7 +963,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ### Step 7: Channel Session Mapping
 
-**Goal:** Deterministic mapping from `(channel_id, channel_context_id)` to gateway session. Each Telegram chat maps to a stable session so conversation context is preserved.
+**Goal:** Deterministic mapping from `(channel_id, channel_context_id)` to gateway session. Each Telegram chat/topic maps to a stable session so conversation context is preserved. Platform threading constructs (Telegram forum topics, Discord threads) map to separate sessions for natural concurrency (D14).
 
 **Crates:** `channels`, `memory`
 
@@ -851,7 +973,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    ```sql
    CREATE TABLE IF NOT EXISTS channel_session_mappings (
        channel_id          TEXT NOT NULL,       -- e.g. "telegram"
-       channel_context_id  TEXT NOT NULL,       -- e.g. Telegram chat_id
+       channel_context_id  TEXT NOT NULL,       -- e.g. "12345678:42" (chat_id:topic_id)
        session_id          TEXT NOT NULL REFERENCES gateway_sessions(session_id)
                                ON DELETE CASCADE,
        created_at          TEXT NOT NULL DEFAULT (datetime('now')),
@@ -879,10 +1001,24 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 4. **`channels/src/session_map.rs` (new file):**
    - Thin wrapper around `SessionStore` methods for adapter use
    - Adapter uses it to:
-     - Look up existing session for this chat: found → use that session
+     - Look up existing session for this context: found → use that session
      - Not found → create new session via gateway, save mapping
    - `/new` command → create new session, update mapping
    - `/switch` command → update mapping to different session_id
+
+5. **`channel_context_id` derivation per platform (D14):**
+   - **Telegram (forum groups):** `"{chat_id}:{message_thread_id}"` — each topic is a separate session
+   - **Telegram (regular chats/DMs):** `"{chat_id}"` — single session per chat
+   - **Telegram (non-forum groups):** `"{chat_id}"` — single session for the group
+   - **Discord:** `"{guild_id}:{channel_id}:{thread_id?}"` — threads are separate sessions
+   - **WhatsApp:** `"{phone_number}:{group_id?}"` — each community group thread is separate
+   - Detection: Telegram adapter checks `message.message_thread_id.is_some()` to determine forum mode
+
+6. **Auto-populate `session.display_name`:**
+   - When creating a new session from a channel mapping, set `display_name` from the thread/topic name if available
+   - Telegram: use forum topic title (available via `getForumTopicInfo`)
+   - Discord: use thread name
+   - Fallback: `"{channel_name} - {timestamp}"` or first user message truncated to 50 chars
 
 **Verification:**
 - New test: first message from a chat creates mapping
@@ -922,7 +1058,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
          bot: teloxide::Bot,
          sender_auth: SenderAuthPolicy,
          session_store: Arc<dyn SessionStore>,   // for channel session mappings
-         gateway: Arc<GatewayServer>,            // direct reference, in-process
+         gateway: Arc<GatewayServer>,            // direct reference, in-process (uses internal API from D10)
          user_id: String,
          config: TelegramChannelConfig,
      }
@@ -931,24 +1067,55 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - Per incoming `Update`:
      - Extract `sender_id` from `message.from.id`
      - `sender_auth.is_authorized(sender_id)` → false = drop + audit, true = proceed
+     - **Derive `channel_context_id` (D14):** check `message.message_thread_id` — if present (forum mode), use `"{chat_id}:{thread_id}"`, otherwise use `"{chat_id}"`
      - Command interception: `/new`, `/sessions`, `/switch`, `/cancel`, `/status`
-       - These map to direct gateway method calls (create session, list sessions, etc.)
-     - Normal message: resolve session via `session_store.get_channel_session()`, call `gateway.start_turn()` directly
-   - Response handling:
-     - Subscribe to session's broadcast channel (same mechanism TUI WebSocket uses internally)
-     - Accumulate `AssistantDelta` text fragments
-     - On `TurnCompleted`: format accumulated text, split at 4096 char limit at paragraph boundaries
-     - Send via `bot.send_message()` with HTML formatting
-     - Fallback to plain text on formatting errors
+       - These map to gateway internal API calls (D10): `create_or_get_session()`, `list_user_sessions()`, etc.
+     - Normal message: resolve session via `session_store.get_channel_session()`, call `gateway.submit_turn()` directly
+   - **Turn-already-active handling:**
+     - If `gateway.submit_turn()` returns a "turn already active" error:
+       - Reply: "⏳ I'm still working on your previous request. Send /cancel to stop it, or wait for me to finish."
+       - Do NOT queue the message (simplicity for v1)
+       - Audit log the rejection for observability
+   - **Edit-message streaming response (D15):**
+     - Subscribe to session's broadcast channel via `gateway.subscribe_events()`
+     - On `TurnStarted`: send placeholder message via `bot.send_message()` ("⏳ Working...")
+     - On `TurnProgress`: edit placeholder to show status ("🔍 Searching the web...", "🤖 Delegating to researcher...")
+     - On `AssistantDelta`: accumulate text, throttled edit every ~1.5 seconds:
+       ```rust
+       struct ResponseStreamer {
+           bot: teloxide::Bot,
+           chat_id: ChatId,
+           message_id: MessageId,            // current message being edited
+           accumulated_text: String,
+           last_edit: Instant,
+           edit_throttle: Duration,           // 1.5 seconds
+           progress_status: Option<String>,   // current progress line, shown at top
+       }
+       ```
+     - When accumulated text approaches 4096 chars: stop editing current message, send a new message, continue editing the new one
+     - On `TurnCompleted`: final edit with complete response (progress status line removed), plain text only
+     - On formatting errors: fallback to sending accumulated text as plain text
+   - **Telegram forum topic support:**
+     - When replying in a forum topic, include `message_thread_id` in all `send_message()` and `edit_message_text()` calls
+     - This ensures replies stay within the correct topic thread
    - Rate limiting: respect Telegram's `retry_after` header on 429 responses
    - Per-chat message queue to avoid out-of-order delivery
+   - **Markdown → Telegram HTML conversion:**
+     - Implement `markdown_to_telegram_html()` utility
+     - Telegram HTML subset: `<b>`, `<i>`, `<code>`, `<pre>`, `<a href="...">`, `<s>`, `<u>`
+     - Unsupported markdown constructs (tables, images, headers) → plain text fallback
+     - Used in final edit only (interim edits use plain text for speed)
 
 3. **`runner/src/bin/oxydra-vm.rs`:**
    - After gateway + runtime construction:
      - Read `ChannelsConfig` from bootstrap envelope
      - If Telegram enabled: resolve bot token from env, build `SenderAuthPolicy`, construct `TelegramAdapter`
      - Spawn adapter with the VM's `CancellationToken`
-   - Adapter stops automatically when VM shuts down
+   - **Graceful shutdown ordering:**
+     - On CancellationToken fire: adapter stops accepting new Telegram updates (long-poll exits)
+     - In-flight turns continue until completion (with a 30-second drain timeout)
+     - For messages received during drain: reply "I'm restarting, please try again shortly"
+     - After drain: adapter task exits, gateway shuts down
 
 4. **`runner/Cargo.toml`:**
    ```toml
@@ -962,9 +1129,14 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 - Unit test: Telegram Update → sender auth → message construction
 - Unit test: long message splitting at paragraph boundaries
 - Unit test: command interception (`/new`, `/sessions`, etc.)
-- Integration test with mock Telegram API: full message round-trip
+- Unit test: `channel_context_id` derivation — forum topic vs regular chat vs DM
+- Unit test: `markdown_to_telegram_html()` conversion for supported and unsupported constructs
+- Unit test: edit-message throttling (edits spaced ≥ 1.5s)
+- Unit test: turn-already-active → user-friendly rejection message
+- Integration test with mock Telegram API: full message round-trip with edit-message streaming
 - Integration test: unauthorized sender rejected, audit logged
 - Integration test: rate limiting with simulated 429
+- Integration test: forum topic messages stay within correct thread
 
 ---
 
@@ -1148,19 +1320,29 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - `start_turn()` acquires semaphore permit before spawning turn task
    - Permit released when turn completes (RAII via `OwnedSemaphorePermit`)
    - If permit unavailable: return error frame "too many concurrent turns"
-   - Subagent turns also acquire parent user's permit (preventing fan-out bypass)
+   - **Subagent turns do NOT acquire semaphore permits (D11):** They run under the parent turn's permit since the parent tool call synchronously awaits the result. The delegation depth limit (max 3) and budget cascading prevent fan-out abuse. The semaphore counts top-level user-initiated turns only.
 
 3. **Session cleanup background task:**
    - Spawn a periodic task (every 5 minutes) that:
      - Checks sessions with no subscribers and idle > TTL
+     - Re-checks subscriber count under the write lock before removal (prevents race with incoming messages)
      - Archives them in DB
      - Removes from in-memory map
+     - **Notifies turn runner to drop evicted session contexts** (prevents OOM from unbounded `RuntimeGatewayTurnRunner.contexts` HashMap)
    - Uses the gateway's `CancellationToken` for clean shutdown
 
+4. **Turn runner context eviction:**
+   - Add `drop_session_context(&self, session_id: &str)` method to `GatewayTurnRunner` trait
+   - `RuntimeGatewayTurnRunner` implements it by removing the session's `Context` from its `contexts` HashMap
+   - Called by the session cleanup task when archiving/evicting a session
+
 **Verification:**
-- Test: concurrent turn limit enforced
-- Test: subagent turns count toward user's concurrent limit
+- Test: concurrent turn limit enforced (top-level turns only)
+- Test: subagent turns do NOT consume semaphore permits
+- Test: delegation depth 3 with concurrent_turns=3 does not deadlock
 - Test: session TTL cleanup archives stale sessions
+- Test: session cleanup re-checks subscribers under write lock (no race)
+- Test: turn runner context dropped on session eviction
 - Test: archived session data remains in DB for listing
 
 ---
@@ -1175,8 +1357,9 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - When agents are defined: add section about delegation capabilities
 
 2. **Guidebook updates:**
-   - Update Chapter 9 (Gateway and Channels) with multi-session model
-   - Update Chapter 12 (External Channels) with auth/identity model
+   - Update Chapter 9 (Gateway and Channels) with multi-session model and internal gateway API (D10)
+   - Update Chapter 9 to document `Channel` trait scope (WebSocket clients only) and in-process adapter pattern (D13)
+   - Update Chapter 12 (External Channels) with auth/identity model, thread/topic session mapping (D14), edit-message streaming (D15)
    - Update Chapter 14 (Productization) with session lifecycle
    - Update Chapter 15 (Build Plan) with completion status
 
@@ -1185,6 +1368,9 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - Delegation from Telegram session
    - Session switching mid-conversation
    - Scheduled task alongside interactive session + delegation
+   - Telegram forum topics: messages in different topics run concurrently
+   - Edit-message streaming: verify placeholder → progress → final edit sequence
+   - Session eviction + resumption: evict session, send new message, verify session recreated from DB
 
 ---
 
@@ -1438,11 +1624,11 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | 4: Persistence | Session create → DB verify; restart recovery; touch/archive operations |
 | 5: Lifecycle UX | /new creates session; /sessions lists; /switch changes; two TUI windows independent |
 | 6: Auth pipeline | Known sender authorized; unknown rejected + audit; channels config optional; empty senders = nobody |
-| 7: Channel mapping | First message creates mapping; subsequent reuse; /new updates mapping; file persists across restarts |
-| 8: Telegram | Update→auth→message construction; message splitting; command interception; mock API round-trip; 429 handling; reconnect |
+| 7: Channel mapping | First message creates mapping; subsequent reuse; /new updates mapping; file persists across restarts; forum topic → separate session; regular chat → single session |
+| 8: Telegram | Update→auth→message construction; message splitting; command interception; channel_context_id derivation; markdown→HTML; edit-message throttling; turn-active rejection; mock API round-trip with streaming edits; 429 handling; reconnect; forum topic threading |
 | 9: Agent defs | Config parsing; tool validation; system prompt augmentation |
 | 10: Delegation | Round-trip delegation; budget cascading; cancel cascade; depth limit; cycle prevention |
-| 11: Concurrency | Semaphore enforcement; subagent counting; TTL cleanup |
+| 11: Concurrency | Semaphore enforcement (top-level only); subagent bypass; no deadlock at depth 3; TTL cleanup with race protection; context eviction |
 | 12: Integration | TUI + Telegram; delegation from Telegram; scheduled + interactive |
 
 ### Mock Strategy
@@ -1478,21 +1664,26 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | Protocol version bump | Low | Low | All clients updated together; single version, no negotiation complexity |
 | Telegram rate limits | Medium | Low | Accumulate deltas; respect `retry_after`; per-chat message queue |
 | Subagent infinite loops | Low | High | Budget cascading; max depth; cycle prevention; parent cancel cascade |
-| Session memory leak | Medium | Medium | TTL-based cleanup; bounded session map; semaphore for turn permits |
+| Session memory leak | Medium | Medium | TTL-based cleanup; bounded session map; semaphore for turn permits; turn runner context eviction on session archive |
 | Tool context race (pre-fix) | **Confirmed** | High | **Fixed in Step 1** before any concurrent session work |
 | Config complexity for users | Medium | Medium | All new sections optional with safe defaults; existing configs work unchanged |
 | DB migration on running system | Low | Medium | Migrations are additive (new tables only); WAL mode enables concurrent reads during migration |
+| Broadcast channel lag losing TurnCompleted | Medium | High | Increased capacity to 1024; Telegram adapter buffers via intermediate mpsc channel |
+| Turn runner context HashMap OOM | Medium | Medium | Context eviction on session archive (Step 11); `drop_session_context()` on `GatewayTurnRunner` trait |
+| Semaphore deadlock with delegation | **Eliminated** | High | Subagents run under parent's permit (D11); depth limit prevents fan-out |
 
 ### What We Are NOT Doing (Explicitly Deferred)
 
 1. **State graph routing** — Declarative graph definitions for complex workflows. Start with simple delegation tool.
 2. **Cross-agent communication** — Agents talking to each other without a parent. Delegation through parent only.
 3. **Webhook mode for Telegram** — Long polling first. Webhook requires public URL.
-4. **Slack/Discord/WhatsApp adapters** — Same `Channel` trait pattern. Trivially addable after Telegram proves the pattern.
+4. **Slack/Discord/WhatsApp adapters** — Same adapter pattern. Trivially addable after Telegram proves the pattern. Discord uses the same internal gateway API (D10); WhatsApp may not support edit-message streaming (D15).
 5. **Dynamic onboarding** — Invite codes, OAuth flows. Pre-configured binding is sufficient for now.
 6. **Session migration across channels** — Starting a TUI session and continuing in Telegram. Sessions are independent per channel binding.
 7. **Hot channel reload** — Adding/removing channels requires gateway restart.
 8. **Observability/OpenTelemetry** — Phase 16 in guidebook; separate from this plan.
+9. **Fire-and-forget (async) delegation** — A delegation mode where the parent tool returns immediately and the subagent runs in the background. The result is delivered to the user via a notification-style event (similar to `ScheduledNotification`). This would allow an orchestrator-style parent to handle multiple requests concurrently without blocking. Requires: async result delivery mechanism, follow-up context injection (worker results into parent history), per-worker cancellation UX. Build on top of the synchronous delegation model (Step 10) once it proves stable.
+10. **Parallel delegation** — Multiple `delegate_to_agent` tool calls in one LLM response currently run sequentially (SideEffecting safety tier). Parallel delegation would require a new safety tier or explicit opt-in. Deferred until usage patterns clarify whether this is needed.
 
 ### File Change Summary
 
@@ -1517,7 +1708,7 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | `crates/channels/src/sender_auth.rs` | **New** — SenderAuthPolicy | 6 |
 | `crates/channels/src/audit.rs` | **New** — AuditLogger for rejected senders | 6 |
 | `crates/channels/src/session_map.rs` | **New** — ChannelSessionMap (wraps SessionStore) | 7 |
-| `crates/channels/src/telegram.rs` | **New** — TelegramAdapter (in-process, calls gateway directly) | 8 |
+| `crates/channels/src/telegram.rs` | **New** — TelegramAdapter (in-process, calls gateway internal API), ResponseStreamer for edit-message streaming, markdown_to_telegram_html | 8 |
 | `crates/memory/src/session_store.rs` | **New** — LibsqlSessionStore | 4, 7 |
 | `crates/memory/src/schema.rs` | Modified — add migrations 0020-0021, required tables/indexes | 4, 7 |
 | `crates/memory/migrations/0020_*.sql` | **New** — gateway_sessions | 4 |
@@ -1534,12 +1725,12 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | `crates/tui/src/widgets.rs` | Modified — session info in status bar | 5 |
 | `crates/tui/src/channel_adapter.rs` | Modified — new frame handling | 5 |
 
-**Architecture:** Channel adapters run inside the VM alongside the gateway. They call gateway methods directly (no WebSocket). The runner's only channel responsibility is including `ChannelsConfig` in the bootstrap envelope and forwarding bot token env vars.
+**Architecture:** Channel adapters run inside the VM alongside the gateway. They call gateway's internal API directly (D10) — no WebSocket. The WebSocket handler is a thin wrapper around the same internal API. The runner's only channel responsibility is including `ChannelsConfig` in the bootstrap envelope and forwarding bot token env vars. The existing `Channel` trait is for WebSocket-based client adapters (TUI) only; in-process adapters use the internal API (D13).
 
 ### New Crate Dependencies
 
 | Crate | New Dependency | Version | Reason |
 |-------|---------------|---------|--------|
-| `channels` | `teloxide` | `0.13` | Telegram bot framework (feature-gated) |
+| `channels` | `teloxide` | `0.17` | Telegram bot framework (feature-gated) |
 | `channels` | `tokio` | `1` (full) | Async runtime for adapter (feature-gated) |
 | `types` or `tui` | `uuid` | `1` (features: `v7`) | Time-ordered session IDs (add `v7` feature to existing `uuid` dep) |

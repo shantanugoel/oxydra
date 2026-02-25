@@ -134,6 +134,21 @@ impl SessionStore for LibsqlSessionStore {
             .map_err(|e| query_error(format!("failed to archive gateway session: {e}")))?;
         Ok(())
     }
+
+    async fn update_display_name(
+        &self,
+        session_id: &str,
+        display_name: &str,
+    ) -> Result<(), MemoryError> {
+        self.conn
+            .execute(
+                "UPDATE gateway_sessions SET display_name = ?2, last_active_at = datetime('now') WHERE session_id = ?1",
+                params![session_id, display_name],
+            )
+            .await
+            .map_err(|e| query_error(format!("failed to update session display_name: {e}")))?;
+        Ok(())
+    }
 }
 
 fn record_from_row(row: &libsql::Row) -> Result<SessionRecord, MemoryError> {
@@ -353,5 +368,22 @@ mod tests {
 
         let listed = store.list_sessions("alice", false).await.unwrap();
         assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_display_name_sets_name() {
+        let store = test_store().await;
+        store
+            .create_session(&sample_record("ses-1", "alice"))
+            .await
+            .unwrap();
+
+        store
+            .update_display_name("ses-1", "My Research Session")
+            .await
+            .unwrap();
+
+        let got = store.get_session("ses-1").await.unwrap().unwrap();
+        assert_eq!(got.display_name.as_deref(), Some("My Research Session"));
     }
 }

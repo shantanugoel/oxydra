@@ -24,6 +24,7 @@ use types::{
     Context, GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn,
     GatewayClientFrame, GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck,
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
+    GatewaySessionCreated, GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched,
     GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
     GatewayTurnState, GatewayTurnStatus, Message, MessageRole, ModelId, ProviderId, Response,
     RuntimeError, SessionRecord, SessionStore, StartupStatusReport, StreamItem,
@@ -433,7 +434,7 @@ impl GatewayServer {
         &self,
         frame: GatewayClientFrame,
         active_session: &mut Arc<SessionState>,
-        _updates: &mut broadcast::Receiver<GatewayServerFrame>,
+        updates: &mut broadcast::Receiver<GatewayServerFrame>,
         sender: &mut SplitSink<WebSocket, AxumWsMessage>,
     ) -> Result<(), ()> {
         let gateway_session = active_session.gateway_session();
@@ -487,6 +488,133 @@ impl GatewayServer {
                     .health_status(Arc::clone(active_session), health_check)
                     .await;
                 send_server_frame(sender, &frame).await
+            }
+            GatewayClientFrame::CreateSession(create) => {
+                let user_id = active_session.user_id.clone();
+                let agent_name = create.agent_name.as_deref().unwrap_or("default");
+                match self
+                    .create_or_get_session(&user_id, None, agent_name, GATEWAY_CHANNEL_ID)
+                    .await
+                {
+                    Ok(new_session) => {
+                        // Update display_name in the session store if provided.
+                        if let Some(ref name) = create.display_name
+                            && let Some(store) = &self.session_store
+                            && let Err(e) = store
+                                .update_display_name(&new_session.session_id, name)
+                                .await
+                        {
+                            tracing::warn!(
+                                session_id = %new_session.session_id,
+                                error = %e,
+                                "failed to update session display_name"
+                            );
+                        }
+
+                        // Switch the connection's active session.
+                        *updates = new_session.events.subscribe();
+                        *active_session = Arc::clone(&new_session);
+
+                        let frame =
+                            GatewayServerFrame::SessionCreated(GatewaySessionCreated {
+                                request_id: create.request_id,
+                                session: new_session.gateway_session(),
+                                display_name: create.display_name,
+                                agent_name: new_session.agent_name.clone(),
+                            });
+                        send_server_frame(sender, &frame).await
+                    }
+                    Err(msg) => {
+                        send_error_frame(
+                            sender,
+                            Some(create.request_id),
+                            Some(gateway_session),
+                            None,
+                            msg,
+                        )
+                        .await
+                    }
+                }
+            }
+            GatewayClientFrame::ListSessions(list) => {
+                let user_id = active_session.user_id.clone();
+                match self
+                    .list_user_sessions(&user_id, list.include_archived)
+                    .await
+                {
+                    Ok(records) => {
+                        let sessions = records
+                            .into_iter()
+                            .filter(|r| {
+                                // Filter out subagent sessions unless requested.
+                                list.include_subagent_sessions
+                                    || r.parent_session_id.is_none()
+                            })
+                            .map(|r| GatewaySessionSummary {
+                                session_id: r.session_id,
+                                agent_name: r.agent_name,
+                                display_name: r.display_name,
+                                channel_origin: r.channel_origin,
+                                created_at: r.created_at,
+                                last_active_at: r.last_active_at,
+                                archived: r.archived,
+                            })
+                            .collect();
+                        let frame =
+                            GatewayServerFrame::SessionList(GatewaySessionList {
+                                request_id: list.request_id,
+                                sessions,
+                            });
+                        send_server_frame(sender, &frame).await
+                    }
+                    Err(msg) => {
+                        send_error_frame(
+                            sender,
+                            Some(list.request_id),
+                            Some(gateway_session),
+                            None,
+                            msg,
+                        )
+                        .await
+                    }
+                }
+            }
+            GatewayClientFrame::SwitchSession(switch) => {
+                let user_id = active_session.user_id.clone();
+                match self
+                    .create_or_get_session(
+                        &user_id,
+                        Some(&switch.session_id),
+                        "default",
+                        GATEWAY_CHANNEL_ID,
+                    )
+                    .await
+                {
+                    Ok(target_session) => {
+                        // Unsubscribe from old session, subscribe to new one.
+                        *updates = target_session.events.subscribe();
+                        let active_turn = target_session.active_turn_status().await;
+                        *active_session = Arc::clone(&target_session);
+
+                        let frame =
+                            GatewayServerFrame::SessionSwitched(GatewaySessionSwitched {
+                                request_id: switch.request_id,
+                                session: target_session.gateway_session(),
+                                active_turn,
+                            });
+                        send_server_frame(sender, &frame).await
+                    }
+                    Err(msg) => {
+                        send_error_frame(
+                            sender,
+                            Some(switch.request_id),
+                            Some(gateway_session),
+                            None,
+                            msg,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }

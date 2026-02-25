@@ -191,6 +191,59 @@ impl TuiViewModel {
                     notification.message
                 )));
             }
+            GatewayServerFrame::SessionCreated(created) => {
+                let name = created
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&created.session.session_id);
+                self.push_message(ChatMessage::System(format!(
+                    "New session created: {name} (agent: {})",
+                    created.agent_name,
+                )));
+            }
+            GatewayServerFrame::SessionList(list) => {
+                if list.sessions.is_empty() {
+                    self.push_message(ChatMessage::System(
+                        "No sessions found.".to_owned(),
+                    ));
+                } else {
+                    self.push_message(ChatMessage::System(
+                        "Sessions:".to_owned(),
+                    ));
+                    for s in &list.sessions {
+                        let name = s
+                            .display_name
+                            .as_deref()
+                            .unwrap_or("-");
+                        let short_id = if s.session_id.len() > 8 {
+                            &s.session_id[..8]
+                        } else {
+                            &s.session_id
+                        };
+                        self.push_message(ChatMessage::System(format!(
+                            "  {short_id}  {name}  ({}, last active: {})",
+                            s.agent_name, s.last_active_at,
+                        )));
+                    }
+                    self.push_message(ChatMessage::System(
+                        "Use /switch <session_id> to switch sessions.".to_owned(),
+                    ));
+                }
+            }
+            GatewayServerFrame::SessionSwitched(switched) => {
+                self.push_message(ChatMessage::System(format!(
+                    "Switched to session: {}",
+                    switched.session.session_id,
+                )));
+                if let Some(ref turn) = switched.active_turn
+                    && turn.state == GatewayTurnState::Running
+                {
+                    self.push_message(ChatMessage::System(
+                        "Active turn in progress — resuming stream.".to_owned(),
+                    ));
+                    self.push_message(ChatMessage::Assistant(String::new()));
+                }
+            }
         }
     }
 
@@ -202,7 +255,7 @@ impl TuiViewModel {
     }
 
     /// Push a message and trim oldest entries if over cap.
-    fn push_message(&mut self, message: ChatMessage) {
+    pub fn push_message(&mut self, message: ChatMessage) {
         self.message_history.push(message);
         self.enforce_history_cap();
     }

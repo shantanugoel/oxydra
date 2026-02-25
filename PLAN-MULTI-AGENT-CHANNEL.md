@@ -759,74 +759,80 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 5: Session Lifecycle UX
+### Step 5: Session Lifecycle UX ✅ DONE
 
 **Goal:** `/new`, `/sessions`, `/switch` commands available in TUI and through protocol.
 
-**Crates:** `types`, `gateway`, `tui`
+**Crates:** `types`, `gateway`, `tui`, `memory`
 
-**Changes:**
+**Changes applied:**
 
 1. **`types/src/channel.rs` — new v2 client frames:**
-   ```rust
-   // Add to GatewayClientFrame enum:
-   CreateSession(GatewayCreateSession),
-   ListSessions(GatewayListSessions),
-   SwitchSession(GatewaySwitchSession),
-
-   pub struct GatewayCreateSession {
-       pub request_id: String,
-       pub display_name: Option<String>,
-       pub agent_name: Option<String>,  // None → "default"
-   }
-
-   pub struct GatewayListSessions {
-       pub request_id: String,
-       pub include_archived: bool,
-       #[serde(default)]
-       pub include_subagent_sessions: bool,  // default false — hide subagent sessions
-   }
-
-   pub struct GatewaySwitchSession {
-       pub request_id: String,
-       pub session_id: String,  // maps to runtime_session_id internally
-   }
-   ```
+   - `GatewayCreateSession { request_id, display_name?, agent_name? }` — request creation of a new session
+   - `GatewayListSessions { request_id, include_archived, include_subagent_sessions }` — request session listing
+   - `GatewaySwitchSession { request_id, session_id }` — switch connection to a different session
+   - Added all three as variants to `GatewayClientFrame` enum
 
 2. **`types/src/channel.rs` — new v2 server frames:**
-   ```rust
-   // Add to GatewayServerFrame enum:
-   SessionCreated(GatewaySessionCreated),
-   SessionList(GatewaySessionList),
-   SessionSwitched(GatewaySessionSwitched),
-   ```
+   - `GatewaySessionCreated { request_id, session, display_name?, agent_name }` — confirmation of new session
+   - `GatewaySessionList { request_id, sessions: Vec<GatewaySessionSummary> }` — listing response
+   - `GatewaySessionSummary { session_id, agent_name, display_name?, channel_origin, created_at, last_active_at, archived }` — summary of a session in a listing
+   - `GatewaySessionSwitched { request_id, session, active_turn? }` — confirmation of session switch
+   - Added all three as variants to `GatewayServerFrame` enum
+   - Re-exported all new types from `types/src/lib.rs`
 
-3. **`gateway/src/lib.rs`:**
-   - Handle new client frame variants in `handle_client_frame()`
-   - `CreateSession`: create new SessionState, persist, switch connection's active session
-   - `ListSessions`: read from SessionStore, filter out `parent_session_id IS NOT NULL` by default (subagent sessions hidden unless `include_subagent_sessions` is true)
-   - `SwitchSession`: unsubscribe from current session broadcast, subscribe to target session
+3. **`types/src/session.rs` — new trait method:**
+   - Added `update_display_name(session_id, display_name)` to `SessionStore` trait
 
-4. **`tui/src/app.rs`:**
-   - Intercept `/new`, `/sessions`, `/switch <id>` before sending as turns
-   - Convert to appropriate `GatewayClientFrame` variants
-   - Handle `SessionCreated`, `SessionList`, `SessionSwitched` server frames
+4. **`memory/src/session_store.rs` — trait implementation:**
+   - Implemented `update_display_name()` in `LibsqlSessionStore` using SQL UPDATE
+   - Added test: `update_display_name_sets_name`
 
-5. **`tui/src/bin/oxydra-tui.rs`:**
-   - Add `--session <id>` CLI flag
-   - If provided: send it as `session_id` in Hello
-   - If not provided: send `create_new_session: true` in Hello
+5. **`gateway/src/lib.rs` — new frame handlers in `handle_client_frame()`:**
+   - `CreateSession`: creates new session via `create_or_get_session()`, persists display name, switches connection's active session and broadcast subscription, returns `SessionCreated`
+   - `ListSessions`: reads from `list_user_sessions()`, filters out subagent sessions (parent_session_id IS NOT NULL) unless `include_subagent_sessions` is true, returns `SessionList`
+   - `SwitchSession`: looks up session by ID via `create_or_get_session()`, switches broadcast subscription, returns `SessionSwitched` with current `active_turn` status
+   - Changed `_updates` parameter to `updates` (now used for broadcast re-subscription on session switch/create)
 
-6. **`tui/src/widgets.rs` and `tui/src/ui_model.rs`:**
-   - Show current session ID (shortened) in status bar
-   - Show `/new`, `/sessions` hints when idle
+6. **`tui/src/channel_adapter.rs` — session command methods:**
+   - Added `create_session()`, `list_sessions()`, `switch_session()` methods that enqueue appropriate `GatewayClientFrame` variants
+   - Added `with_session_id()` constructor for `--session` CLI flag support
+   - Updated `build_hello_frame()`: reconnection uses stored session_id; first connect with `--session` joins that session; default behavior sends `create_new_session: true`
+   - Updated `apply_gateway_frame()` to handle `SessionCreated`, `SessionList`, `SessionSwitched` server frames
 
-**Verification:**
-- New test: `/new` creates session and switches to it
-- New test: `/sessions` returns list
-- New test: `/switch` changes active session
-- New test: two TUI windows with separate sessions work independently
-- TUI integration tests updated for v2 protocol and pass
+7. **`tui/src/app.rs` — slash command interception:**
+   - Added `try_handle_slash_command()` method that intercepts `/new [name]`, `/sessions`, `/switch <id>` before sending as turns
+   - `/new [name]` → sends `CreateSession` with optional display name
+   - `/sessions` → sends `ListSessions`
+   - `/switch <id>` → sends `SwitchSession`; returns error if no session_id argument provided
+   - Unknown `/` commands are treated as normal prompts
+   - Added `with_session_id()` constructor for `TuiApp`
+
+8. **`tui/src/bin/oxydra-tui.rs` — `--session` CLI flag:**
+   - Added `--session <id>` CLI argument (optional)
+   - When provided: creates `TuiApp::with_session_id()` (joins existing session)
+   - When omitted: creates `TuiApp::new()` (creates new session)
+
+9. **`tui/src/ui_model.rs` — view model updates:**
+   - `apply_server_frame()` handles `SessionCreated` (shows "New session created" system message), `SessionList` (shows formatted session listing with shortened IDs), `SessionSwitched` (shows switch confirmation and resumes stream if active turn)
+   - `push_message()` made `pub` for use by `app.rs` error display
+
+10. **`tui/src/widgets.rs` — status bar updates:**
+    - Session ID displayed shortened (first 8 chars) for readability
+    - Idle key hints updated to `[Ctrl+C to exit | /new /sessions /switch]`
+    - Existing widget tests updated for new hint text and shortened IDs
+
+**Verification:** ✅ All tests pass, clippy clean
+- New gateway tests:
+  - `create_session_frame_creates_and_switches_to_new_session`: CreateSession creates, persists, and switches connection
+  - `list_sessions_returns_user_sessions`: ListSessions returns all user sessions
+  - `switch_session_changes_active_session`: SwitchSession changes active session and allows turns
+  - `switch_to_nonexistent_session_returns_error`: invalid session_id returns error
+  - `list_sessions_filters_subagent_sessions`: subagent sessions filterable
+  - `two_tui_windows_with_separate_sessions_work_independently`: independent session isolation
+- New memory test: `update_display_name_sets_name`
+- All existing tests continue to pass (556 total, 0 failures)
+- TUI integration tests pass with v2 protocol
 
 ---
 

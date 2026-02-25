@@ -31,6 +31,9 @@ pub enum GatewayClientFrame {
     SendTurn(GatewaySendTurn),      // { session_id, turn_id, prompt }
     CancelActiveTurn(GatewayCancelActiveTurn),  // { session_id, turn_id }
     HealthCheck(GatewayHealthCheck),
+    CreateSession(GatewayCreateSession),        // { display_name?, agent_name? }
+    ListSessions(GatewayListSessions),          // { include_archived, include_subagent_sessions }
+    SwitchSession(GatewaySwitchSession),        // { session_id }
 }
 ```
 
@@ -47,6 +50,9 @@ pub enum GatewayServerFrame {
     ScheduledNotification(GatewayScheduledNotification),  // ← scheduled task result
     Error(GatewayErrorFrame),
     HealthStatus(GatewayHealthStatus),
+    SessionCreated(GatewaySessionCreated),   // ← new session confirmation
+    SessionList(GatewaySessionList),         // ← session listing response
+    SessionSwitched(GatewaySessionSwitched), // ← session switch confirmation
 }
 ```
 
@@ -169,6 +175,42 @@ impl SchedulerNotifier for GatewayServer {
 ```
 
 When a scheduled task completes and its notification policy triggers delivery, the executor calls `notify_user()`, which broadcasts the `ScheduledNotification` frame to all active WebSocket connections for that user.
+
+## Session Lifecycle UX
+
+The gateway supports interactive session management through dedicated protocol frames. Users can create, list, and switch between sessions without disconnecting.
+
+### Protocol Frames
+
+**Client → Server:**
+- `CreateSession { request_id, display_name?, agent_name? }` — create a new session and switch to it
+- `ListSessions { request_id, include_archived, include_subagent_sessions }` — list the user's sessions
+- `SwitchSession { request_id, session_id }` — switch the connection to a different existing session
+
+**Server → Client:**
+- `SessionCreated { request_id, session, display_name?, agent_name }` — confirms creation and includes the new session's identity
+- `SessionList { request_id, sessions: Vec<GatewaySessionSummary> }` — returns session summaries with IDs, names, timestamps, and status
+- `SessionSwitched { request_id, session, active_turn? }` — confirms the switch and reports any active turn on the target session
+
+### Gateway Handling
+
+When `CreateSession` arrives, the gateway creates a new UUID v7 session, persists it to the session store (with optional display name), and switches the connection's active broadcast subscription to the new session. The old session remains in memory for other connections.
+
+When `ListSessions` arrives, the gateway reads from the session store, filters out subagent sessions (those with `parent_session_id`) unless `include_subagent_sessions` is true, and returns `GatewaySessionSummary` records.
+
+When `SwitchSession` arrives, the gateway looks up the target session by ID (in-memory first, then from the session store for resumed sessions). On success, the connection's broadcast subscription is switched and the response includes the target session's active turn status.
+
+### TUI Integration
+
+The TUI intercepts slash commands before sending them as turns:
+
+- `/new [name]` → `CreateSession` with optional display name
+- `/sessions` → `ListSessions` (shows formatted listing in chat)
+- `/switch <session_id>` → `SwitchSession` (prefix matching supported)
+
+The status bar shows the current session ID (shortened to 8 chars) and idle hints for available commands: `[Ctrl+C to exit | /new /sessions /switch]`.
+
+The `--session <id>` CLI flag on `oxydra-tui` joins an existing session instead of creating a new one. Without the flag, a new session is created automatically on first connect.
 
 ## TUI Channel Adapter
 
@@ -331,4 +373,3 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 - **No external channels yet:** Only the TUI adapter is implemented; external channel adapters (Telegram, Discord, Slack) are planned for Phase 14
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **Scheduled notifications are session-scoped:** If no user session is connected when a scheduled notification fires, the notification is lost (results persist in memory via the scheduled turn's session, but the push notification is not queued)
-- **No session lifecycle UX:** `/new`, `/sessions`, `/switch` commands are planned for Phase 18

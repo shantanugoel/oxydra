@@ -330,6 +330,24 @@ impl TuiApp {
         }
     }
 
+    /// Create a `TuiApp` that joins an existing session by ID.
+    pub fn with_session_id(
+        gateway_endpoint: impl Into<String>,
+        user_id: impl Into<String>,
+        connection_id: impl Into<String>,
+        session_id: String,
+    ) -> Self {
+        let user_id = user_id.into();
+        let connection_id = connection_id.into();
+        Self {
+            adapter: TuiChannelAdapter::with_session_id(user_id, connection_id, session_id),
+            view_model: TuiViewModel::new(),
+            gateway_endpoint: gateway_endpoint.into(),
+            last_ctrl_c_at: None,
+            consecutive_ctrl_c: 0,
+        }
+    }
+
     /// Run the interactive TUI loop.
     ///
     /// This takes ownership of the terminal (raw mode, alternate screen) via
@@ -661,6 +679,57 @@ impl TuiApp {
 
     // -- Action handler ------------------------------------------------------
 
+    /// Try to handle the input as a slash command.
+    ///
+    /// Returns `None` if the input is not a slash command (should be sent as
+    /// a normal turn). Returns `Some(Ok(()))` if handled, or `Some(Err(msg))`
+    /// if the command had an error (e.g. missing argument).
+    async fn try_handle_slash_command(&self, input: &str) -> Option<Result<(), String>> {
+        let trimmed = input.trim();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or("");
+        let arg = parts.next().map(|s| s.trim());
+
+        match command {
+            "/new" => {
+                let display_name = arg.filter(|a| !a.is_empty()).map(|a| a.to_owned());
+                match self
+                    .adapter
+                    .create_session(next_request_id(), display_name)
+                {
+                    Ok(()) => Some(Ok(())),
+                    Err(e) => Some(Err(format!("failed to create session: {e}"))),
+                }
+            }
+            "/sessions" => match self.adapter.list_sessions(next_request_id()) {
+                Ok(()) => Some(Ok(())),
+                Err(e) => Some(Err(format!("failed to list sessions: {e}"))),
+            },
+            "/switch" => {
+                let Some(session_id) = arg.filter(|a| !a.is_empty()) else {
+                    return Some(Err(
+                        "usage: /switch <session_id>".to_owned(),
+                    ));
+                };
+                match self
+                    .adapter
+                    .switch_session(next_request_id(), session_id)
+                {
+                    Ok(()) => Some(Ok(())),
+                    Err(e) => Some(Err(format!("failed to switch session: {e}"))),
+                }
+            }
+            _ => {
+                // Unknown slash command — treat as a regular prompt.
+                None
+            }
+        }
+    }
+
     /// Handle a single user action. Returns `true` if the main loop should
     /// exit.
     async fn handle_action(
@@ -681,6 +750,20 @@ impl TuiApp {
                     return Ok(false);
                 }
                 if !matches!(self.view_model.connection_state, ConnectionState::Connected) {
+                    return Ok(false);
+                }
+
+                // Check for slash commands.
+                if let Some(handled) = self.try_handle_slash_command(&input).await {
+                    let prompt = self.view_model.take_input();
+                    self.view_model.append_user_message(&prompt);
+                    if self.view_model.should_auto_scroll() {
+                        self.view_model.scroll_to_bottom();
+                    }
+                    if let Err(msg) = handled {
+                        self.view_model
+                            .push_message(crate::ui_model::ChatMessage::Error(msg));
+                    }
                     return Ok(false);
                 }
 

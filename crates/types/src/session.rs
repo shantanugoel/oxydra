@@ -48,6 +48,13 @@ pub trait SessionStore: Send + Sync {
     /// Update the `last_active_at` timestamp for a session.
     async fn touch_session(&self, session_id: &str) -> Result<(), MemoryError>;
 
+    /// Update the display name for a session.
+    async fn update_display_name(
+        &self,
+        session_id: &str,
+        display_name: &str,
+    ) -> Result<(), MemoryError>;
+
     /// Mark a session as archived (soft-delete).
     async fn archive_session(&self, session_id: &str) -> Result<(), MemoryError>;
 }

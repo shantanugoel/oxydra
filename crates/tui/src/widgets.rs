@@ -391,9 +391,10 @@ impl Widget for StatusBar<'_> {
             }
         }
 
-        // Session ID.
+        // Session ID (shortened for readability).
         if let Some(sid) = self.session_id {
-            spans.push(Span::raw(format!(" | session: {sid}")));
+            let display_id = if sid.len() > 8 { &sid[..8] } else { sid };
+            spans.push(Span::raw(format!(" | session: {display_id}")));
         }
 
         // Model name (when available).
@@ -412,7 +413,7 @@ impl Widget for StatusBar<'_> {
         let hint = if self.active_turn_id.is_some() {
             " [Ctrl+C to cancel]"
         } else {
-            " [Ctrl+C to exit]"
+            " [Ctrl+C to exit | /new /sessions /switch]"
         };
         spans.push(Span::styled(hint, Style::new().fg(Color::DarkGray)));
 
@@ -593,7 +594,7 @@ mod tests {
             "status bar should show 'idle', got: {status}"
         );
         assert!(
-            status.contains("[Ctrl+C to exit]"),
+            status.contains("[Ctrl+C to exit"),
             "status bar should show exit hint, got: {status}"
         );
 
@@ -884,9 +885,10 @@ mod tests {
         let buf = render(&mut model, &adapter, 80, 24);
 
         let status = row_text(&buf, 23, 80);
+        // Session ID is shortened to first 8 chars for readability.
         assert!(
-            status.contains("session: my-session-42"),
-            "status bar should show session id, got: {status}"
+            status.contains("session: my-sessi"),
+            "status bar should show shortened session id, got: {status}"
         );
     }
 

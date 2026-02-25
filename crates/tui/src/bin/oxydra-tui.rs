@@ -33,6 +33,11 @@ struct Cli {
     /// User identifier for the gateway session.
     #[arg(long, default_value = "default")]
     user: String,
+
+    /// Join an existing session by ID instead of creating a new one.
+    /// When omitted, a new session is created automatically.
+    #[arg(long)]
+    session: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -48,7 +53,11 @@ fn main() -> ExitCode {
 
     let connection_id = Uuid::new_v4().to_string();
 
-    let mut app = TuiApp::new(&gateway_endpoint, &cli.user, &connection_id);
+    let mut app = if let Some(session_id) = cli.session {
+        TuiApp::with_session_id(&gateway_endpoint, &cli.user, &connection_id, session_id)
+    } else {
+        TuiApp::new(&gateway_endpoint, &cli.user, &connection_id)
+    };
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

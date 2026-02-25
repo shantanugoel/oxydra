@@ -13,10 +13,12 @@ mod tracing;
 pub use channel::{
     Channel, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream, ChannelOutboundEvent,
     GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn, GatewayClientFrame,
-    GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
-    GatewayHelloAck, GatewayScheduledNotification, GatewaySendTurn, GatewayServerFrame,
-    GatewaySession, GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress,
-    GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus,
+    GatewayClientHello, GatewayCreateSession, GatewayErrorFrame, GatewayHealthCheck,
+    GatewayHealthStatus, GatewayHelloAck, GatewayListSessions, GatewayScheduledNotification,
+    GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewaySessionCreated,
+    GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched, GatewaySwitchSession,
+    GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
+    GatewayTurnState, GatewayTurnStatus,
 };
 pub use config::{
     AgentConfig, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,

@@ -12,8 +12,9 @@ use tokio_tungstenite::{
 use types::{
     Channel, ChannelError, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream,
     ChannelOutboundEvent, GATEWAY_PROTOCOL_VERSION, GatewayCancelActiveTurn, GatewayClientFrame,
-    GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, GatewayTurnProgress,
-    GatewayTurnState, GatewayTurnStatus,
+    GatewayClientHello, GatewayCreateSession, GatewayHealthCheck, GatewayListSessions,
+    GatewayServerFrame, GatewaySwitchSession, GatewayTurnProgress, GatewayTurnState,
+    GatewayTurnStatus,
 };
 
 const TUI_CHANNEL_ID: &str = "tui";
@@ -61,6 +62,11 @@ pub struct TuiChannelAdapter {
     connection_id: String,
     inbound_sender: broadcast::Sender<Result<ChannelInboundEvent, ChannelError>>,
     state: Arc<Mutex<TuiUiState>>,
+    /// If set by `--session`, this session ID is used in the first Hello.
+    /// After connection, the gateway's HelloAck session_id takes over.
+    initial_session_id: Arc<Mutex<Option<String>>>,
+    /// Whether the first connection should request a new session.
+    create_new_session_on_connect: bool,
 }
 
 impl TuiChannelAdapter {
@@ -71,6 +77,25 @@ impl TuiChannelAdapter {
             connection_id: connection_id.into(),
             inbound_sender,
             state: Arc::new(Mutex::new(TuiUiState::default())),
+            initial_session_id: Arc::new(Mutex::new(None)),
+            create_new_session_on_connect: true,
+        }
+    }
+
+    /// Create a new adapter with a specific session ID to join on connect.
+    pub fn with_session_id(
+        user_id: impl Into<String>,
+        connection_id: impl Into<String>,
+        session_id: String,
+    ) -> Self {
+        let (inbound_sender, _) = broadcast::channel(EVENT_BUFFER_CAPACITY);
+        Self {
+            user_id: user_id.into(),
+            connection_id: connection_id.into(),
+            inbound_sender,
+            state: Arc::new(Mutex::new(TuiUiState::default())),
+            initial_session_id: Arc::new(Mutex::new(Some(session_id))),
+            create_new_session_on_connect: false,
         }
     }
 
@@ -83,13 +108,38 @@ impl TuiChannelAdapter {
     }
 
     pub async fn build_hello_frame(&self, request_id: impl Into<String>) -> GatewayClientFrame {
-        let session_id = self.state.lock().await.session_id.clone();
+        let state = self.state.lock().await;
+        // If we have a session_id from a prior HelloAck (reconnection), use it.
+        if let Some(ref sid) = state.session_id {
+            return GatewayClientFrame::Hello(GatewayClientHello {
+                request_id: request_id.into(),
+                protocol_version: GATEWAY_PROTOCOL_VERSION,
+                user_id: self.user_id.clone(),
+                session_id: Some(sid.clone()),
+                create_new_session: false,
+            });
+        }
+        drop(state);
+
+        // First connection: check for --session flag.
+        let initial = self.initial_session_id.lock().await.clone();
+        if let Some(sid) = initial {
+            return GatewayClientFrame::Hello(GatewayClientHello {
+                request_id: request_id.into(),
+                protocol_version: GATEWAY_PROTOCOL_VERSION,
+                user_id: self.user_id.clone(),
+                session_id: Some(sid),
+                create_new_session: false,
+            });
+        }
+
+        // Default behavior: create a new session.
         GatewayClientFrame::Hello(GatewayClientHello {
             request_id: request_id.into(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
             user_id: self.user_id.clone(),
-            session_id,
-            create_new_session: false,
+            session_id: None,
+            create_new_session: self.create_new_session_on_connect,
         })
     }
 
@@ -155,6 +205,40 @@ impl TuiChannelAdapter {
             .map_err(|_| ChannelError::Unavailable {
                 channel: TUI_CHANNEL_ID.to_owned(),
             })
+    }
+
+    /// Send a CreateSession frame to the gateway.
+    pub fn create_session(
+        &self,
+        request_id: impl Into<String>,
+        display_name: Option<String>,
+    ) -> Result<(), ChannelError> {
+        self.enqueue_client_frame(GatewayClientFrame::CreateSession(GatewayCreateSession {
+            request_id: request_id.into(),
+            display_name,
+            agent_name: None,
+        }))
+    }
+
+    /// Send a ListSessions frame to the gateway.
+    pub fn list_sessions(&self, request_id: impl Into<String>) -> Result<(), ChannelError> {
+        self.enqueue_client_frame(GatewayClientFrame::ListSessions(GatewayListSessions {
+            request_id: request_id.into(),
+            include_archived: false,
+            include_subagent_sessions: false,
+        }))
+    }
+
+    /// Send a SwitchSession frame to the gateway.
+    pub fn switch_session(
+        &self,
+        request_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<(), ChannelError> {
+        self.enqueue_client_frame(GatewayClientFrame::SwitchSession(GatewaySwitchSession {
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+        }))
     }
 
     pub async fn apply_gateway_frame(&self, frame: &GatewayServerFrame) {
@@ -261,6 +345,30 @@ impl TuiChannelAdapter {
                     .unwrap_or(&notification.schedule_id);
                 state.last_scheduled_notification =
                     Some(format!("[Scheduled: {label}] {}", notification.message));
+            }
+            GatewayServerFrame::SessionCreated(created) => {
+                state.connected = true;
+                state.session_id = Some(created.session.session_id.clone());
+                state.last_error = None;
+                // Clear active turn since we just switched to a new session.
+                state.clear_active_turn();
+                state.activity_status = None;
+            }
+            GatewayServerFrame::SessionList(_) => {
+                // Session list doesn't alter protocol state — it's displayed
+                // by the view model in message history.
+            }
+            GatewayServerFrame::SessionSwitched(switched) => {
+                state.connected = true;
+                state.session_id = Some(switched.session.session_id.clone());
+                state.last_error = None;
+                state.rendered_output.clear();
+                state.activity_status = None;
+                if let Some(turn) = &switched.active_turn {
+                    state.mark_active_turn(turn);
+                } else {
+                    state.clear_active_turn();
+                }
             }
         }
     }

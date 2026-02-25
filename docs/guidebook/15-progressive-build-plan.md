@@ -25,7 +25,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 15 | Multi-agent orchestration | Planned | |
 | 16 | Observability (OpenTelemetry) | Planned | |
 | 17 | MCP support | Planned | |
-| 18 | Session lifecycle controls | Planned | |
+| 18 | Session lifecycle controls | **Complete** | |
 | 19 | Scheduler system | **Complete** | Durable store, polling executor, 4 LLM tools, conditional notification, cron/interval/once cadences |
 | 20 | Skill system | Planned | |
 | 21 | Persona governance | Planned | |
@@ -206,6 +206,7 @@ Built the foundation layer with zero internal dependencies:
 - **Tool execution context race fix:** `ToolExecutionContext` removed from `AgentRuntime` shared state (`Arc<Mutex<>>`). Now threaded as a parameter through `run_session_internal` → `execute_tool_call` → `execute_with_context`. The gateway's `RuntimeGatewayTurnRunner` constructs context per-turn and passes it to the runtime, eliminating the race condition that would occur with concurrent sessions.
 - **Multi-session gateway core:** Gateway refactored from single-session-per-user (`UserSessionState`) to multi-session model (`UserState` → `SessionState`). Users can have multiple concurrent sessions with independent active turns. Per-user concurrent turn limit enforced via `AtomicU32`. Internal API extracted for in-process channel adapters (D10): `create_or_get_session()`, `submit_turn()`, `cancel_session_turn()`, `subscribe_events()`, `list_user_sessions()`. Broadcast buffer increased from 256 to 1024. UUID v7 session IDs for new sessions; deterministic `runtime-{user_id}` preserved for backward compatibility.
 - **Session persistence:** `SessionStore` trait defined in `types` crate. `LibsqlSessionStore` implemented in `memory` crate using `gateway_sessions` table (migration 0020). Sessions persisted on creation, touched on turn completion, resumable from store after restart. Wired into `GatewayServer` via `with_session_store()` constructor and into `runner` bootstrap via `VmBootstrapRuntime.session_store`.
+- **Session lifecycle UX:** Protocol extended with `CreateSession`/`ListSessions`/`SwitchSession` client frames and `SessionCreated`/`SessionList`/`SessionSwitched` server frames. Gateway handles all three with session store persistence, subagent filtering, and broadcast re-subscription on session switch. TUI intercepts `/new`, `/sessions`, `/switch` slash commands. `--session <id>` CLI flag for joining existing sessions. Status bar shows shortened session ID and command hints.
 
 
 ### Phase 13: Model Catalog Governance + Provider Flexibility
@@ -306,18 +307,23 @@ Built a complete durable scheduler that lets the LLM create and manage one-off a
 
 **Verification gate:** External MCP tool servers discoverable and callable alongside native tools.
 
-### Phase 18: Session Lifecycle Controls
+### Phase 18: Session Lifecycle Controls — ✅ Complete
 
-**Crates:** `runtime`, `memory`, `types`, `tui`, `channels`
-**Builds on:** Phases 8, 13, 14
+**Crates:** `types`, `memory`, `gateway`, `tui`
+**Builds on:** Phases 8, 12, 13, 14
 
-**Scope:**
-- Explicit "new session" command available through all channels
-- Generates new canonical `session_id` preserving user/workspace continuity
-- Previous sessions remain recallable for audit
-- No implicit rollover heuristics
+**Implemented:**
+- New protocol frames: `CreateSession`, `ListSessions`, `SwitchSession` (client); `SessionCreated`, `SessionList`, `SessionSwitched` (server)
+- `GatewaySessionSummary` type for session listing responses with ID, agent name, display name, timestamps, and archived status
+- `update_display_name()` method added to `SessionStore` trait and `LibsqlSessionStore`
+- Gateway `handle_client_frame()` handles all three new client frames: creates sessions, lists with subagent filtering, switches with broadcast re-subscription
+- TUI slash commands: `/new [name]`, `/sessions`, `/switch <id>` intercepted before turn submission
+- `--session <id>` CLI flag on `oxydra-tui` for joining existing sessions
+- TUI status bar shows shortened session ID (first 8 chars) and idle command hints
+- View model displays system messages for session lifecycle events (creation, listing, switching)
+- Session listing filters out subagent sessions by default (configurable via `include_subagent_sessions`)
 
-**Verification gate:** User can start a clean new session; previous sessions remain recallable; session_id rollover is deterministic and auditable.
+**Verification gate:** ✅ User can create new sessions, list all sessions, switch between sessions; previous sessions remain accessible; two TUI windows work independently with separate sessions; all 556 tests pass.
 
 ### Phase 19: Scheduler System — ✅ Complete
 

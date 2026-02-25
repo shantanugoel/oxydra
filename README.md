@@ -10,7 +10,9 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 - **Persistent memory** — Hybrid retrieval (vector + FTS5) over libSQL with conversation summarization and LLM-callable memory tools (search, save, update, delete)
 - **Scheduler** — Durable one-off and periodic task scheduling with cron/interval cadences, conditional notification routing, and automatic execution through the same agent runtime policy envelope
 - **Isolation tiers** — MicroVM, container, and process-level sandboxing via the runner/guest model
-- **Gateway and channels** — WebSocket-based gateway with pluggable channel adapters (TUI included)
+- **Multi-session gateway** — Protocol v2 WebSocket gateway with per-user multi-session support, session persistence, concurrent turn management, and pluggable channel adapters
+- **Session lifecycle** — Create, list, and switch between named sessions from the TUI (`/new`, `/sessions`, `/switch`) or via the `--session` CLI flag
+- **External channels (Telegram)** — In-process Telegram bot adapter with pre-configured sender authorization, forum topic threading, and live edit-message streaming responses
 - **Configuration** — Layered config (files, env vars, CLI overrides) with deterministic precedence and validation
 
 ## CAUTION - WIP
@@ -128,6 +130,12 @@ Connect the TUI to a running session:
 cargo run -p runner -- --tui --config .oxydra/runner.toml --user alice
 ```
 
+Join a specific existing session by ID:
+
+```bash
+cargo run -p runner -- --tui --config .oxydra/runner.toml --user alice --session <session-id>
+```
+
 If you see `oxydra-tui was not found in PATH`, build or install it:
 
 ```bash
@@ -138,6 +146,19 @@ target/debug/oxydra-tui --gateway-endpoint ws://127.0.0.1:PORT/ws --user alice
 ```
 
 See `cargo run -p runner -- --help` for all CLI options.
+
+### Session management (TUI)
+
+Once connected, you can manage multiple sessions from within the TUI:
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Create a new session (starts fresh conversation) |
+| `/new <name>` | Create a new named session |
+| `/sessions` | List all your sessions with IDs and last-active times |
+| `/switch <id>` | Switch the TUI to an existing session by ID (prefix match) |
+
+Each TUI window manages one session at a time. You can open multiple TUI windows connected to the same gateway to work in multiple sessions simultaneously.
 
 ## Configuration
 
@@ -170,13 +191,48 @@ API key resolution order: explicit config value > custom `api_key_env` > provide
 The runner requires two config files:
 
 - **`runner.toml`** — Global settings: workspace root, default isolation tier, guest images, user mappings
-- **`users/<id>.toml`** — Per-user overrides: resource limits, sandbox tier, mount paths, credential references
+- **`users/<id>.toml`** — Per-user overrides: resource limits, sandbox tier, mount paths, credential references, and external channel configuration
 
 See `examples/config/` for complete annotated configuration files:
 
 - [`agent.toml`](examples/config/agent.toml) — Agent runtime, provider, memory, and reliability settings
 - [`runner.toml`](examples/config/runner.toml) — Runner global settings (workspace root, sandbox tier, guest images, users)
-- [`runner-user.toml`](examples/config/runner-user.toml) — Per-user overrides (mounts, resources, credentials, behavior)
+- [`runner-user.toml`](examples/config/runner-user.toml) — Per-user overrides (mounts, resources, credentials, behavior, external channels)
+
+### External channels (Telegram)
+
+Oxydra can receive messages via Telegram and respond through a bot. The adapter runs inside the VM alongside the gateway — no separate process or webhook server required.
+
+**Setup:**
+
+1. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and copy the bot token
+2. Set the token as an environment variable before starting the runner:
+   ```bash
+   export ALICE_TELEGRAM_BOT_TOKEN=your-bot-token-here
+   ```
+3. Find your Telegram user ID (e.g. using [@userinfobot](https://t.me/userinfobot))
+4. Add the channel config to your per-user config file (e.g. `.oxydra/users/alice.toml`):
+
+```toml
+[channels.telegram]
+enabled = true
+bot_token_env = "ALICE_TELEGRAM_BOT_TOKEN"
+
+[[channels.telegram.senders]]
+platform_ids = ["12345678"]   # Your Telegram user ID
+```
+
+Only senders explicitly listed in `[[channels.telegram.senders]]` can interact with the agent. Unknown senders are silently dropped and audit-logged to `<workspace>/.oxydra/sender_audit.log`.
+
+**Forum topics as separate sessions:**
+
+In Telegram groups with forum mode enabled, each topic maps to an independent session — so you can have a "Research" topic and a "Coding" topic running simultaneously without blocking each other.
+
+**Session commands via Telegram:**
+
+The same `/new`, `/sessions`, `/switch`, `/cancel`, and `/status` commands work in Telegram as in the TUI.
+
+See [`examples/config/runner-user.toml`](examples/config/runner-user.toml) for the full annotated channel configuration reference.
 
 ## Workspace layout
 
@@ -191,8 +247,8 @@ crates/
   sandbox/        WASM sandbox and security policies
   runner/         Runner lifecycle, guest orchestration, catalog commands
   shell-daemon/   Shell daemon protocol for guest environments
-  channels/       Channel trait and registry
-  gateway/        WebSocket gateway server
+  channels/       Channel adapters (Telegram) and auth pipeline
+  gateway/        WebSocket gateway server (multi-session, protocol v2)
   tui/            Terminal UI adapter
 docs/guidebook/   Architecture and implementation documentation
 examples/config/  Example configuration files

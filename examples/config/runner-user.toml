@@ -34,3 +34,40 @@
 # sandbox_tier    = "container"   # Override the global default_tier for this user
 # shell_enabled   = true          # Enable/disable shell tool access
 # browser_enabled = false         # Enable/disable browser tool access
+
+# --- External Channels ---
+# Per-user channel configuration for external messaging platforms.
+# Channel adapters run inside the VM alongside the gateway.
+# Bot tokens are forwarded from the runner's environment into the VM.
+#
+# IMPORTANT: Only senders explicitly listed in [[channels.*.senders]] can
+# interact with the agent. Unknown senders are silently dropped and audit-logged.
+# All authorized senders are treated as the user — there is no role hierarchy.
+
+# --- Telegram ---
+# To enable the Telegram bot adapter:
+#   1. Create a bot via @BotFather on Telegram and obtain a bot token
+#   2. Set the token as an environment variable (e.g. export ALICE_TELEGRAM_BOT_TOKEN=...)
+#   3. Find your Telegram user ID (e.g. using @userinfobot)
+#   4. Uncomment and fill in the config below
+
+# [channels.telegram]
+# enabled = true
+# bot_token_env = "ALICE_TELEGRAM_BOT_TOKEN"  # Env var holding the bot token
+# polling_timeout_secs = 30                   # Long-poll timeout (default: 30)
+# max_message_length = 4096                   # Telegram message length limit (default: 4096)
+#
+# # Authorized senders — only these Telegram user IDs can use the bot.
+# # Find your Telegram user ID using @userinfobot or similar.
+# # Each [[channels.telegram.senders]] block lists one or more platform IDs
+# # that belong to the same person. All authorized senders are treated as the
+# # owning user and processed identically.
+# #
+# # alice's own Telegram account:
+# [[channels.telegram.senders]]
+# platform_ids = ["12345678"]   # Replace with your actual Telegram user ID
+#
+# # Optional: authorize additional people (e.g. a collaborator with two Telegram accounts):
+# # [[channels.telegram.senders]]
+# # platform_ids = ["87654321", "11223344"]
+# # display_name = "Bob"   # Optional label for logs and audit entries

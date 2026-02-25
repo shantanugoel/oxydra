@@ -115,7 +115,7 @@ Reuse existing `GatewayServerFrame::TurnProgress`. No new frame type.
 **Conflict:** Original plan says no feature flag. Guidebook Ch.12 says feature-flagged.
 
 **Resolution:** Feature-flag in `channels` crate. Rationale:
-- `teloxide` pulls in a significant dependency tree
+- `frankenstein` + `reqwest` pulls in dependencies (though most are already in Oxydra's tree)
 - Feature flags are standard Rust practice for optional transports
 - CI tests without the flag stay fast; feature-flag CI job tests with it
 - Guidebook is the canonical source
@@ -124,7 +124,7 @@ Reuse existing `GatewayServerFrame::TurnProgress`. No new frame type.
 ```toml
 # channels/Cargo.toml
 [features]
-telegram = ["teloxide", "tokio"]
+telegram = ["dep:frankenstein", "dep:tokio"]
 ```
 
 ### D7: Tool execution context race
@@ -368,7 +368,7 @@ Channel adapters run inside the VM alongside the gateway. Sender auth happens be
 ```
 Platform message (Telegram user_id: 12345678)
     │
-    ▼ (via teloxide long-polling, inside the VM)
+    ▼ (via frankenstein long-polling, inside the VM)
     │
 Channel Adapter (in-process, same VM as gateway):
     ├── Extract sender platform_id from Telegram update
@@ -539,14 +539,14 @@ All crates currently use `uuid` v4. Session IDs would benefit from v7 (time-orde
 │  └── Multi-session, protocol v2, session persistence            │
 │                                                                 │
 │  TelegramAdapter (in-process, spawned at startup)               │
-│  ├── bot: teloxide::Bot (alice's bot token from env)            │
+│  ├── bot: frankenstein::client_reqwest::Bot (alice's bot token from env) │
 │  ├── authorized_senders: HashSet<platform_id>                   │
 │  ├── session_map: (chat_id, topic_id?) → session_id             │
 │  ├── Calls gateway internal API directly (D10, no WebSocket)    │
 │  └── ResponseStreamer: edit-message streaming (D15)              │
 │                                                                 │
 │  Message flow:                                                  │
-│  Telegram API → teloxide poll → auth check                      │
+│  Telegram API → frankenstein poll → auth check                  │
 │    → derive channel_context_id (D14: chat_id or chat_id:topic)  │
 │    → gateway.submit_turn()                                      │
 │                                                                 │
@@ -990,12 +990,12 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    ```toml
    [features]
    default = []
-   telegram = ["teloxide", "tokio"]
+   telegram = ["dep:frankenstein", "dep:tokio"]
 
    [dependencies]
    types = { path = "../types" }
-   teloxide = { version = "0.13", optional = true }
-   tokio = { version = "1", features = ["full"], optional = true }
+   frankenstein = { version = "0.47", optional = true, features = ["client-reqwest"] }
+   tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
    serde = { version = "1", features = ["derive"] }
    serde_json = "1"
    tracing = "0.1"
@@ -1005,7 +1005,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
    - `TelegramAdapter` struct:
      ```rust
      pub struct TelegramAdapter {
-         bot: teloxide::Bot,
+         bot: frankenstein::client_reqwest::Bot,
          sender_auth: SenderAuthPolicy,
          session_store: Arc<dyn SessionStore>,   // for channel session mappings
          gateway: Arc<GatewayServer>,            // direct reference, in-process (uses internal API from D10)
@@ -1013,9 +1013,9 @@ Each step is self-contained, testable, and does not require rewriting any prior 
          config: TelegramChannelConfig,
      }
      ```
-   - `run()` method — long-polls Telegram updates, runs until cancellation token fires
+   - `run()` method — manual long-polling loop using `bot.get_updates()`, runs until cancellation token fires
    - Per incoming `Update`:
-     - Extract `sender_id` from `message.from.id`
+     - Extract `sender_id` from `update.content` → `UpdateContent::Message(message)` → `message.from.id`
      - `sender_auth.is_authorized(sender_id)` → false = drop + audit, true = proceed
      - **Derive `channel_context_id` (D14):** check `message.message_thread_id` — if present (forum mode), use `"{chat_id}:{thread_id}"`, otherwise use `"{chat_id}"`
      - Command interception: `/new`, `/sessions`, `/switch`, `/cancel`, `/status`
@@ -1030,12 +1030,12 @@ Each step is self-contained, testable, and does not require rewriting any prior 
      - Subscribe to session's broadcast channel via `gateway.subscribe_events()`
      - On `TurnStarted`: send placeholder message via `bot.send_message()` ("⏳ Working...")
      - On `TurnProgress`: edit placeholder to show status ("🔍 Searching the web...", "🤖 Delegating to researcher...")
-     - On `AssistantDelta`: accumulate text, throttled edit every ~1.5 seconds:
+     - On `AssistantDelta`: accumulate text, throttled edit every ~1.5 seconds using `bot.edit_message_text()`:
        ```rust
        struct ResponseStreamer {
-           bot: teloxide::Bot,
-           chat_id: ChatId,
-           message_id: MessageId,            // current message being edited
+           bot: frankenstein::client_reqwest::Bot,
+           chat_id: i64,
+           message_id: i32,               // current message being edited
            accumulated_text: String,
            last_edit: Instant,
            edit_throttle: Duration,           // 1.5 seconds
@@ -1584,7 +1584,7 @@ All new config sections use `#[serde(default)]` so existing configs work without
 ### Mock Strategy
 
 - **MockProvider:** Already exists in `runtime` — reuse for all agent tests
-- **Mock Telegram API:** Small axum server or mock at the `teloxide::Bot` trait boundary
+- **Mock Telegram API:** Small axum server or mock at the `frankenstein::AsyncTelegramApi` trait boundary (only 2 methods to implement)
 - **In-memory libSQL:** Already used in memory tests — reuse for session store tests
 - **Mock DelegationExecutor:** For isolated delegation tool tests without real runtime
 
@@ -1681,6 +1681,6 @@ All new config sections use `#[serde(default)]` so existing configs work without
 
 | Crate | New Dependency | Version | Reason |
 |-------|---------------|---------|--------|
-| `channels` | `teloxide` | `0.17` | Telegram bot framework (feature-gated) |
-| `channels` | `tokio` | `1` (full) | Async runtime for adapter (feature-gated) |
+| `channels` | `frankenstein` | `0.47` | Telegram Bot API client — raw 1:1 API wrapper, feature-gated. Uses reqwest 0.13 (same as Oxydra's existing stack). Chosen over teloxide for: reqwest version alignment, minimal dependency footprint (~4 new crates vs ~15-50), full control over update loop matching our in-process adapter architecture, newer API coverage (9.4 vs 9.1), and trivially mockable 2-method trait. |
+| `channels` | `tokio` | `1` (rt, sync, time) | Async runtime for adapter (feature-gated, already in Oxydra) |
 | `types` or `tui` | `uuid` | `1` (features: `v7`) | Time-ordered session IDs (add `v7` feature to existing `uuid` dep) |

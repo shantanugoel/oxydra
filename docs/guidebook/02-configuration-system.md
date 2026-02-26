@@ -221,6 +221,7 @@ pub struct SchedulerConfig {
     pub min_interval_secs: u64,             // Default: 60
     pub default_timezone: String,           // Default: "Asia/Kolkata"
     pub auto_disable_after_failures: u32,   // Default: 5
+    pub notify_after_failures: Option<u32>, // Default: None (disabled)
 }
 ```
 
@@ -236,6 +237,7 @@ pub struct SchedulerConfig {
 | `min_interval_secs` | `60` | Minimum interval between runs (anti-abuse) |
 | `default_timezone` | `"Asia/Kolkata"` | Default timezone for cron schedules |
 | `auto_disable_after_failures` | `5` | Auto-disable after N consecutive failures |
+| `notify_after_failures` | `None` | Notify user after N consecutive failures (regardless of notification policy) |
 
 **Key design decisions:**
 - Scheduling is disabled by default and must be explicitly enabled.

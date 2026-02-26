@@ -114,6 +114,8 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `schedule_search` | `ReadOnly` | Searches and lists scheduled tasks with filters and pagination |
 | `schedule_edit` | `SideEffecting` | Modifies, pauses, or resumes a scheduled task |
 | `schedule_delete` | `SideEffecting` | Permanently deletes a scheduled task |
+| `schedule_runs` | `ReadOnly` | Lists recent run history metadata for a scheduled task |
+| `schedule_run_output` | `ReadOnly` | Retrieves full output of a specific run with chunked pagination |
 
 Most tools (except `BashTool`) execute through the `HostWasmToolRunner` (in the `sandbox` sub-module of `tools`), which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
 
@@ -164,11 +166,11 @@ Memory tools are registered during bootstrap via `register_memory_tools()` when 
 
 **File:** `tools/src/scheduler_tools.rs`
 
-Four LLM-callable tools expose the scheduler system, enabling the LLM to create, search, edit, and delete scheduled tasks. These tools are registered during bootstrap via `register_scheduler_tools()` when the scheduler is enabled and a memory backend is available.
+Six LLM-callable tools expose the scheduler system, enabling the LLM to create, search, edit, delete scheduled tasks, and inspect their run history. These tools are registered during bootstrap via `register_scheduler_tools()` when the scheduler is enabled and a memory backend is available.
 
 #### Per-User Scoping
 
-All scheduler tools operate within a per-user namespace using the `user_id` from `ToolExecutionContext`. Ownership checks prevent users from accessing or modifying another user's schedules.
+All scheduler tools operate within a per-user namespace using the `user_id` from `ToolExecutionContext`. Ownership checks prevent users from accessing or modifying another user's schedules. At creation time, `channel_id` and `channel_context_id` from `ToolExecutionContext` are captured so notifications route back to the originating channel.
 
 #### Tool Details
 
@@ -178,6 +180,12 @@ All scheduler tools operate within a per-user namespace using the `user_id` from
 | `schedule_search` | `name`, `status`, `cadence_type`, `notification`, `limit` (default 20, max 50), `offset` (for pagination) | Paginated results with `schedules`, `total`, `remaining`, `hint` |
 | `schedule_edit` | `schedule_id` (required), plus optional: `name`, `goal`, `cadence_type`+`cadence_value`, `timezone`, `notification`, `status` (active/paused) | Updated schedule definition |
 | `schedule_delete` | `schedule_id` (required) | Confirmation message |
+| `schedule_runs` | `schedule_id` (required), `limit` (optional, 1–20, default 5) | Run metadata list (timestamps, status, summary) — no full output |
+| `schedule_run_output` | `run_id` (required), `offset` (optional), `max_chars` (optional, 200–8000, default 4000) | Chunked full run output with `remaining` count for pagination |
+
+#### Run History Tools
+
+`schedule_runs` returns lightweight metadata per run (timestamps, status, output summary, cost) to keep tool output within truncation limits. `schedule_run_output` retrieves the full persisted output of a specific run with chunking support — callers can page through long outputs by incrementing `offset`, ensuring no JSON truncation.
 
 #### Key Design Decisions
 
@@ -197,7 +205,7 @@ At creation and edit time, the cadence is validated:
 
 #### Registration
 
-Scheduler tools are registered during bootstrap via `register_scheduler_tools()` when `config.scheduler.enabled` is `true` and a memory backend is available. The function takes a `ToolRegistry`, `Arc<dyn SchedulerStore>`, and `&SchedulerConfig`, then creates and registers all four tools.
+Scheduler tools are registered during bootstrap via `register_scheduler_tools()` when `config.scheduler.enabled` is `true` and a memory backend is available. The function takes a `ToolRegistry`, `Arc<dyn SchedulerStore>`, and `&SchedulerConfig`, then creates and registers all six tools.
 
 ## Tool Registry
 

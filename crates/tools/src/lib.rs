@@ -55,7 +55,8 @@ pub use sandbox::{
 };
 pub use scheduler_tools::{
     SCHEDULE_CREATE_TOOL_NAME, SCHEDULE_DELETE_TOOL_NAME, SCHEDULE_EDIT_TOOL_NAME,
-    SCHEDULE_SEARCH_TOOL_NAME, register_scheduler_tools,
+    SCHEDULE_RUNS_TOOL_NAME, SCHEDULE_RUN_OUTPUT_TOOL_NAME, SCHEDULE_SEARCH_TOOL_NAME,
+    register_scheduler_tools,
 };
 
 pub const FILE_READ_TOOL_NAME: &str = "file_read";

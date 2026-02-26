@@ -168,14 +168,48 @@ This ensures Ctrl+C in the TUI cancels only the active turn without killing the 
 The `GatewayServer` implements the `SchedulerNotifier` trait (defined in the `runtime` crate), enabling the scheduler executor to publish notifications to connected users without a direct dependency on the gateway:
 
 ```rust
+#[async_trait]
 impl SchedulerNotifier for GatewayServer {
-    fn notify_user(&self, user_id: &str, frame: GatewayServerFrame) {
-        // Finds all sessions for the user and publishes the frame
+    async fn notify_user(&self, schedule: &ScheduleDefinition, frame: GatewayServerFrame) {
+        // Routes notification based on the schedule's origin channel
     }
 }
 ```
 
-When a scheduled task completes and its notification policy triggers delivery, the executor calls `notify_user()`, which broadcasts the `ScheduledNotification` frame to all active WebSocket connections for that user.
+Notification routing is origin-aware:
+
+1. **TUI sessions** (`channel_id == "gateway"`) — delivers to the specific WebSocket session matching the `channel_context_id` stored on the schedule
+2. **External channels** (e.g. Telegram) — looks up a registered `ProactiveSender` for the channel and invokes `send_notification(channel_context_id, frame)`
+3. **Legacy fallback** — broadcasts to all sessions for the user when no specific origin is available
+
+### ProactiveSender Trait
+
+**File:** `types/src/proactive.rs`
+
+External channels that support unsolicited outbound messages implement the `ProactiveSender` trait:
+
+```rust
+#[async_trait]
+pub trait ProactiveSender: Send + Sync {
+    async fn send_notification(&self, channel_context_id: &str, frame: GatewayServerFrame);
+}
+```
+
+Channels register their sender with `GatewayServer::register_proactive_sender(channel_id, sender)` at startup. The Telegram channel, for example, registers a `TelegramProactiveSender` that parses the `channel_context_id` into a chat ID and sends the notification as a Telegram message.
+
+### Per-Turn Origin Propagation
+
+Each turn submission carries a `TurnOrigin` (defined in `gateway/src/turn_runner.rs`) that captures the ingress channel:
+
+```rust
+pub struct TurnOrigin {
+    pub channel_id: Option<String>,
+    pub channel_context_id: Option<String>,
+    pub channel_capabilities: Option<ChannelCapabilities>,
+}
+```
+
+This origin is threaded through `ToolExecutionContext` so that tools like `schedule_create` can capture which channel the user was in when they created the schedule. The gateway provides `submit_turn_from_channel()` for external channels to submit turns with their channel identity.
 
 ## Session Lifecycle UX
 
@@ -374,7 +408,7 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 - **No external channels yet:** The Telegram adapter is implemented (see Chapter 12) including sender auth, channel session mapping, edit-message streaming, and command interception. It runs in-process alongside the gateway, calling the internal API directly. Future channels (Discord, Slack, WhatsApp) follow the same pattern.
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
-- **Scheduled notifications are session-scoped:** If no user session is connected when a scheduled notification fires, the notification is lost (results persist in memory via the scheduled turn's session, but the push notification is not queued)
+- **Scheduled notifications are origin-routed:** Notifications are delivered to the channel that created the schedule. If the user was in a TUI session and that session is no longer connected, the notification is lost (results persist in memory and can be retrieved via `schedule_runs`/`schedule_run_output` tools). External channels with registered `ProactiveSender`s (e.g. Telegram) can deliver notifications even when the user is offline.
 
 ## Inline Attachment Ingress Limits
 

@@ -132,6 +132,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: "0021_create_channel_session_mappings",
         sql: include_str!("../migrations/0021_create_channel_session_mappings.sql"),
     },
+    Migration {
+        version: "0022_add_channel_origin_to_schedules",
+        sql: include_str!("../migrations/0022_add_channel_origin_to_schedules.sql"),
+    },
+    Migration {
+        version: "0023_add_full_output_to_schedule_runs",
+        sql: include_str!("../migrations/0023_add_full_output_to_schedule_runs.sql"),
+    },
 ];
 
 pub(crate) async fn rollback_quietly(conn: &Connection) {

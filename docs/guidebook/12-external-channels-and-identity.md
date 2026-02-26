@@ -303,7 +303,7 @@ TelegramAdapter::run() loop
     │    └── Call gateway internal API directly
     ├── ChannelSessionMap.get_session_id() → resolve or create session
     ├── gateway.subscribe_events() (before submit, to not miss frames)
-    ├── gateway.submit_turn() → start the turn
+    ├── gateway.submit_turn_from_channel("telegram", channel_context_id) → start the turn with origin
     │
     ▼
 ResponseStreamer (edit-message streaming)
@@ -407,7 +407,22 @@ pub struct MediaCapabilities {
 }
 ```
 
-Capabilities are resolved from the session's `channel_origin` via `ChannelCapabilities::from_channel_origin()`. Known channel types (e.g. "telegram") get full media capabilities; unknown types default to text-only.
+Capabilities are resolved per-turn from the `TurnOrigin.channel_id` via `ChannelCapabilities::from_channel_origin()`. Known channel types (e.g. "telegram") get full media capabilities; unknown types default to text-only.
+
+### Proactive Notifications
+
+External channels that support sending unsolicited messages implement the `ProactiveSender` trait (defined in `types/src/proactive.rs`):
+
+```rust
+#[async_trait]
+pub trait ProactiveSender: Send + Sync {
+    async fn send_notification(&self, channel_context_id: &str, frame: GatewayServerFrame);
+}
+```
+
+At startup, each channel adapter registers its proactive sender with `GatewayServer::register_proactive_sender()`. For example, Telegram registers a `TelegramProactiveSender` that converts the `channel_context_id` (format: `{chat_id}` or `{chat_id}:{thread_id}`) back into a Telegram chat target and sends the notification message via the Bot API.
+
+When a scheduled task fires and its notification policy requires delivery, the `GatewayServer::notify_user()` implementation looks up the schedule's `channel_id`, finds the matching `ProactiveSender`, and calls `send_notification()` with the `channel_context_id` and notification frame.
 
 ### System Prompt Augmentation
 

@@ -2870,6 +2870,11 @@ mod scheduler_executor_tests {
         ) -> Result<Vec<ScheduleRunRecord>, SchedulerError> {
             Ok(vec![])
         }
+        async fn get_run_by_id(&self, _run_id: &str) -> Result<ScheduleRunRecord, SchedulerError> {
+            Err(SchedulerError::Store {
+                message: "mock: run not found".to_owned(),
+            })
+        }
     }
 
     // -- Mock SchedulerNotifier --
@@ -2890,13 +2895,10 @@ mod scheduler_executor_tests {
         }
     }
 
+    #[async_trait]
     impl SchedulerNotifier for MockNotifier {
-        fn notify_user(&self, _user_id: &str, frame: GatewayServerFrame) {
-            let notifications = &self.notifications;
-            // Use try_lock since we're not in async context here
-            if let Ok(mut n) = notifications.try_lock() {
-                n.push(frame);
-            }
+        async fn notify_user(&self, _schedule: &ScheduleDefinition, frame: GatewayServerFrame) {
+            self.notifications.lock().await.push(frame);
         }
     }
 
@@ -2912,6 +2914,7 @@ mod scheduler_executor_tests {
             min_interval_secs: 60,
             default_timezone: "Asia/Kolkata".to_owned(),
             auto_disable_after_failures: 5,
+            notify_after_failures: 3,
         }
     }
 
@@ -2931,6 +2934,8 @@ mod scheduler_executor_tests {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         }
     }
 
@@ -3084,6 +3089,8 @@ mod scheduler_executor_tests {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         };
         let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
         let runner = Arc::new(MockTurnRunner::new(vec![Ok("Done".to_owned())]));

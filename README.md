@@ -11,7 +11,7 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 - **Tool system** — `#[tool]` proc-macro for defining tools with automatic JSON Schema generation and safety tiers
 - **Agent runtime** — Turn-loop state machine with tool dispatch, self-correction, context budget management, and cost limits
 - **Persistent memory** — Hybrid retrieval (vector + FTS5) over libSQL with conversation summarization and LLM-callable memory tools (search, save, update, delete)
-- **Scheduler** — Durable one-off and periodic task scheduling with cron/interval cadences, conditional notification routing, and automatic execution through the same agent runtime policy envelope
+- **Scheduler** — Durable one-off and periodic task scheduling with cron/interval cadences, origin-aware notification routing (back to the creating channel), full run output storage, run history tools, failure notifications, and automatic execution through the same agent runtime policy envelope
 - **Isolation tiers** — MicroVM, container, and process-level sandboxing via the runner/guest model
 - **Multi-session gateway** — Protocol v2 WebSocket gateway with per-user multi-session support, session persistence, concurrent turn management, and pluggable channel adapters
 - **Session lifecycle** — Create, list, and switch between named sessions from the TUI (`/new`, `/sessions`, `/switch`) or via the `--session` CLI flag

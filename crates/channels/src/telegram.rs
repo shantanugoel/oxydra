@@ -227,7 +227,16 @@ impl TelegramAdapter {
         // Subscribe BEFORE submit so we don't miss early frames.
         let events_rx = self.gateway.subscribe_events(&session);
 
-        if let Some(error_frame) = self.gateway.submit_turn(&session, send_turn).await {
+        if let Some(error_frame) = self
+            .gateway
+            .submit_turn_from_channel(
+                &session,
+                send_turn,
+                CHANNEL_ID,
+                Some(&channel_context_id),
+            )
+            .await
+        {
             if let GatewayServerFrame::Error(ref err) = error_frame {
                 if err.message.contains("active turn is already running") {
                     self.send_reply(
@@ -1305,6 +1314,106 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+// ---------------------------------------------------------------------------
+// Telegram Proactive Sender — for origin-only scheduler notifications
+// ---------------------------------------------------------------------------
+
+/// Sends proactive (scheduler-originated) notifications to Telegram chats.
+pub struct TelegramProactiveSender {
+    bot: Bot,
+    max_message_length: usize,
+}
+
+impl TelegramProactiveSender {
+    pub fn new(bot_token: &str, max_message_length: usize) -> Self {
+        Self {
+            bot: Bot::new(bot_token),
+            max_message_length,
+        }
+    }
+}
+
+impl types::ProactiveSender for TelegramProactiveSender {
+    fn send_proactive(&self, channel_context_id: &str, frame: &GatewayServerFrame) {
+        let message = match frame {
+            GatewayServerFrame::ScheduledNotification(notif) => notif.message.clone(),
+            _ => return,
+        };
+
+        let (chat_id, thread_id) = match parse_channel_context_id(channel_context_id) {
+            Some(parsed) => parsed,
+            None => {
+                warn!(
+                    channel_context_id = %channel_context_id,
+                    "telegram proactive sender: failed to parse channel_context_id"
+                );
+                return;
+            }
+        };
+
+        let bot = self.bot.clone();
+        let max_len = self.max_message_length;
+        tokio::spawn(async move {
+            let chunks = split_message(&message, max_len);
+            for chunk in chunks {
+                let html_text = markdown_to_telegram_html(chunk);
+                let params = SendMessageParams {
+                    chat_id: ChatId::Integer(chat_id),
+                    text: html_text,
+                    message_thread_id: thread_id,
+                    parse_mode: Some(ParseMode::Html),
+                    business_connection_id: None,
+                    direct_messages_topic_id: None,
+                    entities: None,
+                    link_preview_options: None,
+                    disable_notification: None,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: None,
+                    reply_markup: None,
+                };
+                if let Err(e) = bot.send_message(&params).await {
+                    // Fallback to plain text.
+                    let fallback = SendMessageParams {
+                        chat_id: ChatId::Integer(chat_id),
+                        text: chunk.to_string(),
+                        message_thread_id: thread_id,
+                        parse_mode: None,
+                        business_connection_id: None,
+                        direct_messages_topic_id: None,
+                        entities: None,
+                        link_preview_options: None,
+                        disable_notification: None,
+                        protect_content: None,
+                        allow_paid_broadcast: None,
+                        message_effect_id: None,
+                        suggested_post_parameters: None,
+                        reply_parameters: None,
+                        reply_markup: None,
+                    };
+                    let _ = bot.send_message(&fallback).await;
+                    debug!(error = %e, "proactive html send failed; used plain text fallback");
+                }
+            }
+        });
+    }
+}
+
+/// Parse a channel_context_id into (chat_id, optional thread_id).
+/// Returns `None` if the format is invalid.
+fn parse_channel_context_id(ctx: &str) -> Option<(i64, Option<i32>)> {
+    if let Some((chat_str, thread_str)) = ctx.split_once(':') {
+        let chat_id = chat_str.parse::<i64>().ok()?;
+        let thread_id = thread_str.parse::<i32>().ok()?;
+        Some((chat_id, Some(thread_id)))
+    } else {
+        let chat_id = ctx.parse::<i64>().ok()?;
+        Some((chat_id, None))
+    }
 }
 
 // ---------------------------------------------------------------------------

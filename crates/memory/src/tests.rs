@@ -1552,6 +1552,8 @@ async fn scheduler_store_create_get_roundtrip() {
         last_run_at: None,
         last_run_status: None,
         consecutive_failures: 0,
+        channel_id: None,
+        channel_context_id: None,
     };
     store
         .create_schedule(&def)
@@ -1601,6 +1603,8 @@ async fn scheduler_store_count_and_limit() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         };
         store.create_schedule(&def).await.expect("create");
     }
@@ -1649,6 +1653,8 @@ async fn scheduler_store_search_with_filters() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         },
         ScheduleDefinition {
             schedule_id: "s2".to_owned(),
@@ -1664,6 +1670,8 @@ async fn scheduler_store_search_with_filters() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         },
     ];
     for s in &schedules {
@@ -1746,6 +1754,8 @@ async fn scheduler_store_delete_cascades_runs() {
         last_run_at: None,
         last_run_status: None,
         consecutive_failures: 0,
+        channel_id: None,
+        channel_context_id: None,
     };
     store.create_schedule(&def).await.expect("create");
 
@@ -1759,6 +1769,7 @@ async fn scheduler_store_delete_cascades_runs() {
         turn_count: 1,
         cost: 0.01,
         notified: true,
+        output: Some("Done".to_owned()),
     };
     store
         .record_run_and_reschedule("sched-del", &run, Some(now.clone()), None)
@@ -1818,6 +1829,8 @@ async fn scheduler_store_update_pause_resume() {
         last_run_at: None,
         last_run_status: None,
         consecutive_failures: 0,
+        channel_id: None,
+        channel_context_id: None,
     };
     store.create_schedule(&def).await.expect("create");
 
@@ -1887,6 +1900,8 @@ async fn scheduler_store_due_schedules_filters_correctly() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         })
         .await
         .expect("create due");
@@ -1907,6 +1922,8 @@ async fn scheduler_store_due_schedules_filters_correctly() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         })
         .await
         .expect("create future");
@@ -1927,6 +1944,8 @@ async fn scheduler_store_due_schedules_filters_correctly() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         })
         .await
         .expect("create paused");
@@ -1973,6 +1992,8 @@ async fn scheduler_store_record_run_and_prune_history() {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: None,
+            channel_context_id: None,
         })
         .await
         .expect("create");
@@ -1989,6 +2010,7 @@ async fn scheduler_store_record_run_and_prune_history() {
             turn_count: 1,
             cost: 0.01,
             notified: false,
+            output: None,
         };
         store
             .record_run_and_reschedule("sched-runs", &run, Some(now.clone()), None)

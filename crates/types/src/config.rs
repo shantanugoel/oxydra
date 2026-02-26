@@ -628,6 +628,10 @@ pub struct SchedulerConfig {
     /// Consecutive failure count before auto-disabling. Default: 5.
     #[serde(default = "default_scheduler_auto_disable_after_failures")]
     pub auto_disable_after_failures: u32,
+    /// Notify the user after N consecutive failures for a schedule.
+    /// 0 disables failure notifications. Default: 3.
+    #[serde(default = "default_scheduler_notify_after_failures")]
+    pub notify_after_failures: u32,
 }
 
 impl Default for SchedulerConfig {
@@ -643,6 +647,7 @@ impl Default for SchedulerConfig {
             min_interval_secs: default_scheduler_min_interval_secs(),
             default_timezone: default_scheduler_timezone(),
             auto_disable_after_failures: default_scheduler_auto_disable_after_failures(),
+            notify_after_failures: default_scheduler_notify_after_failures(),
         }
     }
 }
@@ -898,6 +903,10 @@ fn default_scheduler_timezone() -> String {
 
 fn default_scheduler_auto_disable_after_failures() -> u32 {
     5
+}
+
+fn default_scheduler_notify_after_failures() -> u32 {
+    3
 }
 
 fn is_ratio(value: f64) -> bool {

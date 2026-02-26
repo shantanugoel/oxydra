@@ -19,6 +19,8 @@ pub const SCHEDULE_CREATE_TOOL_NAME: &str = "schedule_create";
 pub const SCHEDULE_SEARCH_TOOL_NAME: &str = "schedule_search";
 pub const SCHEDULE_EDIT_TOOL_NAME: &str = "schedule_edit";
 pub const SCHEDULE_DELETE_TOOL_NAME: &str = "schedule_delete";
+pub const SCHEDULE_RUNS_TOOL_NAME: &str = "schedule_runs";
+pub const SCHEDULE_RUN_OUTPUT_TOOL_NAME: &str = "schedule_run_output";
 
 const SEARCH_DEFAULT_LIMIT: usize = 20;
 const SEARCH_MAX_LIMIT: usize = 50;
@@ -62,6 +64,19 @@ struct ScheduleEditArgs {
 #[derive(Debug, Deserialize)]
 struct ScheduleDeleteArgs {
     schedule_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleRunsArgs {
+    schedule_id: String,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleRunOutputArgs {
+    run_id: String,
+    offset: Option<usize>,
+    max_chars: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +273,8 @@ impl Tool for ScheduleCreateTool {
             last_run_at: None,
             last_run_status: None,
             consecutive_failures: 0,
+            channel_id: context.channel_id.clone(),
+            channel_context_id: context.channel_context_id.clone(),
         };
 
         self.store
@@ -758,6 +775,258 @@ impl Tool for ScheduleDeleteTool {
 }
 
 // ---------------------------------------------------------------------------
+// ScheduleRunsTool
+// ---------------------------------------------------------------------------
+
+pub struct ScheduleRunsTool {
+    store: Arc<dyn SchedulerStore>,
+}
+
+impl ScheduleRunsTool {
+    pub fn new(store: Arc<dyn SchedulerStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for ScheduleRunsTool {
+    fn schema(&self) -> FunctionDecl {
+        FunctionDecl::new(
+            SCHEDULE_RUNS_TOOL_NAME,
+            Some(
+                "List recent run history for a scheduled task. Returns metadata per run \
+                 (timestamps, status, summary) without full output. Use schedule_run_output \
+                 to retrieve the complete output of a specific run."
+                    .to_owned(),
+            ),
+            json!({
+                "type": "object",
+                "required": ["schedule_id"],
+                "properties": {
+                    "schedule_id": {
+                        "type": "string",
+                        "description": "ID of the schedule to list runs for",
+                        "minLength": 1
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max runs to return (default 5, max 20)",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5
+                    }
+                }
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
+        let request: ScheduleRunsArgs = parse_args(SCHEDULE_RUNS_TOOL_NAME, args)?;
+        let user_id = resolve_user_id(context, SCHEDULE_RUNS_TOOL_NAME)?;
+
+        // Verify ownership.
+        let schedule = self
+            .store
+            .get_schedule(&request.schedule_id)
+            .await
+            .map_err(|e| execution_failed(SCHEDULE_RUNS_TOOL_NAME, e.to_string()))?;
+
+        if schedule.user_id != user_id {
+            return Err(execution_failed(
+                SCHEDULE_RUNS_TOOL_NAME,
+                format!("schedule {} does not belong to you", request.schedule_id),
+            ));
+        }
+
+        let limit = request.limit.unwrap_or(5).min(20);
+        let runs = self
+            .store
+            .get_run_history(&request.schedule_id, limit)
+            .await
+            .map_err(|e| execution_failed(SCHEDULE_RUNS_TOOL_NAME, e.to_string()))?;
+
+        let run_entries: Vec<serde_json::Value> = runs
+            .iter()
+            .map(|r| {
+                json!({
+                    "run_id": r.run_id,
+                    "started_at": r.started_at,
+                    "finished_at": r.finished_at,
+                    "status": r.status,
+                    "output_summary": r.output_summary,
+                    "turn_count": r.turn_count,
+                    "cost": r.cost,
+                    "notified": r.notified,
+                })
+            })
+            .collect();
+
+        let result = json!({
+            "schedule_id": request.schedule_id,
+            "runs": run_entries,
+            "count": run_entries.len(),
+        });
+
+        serde_json::to_string(&result)
+            .map_err(|e| execution_failed(SCHEDULE_RUNS_TOOL_NAME, e.to_string()))
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleRunOutputTool
+// ---------------------------------------------------------------------------
+
+pub struct ScheduleRunOutputTool {
+    store: Arc<dyn SchedulerStore>,
+}
+
+impl ScheduleRunOutputTool {
+    pub fn new(store: Arc<dyn SchedulerStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for ScheduleRunOutputTool {
+    fn schema(&self) -> FunctionDecl {
+        FunctionDecl::new(
+            SCHEDULE_RUN_OUTPUT_TOOL_NAME,
+            Some(
+                "Retrieve the full output of a specific schedule run, with optional chunking \
+                 to avoid truncation. Use schedule_runs first to get the run_id."
+                    .to_owned(),
+            ),
+            json!({
+                "type": "object",
+                "required": ["run_id"],
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "ID of the run to get output for",
+                        "minLength": 1
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Character offset to start from (default 0)",
+                        "minimum": 0,
+                        "default": 0
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return (default 4000, max 8000)",
+                        "minimum": 200,
+                        "maximum": 8000,
+                        "default": 4000
+                    }
+                }
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
+        let request: ScheduleRunOutputArgs = parse_args(SCHEDULE_RUN_OUTPUT_TOOL_NAME, args)?;
+        let user_id = resolve_user_id(context, SCHEDULE_RUN_OUTPUT_TOOL_NAME)?;
+
+        let run = self
+            .store
+            .get_run_by_id(&request.run_id)
+            .await
+            .map_err(|e| execution_failed(SCHEDULE_RUN_OUTPUT_TOOL_NAME, e.to_string()))?;
+
+        // Verify ownership through the schedule.
+        let schedule = self
+            .store
+            .get_schedule(&run.schedule_id)
+            .await
+            .map_err(|e| execution_failed(SCHEDULE_RUN_OUTPUT_TOOL_NAME, e.to_string()))?;
+
+        if schedule.user_id != user_id {
+            return Err(execution_failed(
+                SCHEDULE_RUN_OUTPUT_TOOL_NAME,
+                format!("schedule {} does not belong to you", run.schedule_id),
+            ));
+        }
+
+        let Some(ref full_output) = run.output else {
+            let result = json!({
+                "run_id": request.run_id,
+                "message": "No output stored for this run.",
+            });
+            return serde_json::to_string(&result)
+                .map_err(|e| execution_failed(SCHEDULE_RUN_OUTPUT_TOOL_NAME, e.to_string()));
+        };
+
+        let offset = request.offset.unwrap_or(0);
+        let max_chars = request.max_chars.unwrap_or(4000).clamp(200, 8000);
+        let total_len = full_output.len();
+
+        if offset >= total_len {
+            let result = json!({
+                "run_id": request.run_id,
+                "offset": offset,
+                "max_chars": max_chars,
+                "chunk": "",
+                "remaining": 0,
+                "total_length": total_len,
+            });
+            return serde_json::to_string(&result)
+                .map_err(|e| execution_failed(SCHEDULE_RUN_OUTPUT_TOOL_NAME, e.to_string()));
+        }
+
+        let end = (offset + max_chars).min(total_len);
+        // Ensure we don't split a multi-byte char.
+        let safe_end = if full_output.is_char_boundary(end) {
+            end
+        } else {
+            let mut e = end;
+            while e > offset && !full_output.is_char_boundary(e) {
+                e -= 1;
+            }
+            e
+        };
+
+        let chunk = &full_output[offset..safe_end];
+        let remaining = total_len.saturating_sub(safe_end);
+
+        let result = json!({
+            "run_id": request.run_id,
+            "offset": offset,
+            "max_chars": max_chars,
+            "chunk": chunk,
+            "remaining": remaining,
+            "total_length": total_len,
+        });
+
+        serde_json::to_string(&result)
+            .map_err(|e| execution_failed(SCHEDULE_RUN_OUTPUT_TOOL_NAME, e.to_string()))
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -787,5 +1056,13 @@ pub fn register_scheduler_tools(
             config.default_timezone.clone(),
         ),
     );
-    registry.register(SCHEDULE_DELETE_TOOL_NAME, ScheduleDeleteTool::new(store));
+    registry.register(SCHEDULE_DELETE_TOOL_NAME, ScheduleDeleteTool::new(store.clone()));
+    registry.register(
+        SCHEDULE_RUNS_TOOL_NAME,
+        ScheduleRunsTool::new(store.clone()),
+    );
+    registry.register(
+        SCHEDULE_RUN_OUTPUT_TOOL_NAME,
+        ScheduleRunOutputTool::new(store),
+    );
 }

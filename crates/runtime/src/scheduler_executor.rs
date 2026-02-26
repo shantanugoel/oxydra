@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use memory_crate::SchedulerStore;
 use memory_crate::cadence::next_run_for_cadence;
@@ -14,8 +15,9 @@ use types::{
 use crate::ScheduledTurnRunner;
 
 /// Callback trait for publishing scheduled notifications to connected users.
+#[async_trait]
 pub trait SchedulerNotifier: Send + Sync {
-    fn notify_user(&self, user_id: &str, frame: GatewayServerFrame);
+    async fn notify_user(&self, schedule: &ScheduleDefinition, frame: GatewayServerFrame);
 }
 
 pub struct SchedulerExecutor {
@@ -123,17 +125,42 @@ impl SchedulerExecutor {
             }
         };
 
-        let output_summary = if response_text.is_empty() {
-            None
-        } else if response_text.len() > 500 {
-            Some(format!("{}...", &response_text[..497]))
+        // Strip [NOTIFY] marker early to produce a clean text for storage and display.
+        let clean_text = if schedule.notification_policy == NotificationPolicy::Conditional
+            && response_text.starts_with("[NOTIFY]")
+        {
+            response_text
+                .strip_prefix("[NOTIFY]")
+                .map(|s| s.trim_start())
+                .unwrap_or(&response_text)
+                .to_owned()
         } else {
-            Some(response_text.clone())
+            response_text.clone()
         };
 
-        let notified = self.handle_notification(&schedule, status, &response_text);
+        let output_summary = if clean_text.is_empty() {
+            None
+        } else if clean_text.len() > 500 {
+            Some(format!("{}...", &clean_text[..497]))
+        } else {
+            Some(clean_text.clone())
+        };
+
+        let output = if clean_text.is_empty() {
+            None
+        } else {
+            Some(clean_text.clone())
+        };
+
+        let notified = self
+            .handle_notification(&schedule, status, &response_text, &clean_text)
+            .await;
 
         let (next_run_at, new_status) = self.compute_reschedule(&schedule, status);
+
+        // Send operational failure notifications.
+        self.handle_failure_notifications(&schedule, status, &clean_text)
+            .await;
 
         let run_record = ScheduleRunRecord {
             run_id,
@@ -145,6 +172,7 @@ impl SchedulerExecutor {
             turn_count: 0,
             cost: 0.0,
             notified,
+            output,
         };
 
         if let Err(e) = self
@@ -172,11 +200,12 @@ impl SchedulerExecutor {
         }
     }
 
-    fn handle_notification(
+    async fn handle_notification(
         &self,
         schedule: &ScheduleDefinition,
         status: ScheduleRunStatus,
         response_text: &str,
+        clean_text: &str,
     ) -> bool {
         if status != ScheduleRunStatus::Success {
             return false;
@@ -190,26 +219,86 @@ impl SchedulerExecutor {
 
         if should_notify {
             let message = match schedule.notification_policy {
-                NotificationPolicy::Conditional => response_text
-                    .strip_prefix("[NOTIFY]")
-                    .map(|s| s.trim_start())
-                    .unwrap_or(response_text)
-                    .to_owned(),
-                _ => response_text.to_owned(),
+                NotificationPolicy::Conditional => clean_text.to_owned(),
+                _ => clean_text.to_owned(),
             };
 
-            self.notifier.notify_user(
-                &schedule.user_id,
-                GatewayServerFrame::ScheduledNotification(GatewayScheduledNotification {
-                    schedule_id: schedule.schedule_id.clone(),
-                    schedule_name: schedule.name.clone(),
-                    message,
-                }),
-            );
+            self.notifier
+                .notify_user(
+                    schedule,
+                    GatewayServerFrame::ScheduledNotification(GatewayScheduledNotification {
+                        schedule_id: schedule.schedule_id.clone(),
+                        schedule_name: schedule.name.clone(),
+                        message,
+                    }),
+                )
+                .await;
             return true;
         }
 
         false
+    }
+
+    /// Send operational failure notifications when consecutive failures
+    /// hit the configured threshold or when the schedule is auto-disabled.
+    async fn handle_failure_notifications(
+        &self,
+        schedule: &ScheduleDefinition,
+        status: ScheduleRunStatus,
+        clean_text: &str,
+    ) {
+        if status == ScheduleRunStatus::Success || status == ScheduleRunStatus::Cancelled {
+            return;
+        }
+
+        let new_consecutive_failures = schedule.consecutive_failures + 1;
+        let name = schedule
+            .name
+            .as_deref()
+            .unwrap_or(&schedule.schedule_id);
+        let error_summary = if clean_text.len() > 200 {
+            format!("{}...", &clean_text[..197])
+        } else {
+            clean_text.to_owned()
+        };
+
+        // Notify when consecutive failures hit the threshold.
+        if self.config.notify_after_failures > 0
+            && new_consecutive_failures == self.config.notify_after_failures
+        {
+            let message = format!(
+                "❌ Scheduled task '{}' has failed {} times in a row. Latest error: {}",
+                name, new_consecutive_failures, error_summary
+            );
+            self.notifier
+                .notify_user(
+                    schedule,
+                    GatewayServerFrame::ScheduledNotification(GatewayScheduledNotification {
+                        schedule_id: schedule.schedule_id.clone(),
+                        schedule_name: schedule.name.clone(),
+                        message,
+                    }),
+                )
+                .await;
+        }
+
+        // Notify when the schedule is about to be auto-disabled.
+        if new_consecutive_failures >= self.config.auto_disable_after_failures {
+            let message = format!(
+                "⛔ Scheduled task '{}' was disabled after {} consecutive failures.",
+                name, new_consecutive_failures
+            );
+            self.notifier
+                .notify_user(
+                    schedule,
+                    GatewayServerFrame::ScheduledNotification(GatewayScheduledNotification {
+                        schedule_id: schedule.schedule_id.clone(),
+                        schedule_name: schedule.name.clone(),
+                        message,
+                    }),
+                )
+                .await;
+        }
     }
 
     fn compute_reschedule(

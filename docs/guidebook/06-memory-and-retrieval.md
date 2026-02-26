@@ -183,11 +183,13 @@ CREATE TABLE schedules (
     next_run_at          TEXT,
     last_run_at          TEXT,
     last_run_status      TEXT,
-    consecutive_failures INTEGER NOT NULL DEFAULT 0
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    channel_id           TEXT,
+    channel_context_id   TEXT
 );
 ```
 
-Stores durable schedule definitions. The `cadence_json` field holds a JSON-serialized `ScheduleCadence` (cron, once, or interval). Indexed on `user_id`, `(next_run_at WHERE status='active')`, `(user_id, status)`, and `(user_id, name)`.
+Stores durable schedule definitions. The `cadence_json` field holds a JSON-serialized `ScheduleCadence` (cron, once, or interval). `channel_id` and `channel_context_id` capture the originating channel at creation time for notification routing. Indexed on `user_id`, `(next_run_at WHERE status='active')`, `(user_id, status)`, and `(user_id, name)`.
 
 #### `schedule_runs`
 
@@ -199,6 +201,7 @@ CREATE TABLE schedule_runs (
     finished_at    TEXT NOT NULL,
     status         TEXT NOT NULL,
     output_summary TEXT,
+    output         TEXT,
     turn_count     INTEGER NOT NULL DEFAULT 0,
     cost           REAL NOT NULL DEFAULT 0.0,
     notified       INTEGER NOT NULL DEFAULT 0,
@@ -206,7 +209,7 @@ CREATE TABLE schedule_runs (
 );
 ```
 
-Audit trail for scheduled executions. Each run records timing, outcome status, truncated output (first 500 characters), and whether the user was notified. Indexed on `(schedule_id, started_at DESC)` for efficient history queries. Cascading delete ensures run history is removed when the parent schedule is deleted.
+Audit trail for scheduled executions. Each run records timing, outcome status, truncated output summary (first 500 characters), full output in the `output` column, and whether the user was notified. Indexed on `(schedule_id, started_at DESC)` for efficient history queries. Cascading delete ensures run history is removed when the parent schedule is deleted.
 
 ## SchedulerStore
 
@@ -227,6 +230,7 @@ pub trait SchedulerStore: Send + Sync {
     async fn record_run_and_reschedule(&self, schedule_id: &str, run: &ScheduleRunRecord, next_run_at: Option<String>, new_status: Option<ScheduleStatus>) -> Result<(), SchedulerError>;
     async fn prune_run_history(&self, schedule_id: &str, keep: usize) -> Result<(), SchedulerError>;
     async fn get_run_history(&self, schedule_id: &str, limit: usize) -> Result<Vec<ScheduleRunRecord>, SchedulerError>;
+    async fn get_run_by_id(&self, run_id: &str) -> Result<ScheduleRunRecord, SchedulerError>;
 }
 ```
 

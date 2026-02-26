@@ -44,6 +44,7 @@ pub trait SchedulerStore: Send + Sync {
         schedule_id: &str,
         limit: usize,
     ) -> Result<Vec<ScheduleRunRecord>, SchedulerError>;
+    async fn get_run_by_id(&self, run_id: &str) -> Result<ScheduleRunRecord, SchedulerError>;
 }
 
 pub struct LibsqlSchedulerStore {
@@ -70,8 +71,9 @@ impl SchedulerStore for LibsqlSchedulerStore {
                 "INSERT INTO schedules (
                     schedule_id, user_id, name, goal, cadence_json,
                     notification_policy, status, created_at, updated_at,
-                    next_run_at, last_run_at, last_run_status, consecutive_failures
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    next_run_at, last_run_at, last_run_status, consecutive_failures,
+                    channel_id, channel_context_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     def.schedule_id.as_str(),
                     def.user_id.as_str(),
@@ -85,7 +87,9 @@ impl SchedulerStore for LibsqlSchedulerStore {
                     def.next_run_at.as_deref(),
                     def.last_run_at.as_deref(),
                     last_run_status,
-                    def.consecutive_failures
+                    def.consecutive_failures,
+                    def.channel_id.as_deref(),
+                    def.channel_context_id.as_deref()
                 ],
             )
             .await
@@ -100,7 +104,8 @@ impl SchedulerStore for LibsqlSchedulerStore {
             .query(
                 "SELECT schedule_id, user_id, name, goal, cadence_json,
                         notification_policy, status, created_at, updated_at,
-                        next_run_at, last_run_at, last_run_status, consecutive_failures
+                        next_run_at, last_run_at, last_run_status, consecutive_failures,
+                        channel_id, channel_context_id
                  FROM schedules WHERE schedule_id = ?1",
                 params![schedule_id],
             )
@@ -183,7 +188,8 @@ impl SchedulerStore for LibsqlSchedulerStore {
         let fetch_sql = format!(
             "SELECT schedule_id, user_id, name, goal, cadence_json,
                     notification_policy, status, created_at, updated_at,
-                    next_run_at, last_run_at, last_run_status, consecutive_failures
+                    next_run_at, last_run_at, last_run_status, consecutive_failures,
+                    channel_id, channel_context_id
              FROM schedules WHERE {where_sql}
              ORDER BY created_at DESC
              LIMIT ?{limit_param} OFFSET ?{offset_param}"
@@ -337,7 +343,8 @@ impl SchedulerStore for LibsqlSchedulerStore {
             .query(
                 "SELECT schedule_id, user_id, name, goal, cadence_json,
                         notification_policy, status, created_at, updated_at,
-                        next_run_at, last_run_at, last_run_status, consecutive_failures
+                        next_run_at, last_run_at, last_run_status, consecutive_failures,
+                        channel_id, channel_context_id
                  FROM schedules
                  WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?1
                  ORDER BY next_run_at ASC
@@ -374,8 +381,8 @@ impl SchedulerStore for LibsqlSchedulerStore {
                 .execute(
                     "INSERT INTO schedule_runs (
                         run_id, schedule_id, started_at, finished_at,
-                        status, output_summary, turn_count, cost, notified
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        status, output_summary, turn_count, cost, notified, output
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         run.run_id.as_str(),
                         run.schedule_id.as_str(),
@@ -385,7 +392,8 @@ impl SchedulerStore for LibsqlSchedulerStore {
                         run.output_summary.as_deref(),
                         run.turn_count,
                         run.cost,
-                        run.notified
+                        run.notified,
+                        run.output.as_deref()
                     ],
                 )
                 .await
@@ -484,7 +492,7 @@ impl SchedulerStore for LibsqlSchedulerStore {
             .conn
             .query(
                 "SELECT run_id, schedule_id, started_at, finished_at,
-                        status, output_summary, turn_count, cost, notified
+                        status, output_summary, turn_count, cost, notified, output
                  FROM schedule_runs
                  WHERE schedule_id = ?1
                  ORDER BY started_at DESC
@@ -499,6 +507,28 @@ impl SchedulerStore for LibsqlSchedulerStore {
             records.push(run_record_from_row(&row)?);
         }
         Ok(records)
+    }
+
+    async fn get_run_by_id(&self, run_id: &str) -> Result<ScheduleRunRecord, SchedulerError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT run_id, schedule_id, started_at, finished_at,
+                        status, output_summary, turn_count, cost, notified, output
+                 FROM schedule_runs
+                 WHERE run_id = ?1",
+                params![run_id],
+            )
+            .await
+            .map_err(|e| store_error(e.to_string()))?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| store_error(e.to_string()))?
+            .ok_or_else(|| store_error(format!("run not found: {run_id}")))?;
+
+        run_record_from_row(&row)
     }
 }
 
@@ -517,6 +547,8 @@ fn schedule_from_row(row: &libsql::Row) -> Result<ScheduleDefinition, SchedulerE
     let last_run_status_str: Option<String> =
         row.get(11).map_err(|e| store_error(e.to_string()))?;
     let consecutive_failures: i64 = row.get(12).map_err(|e| store_error(e.to_string()))?;
+    let channel_id: Option<String> = row.get(13).map_err(|e| store_error(e.to_string()))?;
+    let channel_context_id: Option<String> = row.get(14).map_err(|e| store_error(e.to_string()))?;
 
     let cadence: ScheduleCadence =
         serde_json::from_str(&cadence_json).map_err(|e| store_error(e.to_string()))?;
@@ -541,6 +573,8 @@ fn schedule_from_row(row: &libsql::Row) -> Result<ScheduleDefinition, SchedulerE
         last_run_at,
         last_run_status,
         consecutive_failures: consecutive_failures as u32,
+        channel_id,
+        channel_context_id,
     })
 }
 
@@ -554,6 +588,7 @@ fn run_record_from_row(row: &libsql::Row) -> Result<ScheduleRunRecord, Scheduler
     let turn_count: i64 = row.get(6).map_err(|e| store_error(e.to_string()))?;
     let cost: f64 = row.get(7).map_err(|e| store_error(e.to_string()))?;
     let notified: bool = row.get(8).map_err(|e| store_error(e.to_string()))?;
+    let output: Option<String> = row.get(9).map_err(|e| store_error(e.to_string()))?;
 
     let status = run_status_from_str(&status_str)?;
 
@@ -567,6 +602,7 @@ fn run_record_from_row(row: &libsql::Row) -> Result<ScheduleRunRecord, Scheduler
         turn_count: turn_count as u32,
         cost,
         notified,
+        output,
     })
 }
 

@@ -8,6 +8,17 @@ pub struct UserTurnInput {
     pub attachments: Vec<InlineMedia>,
 }
 
+/// Per-turn channel origin, passed alongside a turn submission.
+/// Captures the ingress channel so tools (e.g. schedule_create) can record
+/// where a turn originated, enabling origin-only notification routing.
+#[derive(Debug, Clone, Default)]
+pub struct TurnOrigin {
+    pub channel_id: Option<String>,
+    pub channel_context_id: Option<String>,
+    /// Capabilities of the channel the user is connected through.
+    pub channel_capabilities: Option<ChannelCapabilities>,
+}
+
 #[async_trait]
 pub trait GatewayTurnRunner: Send + Sync {
     async fn run_turn(
@@ -17,7 +28,7 @@ pub trait GatewayTurnRunner: Send + Sync {
         input: UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
-        channel_capabilities: Option<ChannelCapabilities>,
+        origin: TurnOrigin,
     ) -> Result<Response, RuntimeError>;
 }
 
@@ -57,7 +68,7 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         input: UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
-        channel_capabilities: Option<ChannelCapabilities>,
+        origin: TurnOrigin,
     ) -> Result<Response, RuntimeError> {
         let UserTurnInput {
             prompt,
@@ -66,8 +77,10 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         let tool_context = types::ToolExecutionContext {
             user_id: Some(user_id.to_owned()),
             session_id: Some(session_id.to_owned()),
-            channel_capabilities,
+            channel_capabilities: origin.channel_capabilities,
             event_sender: None,
+            channel_id: origin.channel_id,
+            channel_context_id: origin.channel_context_id,
         };
 
         let mut context = {
@@ -167,7 +180,7 @@ impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
             attachments: Vec::new(),
         };
         let response = self
-            .run_turn(user_id, session_id, input, cancellation, delta_tx, None)
+            .run_turn(user_id, session_id, input, cancellation, delta_tx, TurnOrigin::default())
             .await?;
         Ok(response.message.content.unwrap_or_default())
     }

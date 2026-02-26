@@ -214,6 +214,21 @@ async fn run() -> Result<(), VmError> {
         && let Some(ref telegram_config) = channels_config.telegram
         && telegram_config.enabled
     {
+        // Register the Telegram proactive sender for origin-only notifications.
+        if let Some(bot_token_env) = telegram_config.bot_token_env.as_deref()
+            && let Ok(bot_token) = std::env::var(bot_token_env)
+        {
+            let proactive_sender = Arc::new(
+                channels::telegram::TelegramProactiveSender::new(
+                    &bot_token,
+                    telegram_config.max_message_length,
+                ),
+            );
+            gateway
+                .register_proactive_sender("telegram", proactive_sender)
+                .await;
+        }
+
         match spawn_telegram_adapter(
             telegram_config,
             &args.user_id,

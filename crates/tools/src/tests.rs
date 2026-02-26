@@ -736,6 +736,8 @@ mod memory_tool_tests {
             session_id: Some(session_id.to_owned()),
             channel_capabilities: None,
             event_sender: None,
+            channel_id: None,
+            channel_context_id: None,
         }
     }
 

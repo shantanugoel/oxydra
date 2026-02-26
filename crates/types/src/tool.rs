@@ -81,6 +81,12 @@ pub struct ToolExecutionContext {
     /// attachments) during tool execution. Tools like `send_media` use this
     /// to push media through the gateway to the channel adapter.
     pub event_sender: Option<mpsc::UnboundedSender<StreamItem>>,
+    /// Channel that originated the current turn (e.g. "telegram", "tui").
+    pub channel_id: Option<String>,
+    /// Channel-context identifier within that channel.
+    /// - Telegram: "{chat_id}" or "{chat_id}:{thread_id}"
+    /// - TUI: gateway `session_id`
+    pub channel_context_id: Option<String>,
 }
 
 impl std::fmt::Debug for ToolExecutionContext {
@@ -93,6 +99,8 @@ impl std::fmt::Debug for ToolExecutionContext {
                 "event_sender",
                 &self.event_sender.as_ref().map(|_| "<sender>"),
             )
+            .field("channel_id", &self.channel_id)
+            .field("channel_context_id", &self.channel_context_id)
             .finish()
     }
 }

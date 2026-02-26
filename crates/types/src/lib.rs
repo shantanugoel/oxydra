@@ -4,6 +4,7 @@ mod delegation;
 mod error;
 mod memory;
 mod model;
+mod proactive;
 mod provider;
 mod runner;
 mod scheduler;
@@ -66,4 +67,5 @@ pub use scheduler::{
 };
 pub use session::{SessionRecord, SessionStore};
 pub use tool::{FunctionDecl, SafetyTier, Tool, ToolExecutionContext, ToolParameterSchema};
+pub use proactive::ProactiveSender;
 pub use tracing::init_tracing;

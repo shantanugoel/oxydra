@@ -76,6 +76,10 @@ pub struct ScheduleDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_status: Option<ScheduleRunStatus>,
     pub consecutive_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_context_id: Option<String>,
 }
 
 // --- Execution record (audit trail) ---
@@ -92,6 +96,8 @@ pub struct ScheduleRunRecord {
     pub turn_count: u32,
     pub cost: f64,
     pub notified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 // --- Search types ---

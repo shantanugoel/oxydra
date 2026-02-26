@@ -293,7 +293,11 @@ The executor runs a `tokio::time::interval` loop (configurable via `poll_interva
 
 1. Queries the store for schedules where `next_run_at <= now` and `status = 'active'`
 2. Dispatches due schedules concurrently (bounded by `max_concurrent`)
-3. For each schedule: builds the prompt (augmenting with `[NOTIFY]` instruction for conditional notification), runs the turn, records the result, computes the next run time, and handles notification routing
+3. For each schedule: builds the prompt (augmenting with `[NOTIFY]` instruction for conditional notification), runs the turn, records the result (including full output), computes the next run time, and handles notification routing
+
+### Full Output Storage
+
+Each run's complete output is stored in the `output` column of the run record. This enables the `schedule_run_output` tool to retrieve historical run outputs without needing the LLM to re-execute the task.
 
 ### Notification Routing
 
@@ -305,7 +309,24 @@ After a scheduled turn completes, the executor determines whether to notify the 
 | `Conditional` | Response is checked for `[NOTIFY]` prefix — if present, the message after the marker is routed; otherwise silent |
 | `Never` | No notification — results stored in memory only |
 
-The `SchedulerNotifier` trait is implemented by `GatewayServer`, which publishes `GatewayServerFrame::ScheduledNotification` frames to all connected sessions for the target user.
+The `SchedulerNotifier` trait is async and receives the full `ScheduleDefinition`, enabling origin-aware routing:
+
+```rust
+#[async_trait]
+pub trait SchedulerNotifier: Send + Sync {
+    async fn notify_user(&self, schedule: &ScheduleDefinition, frame: GatewayServerFrame);
+}
+```
+
+The `GatewayServer` implementation routes notifications to the originating channel:
+
+1. **TUI sessions** (`channel_id == "gateway"`) — publishes to the specific WebSocket session matching the `channel_context_id`
+2. **External channels** (e.g. Telegram) — looks up a registered `ProactiveSender` for the channel and invokes `send_notification()`
+3. **Legacy fallback** — broadcasts to all sessions for the user when no specific origin is available
+
+### Failure Notifications
+
+When `notify_after_failures` is set in `SchedulerConfig`, the executor sends a notification to the user after that many consecutive failures, regardless of `NotificationPolicy`. This ensures users are alerted to persistent problems even for schedules with `Never` notification policy.
 
 ### Automatic Schedule Management
 

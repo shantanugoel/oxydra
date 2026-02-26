@@ -26,8 +26,9 @@ use types::{
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
     GatewaySessionCreated, GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched,
     GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
-    GatewayTurnState, GatewayTurnStatus, InlineMedia, Message, MessageRole, ModelId, ProviderId,
-    Response, RuntimeError, SessionRecord, SessionStore, StartupStatusReport, StreamItem,
+    GatewayTurnState, GatewayTurnStatus, InlineMedia, Message, MessageRole, ModelId,
+    ProactiveSender, ProviderId, Response, RuntimeError, SessionRecord, SessionStore,
+    StartupStatusReport, StreamItem,
 };
 
 mod session;
@@ -39,7 +40,7 @@ mod tests;
 use runtime::SchedulerNotifier;
 pub use session::SessionState as GatewaySessionState;
 use session::{ActiveTurnState, SessionState, UserState};
-pub use turn_runner::{GatewayTurnRunner, RuntimeGatewayTurnRunner};
+pub use turn_runner::{GatewayTurnRunner, RuntimeGatewayTurnRunner, TurnOrigin};
 
 const WS_ROUTE: &str = "/ws";
 const GATEWAY_CHANNEL_ID: &str = "tui";
@@ -60,6 +61,8 @@ pub struct GatewayServer {
     next_connection_id: AtomicU64,
     session_store: Option<Arc<dyn SessionStore>>,
     max_concurrent_turns: u32,
+    /// Registry of proactive senders keyed by channel_id (e.g. "telegram").
+    proactive_senders: RwLock<HashMap<String, Arc<dyn ProactiveSender>>>,
 }
 
 impl GatewayServer {
@@ -105,6 +108,7 @@ impl GatewayServer {
             next_connection_id: AtomicU64::new(1),
             session_store,
             max_concurrent_turns,
+            proactive_senders: RwLock::new(HashMap::new()),
         }
     }
 
@@ -114,10 +118,46 @@ impl GatewayServer {
             .with_state(self)
     }
 
+    /// Register a proactive sender for a channel (e.g. "telegram").
+    /// Used by channel adapters so the scheduler can send origin-only notifications.
+    pub async fn register_proactive_sender(
+        &self,
+        channel_id: impl Into<String>,
+        sender: Arc<dyn ProactiveSender>,
+    ) {
+        self.proactive_senders
+            .write()
+            .await
+            .insert(channel_id.into(), sender);
+    }
+
     // -----------------------------------------------------------------------
     // Internal API (D10) — used by both the WebSocket handler and in-process
     // channel adapters (Telegram, Discord, etc.)
     // -----------------------------------------------------------------------
+
+    /// Submit a user turn from a specific channel origin.
+    ///
+    /// This is used by in-process adapters (e.g. Telegram) to provide the
+    /// per-turn origin so that schedule creation captures the delivery target.
+    pub async fn submit_turn_from_channel(
+        &self,
+        session: &Arc<SessionState>,
+        send_turn: GatewaySendTurn,
+        origin_channel_id: &str,
+        origin_channel_context_id: Option<&str>,
+    ) -> Option<GatewayServerFrame> {
+        self.start_turn_with_origin(
+            session,
+            send_turn,
+            TurnOrigin {
+                channel_id: Some(origin_channel_id.to_owned()),
+                channel_context_id: origin_channel_context_id.map(|s| s.to_owned()),
+                channel_capabilities: None,
+            },
+        )
+        .await
+    }
 
     /// Create a new session for a user or retrieve an existing one by ID.
     ///
@@ -299,7 +339,17 @@ impl GatewayServer {
         session: &Arc<SessionState>,
         send_turn: GatewaySendTurn,
     ) -> Option<GatewayServerFrame> {
-        self.start_turn(session, send_turn).await
+        // Default TUI origin for WebSocket-originated turns.
+        self.start_turn_with_origin(
+            session,
+            send_turn,
+            TurnOrigin {
+                channel_id: Some(GATEWAY_CHANNEL_ID.to_owned()),
+                channel_context_id: Some(session.session_id.clone()),
+                channel_capabilities: None,
+            },
+        )
+        .await
     }
 
     /// Cancel the active turn on a session.
@@ -342,7 +392,7 @@ impl GatewayServer {
                         user_id: s.user_id.clone(),
                         agent_name: s.agent_name.clone(),
                         display_name: None,
-                        channel_origin: GATEWAY_CHANNEL_ID.to_owned(),
+                        channel_origin: s.channel_origin.clone(),
                         parent_session_id: s.parent_session_id.clone(),
                         created_at: String::new(),
                         last_active_at: String::new(),
@@ -796,6 +846,25 @@ impl GatewayServer {
         session: &Arc<SessionState>,
         send_turn: GatewaySendTurn,
     ) -> Option<GatewayServerFrame> {
+        // WebSocket-originated turns use TUI origin.
+        self.start_turn_with_origin(
+            session,
+            send_turn,
+            TurnOrigin {
+                channel_id: Some(GATEWAY_CHANNEL_ID.to_owned()),
+                channel_context_id: Some(session.session_id.clone()),
+                channel_capabilities: None,
+            },
+        )
+        .await
+    }
+
+    async fn start_turn_with_origin(
+        &self,
+        session: &Arc<SessionState>,
+        send_turn: GatewaySendTurn,
+        origin: TurnOrigin,
+    ) -> Option<GatewayServerFrame> {
         if let Err(message) = validate_inline_attachments(&send_turn.attachments) {
             return Some(GatewayServerFrame::Error(GatewayErrorFrame {
                 request_id: Some(send_turn.request_id),
@@ -867,12 +936,16 @@ impl GatewayServer {
         let session_store = self.session_store.clone();
         tokio::spawn(async move {
             let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
-            let channel_capabilities = Some(types::ChannelCapabilities::from_channel_origin(
-                &session.channel_origin,
-            ));
+            let channel_capabilities = origin.channel_id.as_deref().map(
+                types::ChannelCapabilities::from_channel_origin,
+            );
             let input = turn_runner::UserTurnInput {
                 prompt: send_turn.prompt,
                 attachments: send_turn.attachments,
+            };
+            let origin_with_caps = turn_runner::TurnOrigin {
+                channel_capabilities,
+                ..origin
             };
             let runtime_future = runtime.run_turn(
                 &session.user_id,
@@ -880,7 +953,7 @@ impl GatewayServer {
                 input,
                 cancellation,
                 delta_tx,
-                channel_capabilities,
+                origin_with_caps,
             );
             tokio::pin!(runtime_future);
 
@@ -1105,14 +1178,61 @@ impl GatewayServer {
     }
 }
 
+#[async_trait]
 impl SchedulerNotifier for GatewayServer {
-    fn notify_user(&self, user_id: &str, frame: GatewayServerFrame) {
-        if let Ok(users) = self.users.try_read()
-            && let Some(user) = users.get(user_id)
-            && let Ok(sessions) = user.sessions.try_read()
-        {
-            for session in sessions.values() {
-                session.publish(frame.clone());
+    async fn notify_user(
+        &self,
+        schedule: &types::ScheduleDefinition,
+        frame: GatewayServerFrame,
+    ) {
+        if let Some(ref channel_id) = schedule.channel_id {
+            // Origin-only routing.
+            if channel_id == GATEWAY_CHANNEL_ID {
+                // TUI: channel_context_id is the session_id.
+                if let Some(ref session_id) = schedule.channel_context_id {
+                    let users = self.users.read().await;
+                    if let Some(user) = users.get(&schedule.user_id) {
+                        let sessions = user.sessions.read().await;
+                        if let Some(session) = sessions.get(session_id) {
+                            session.publish(frame);
+                        } else {
+                            tracing::debug!(
+                                schedule_id = %schedule.schedule_id,
+                                session_id = %session_id,
+                                "scheduler notification: TUI session not connected"
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Non-TUI channel: delegate to registered ProactiveSender.
+                if let Some(ref ctx_id) = schedule.channel_context_id {
+                    let senders = self.proactive_senders.read().await;
+                    if let Some(sender) = senders.get(channel_id.as_str()) {
+                        sender.send_proactive(ctx_id, &frame);
+                    } else {
+                        tracing::warn!(
+                            schedule_id = %schedule.schedule_id,
+                            channel_id = %channel_id,
+                            "scheduler notification: no proactive sender registered for channel"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        schedule_id = %schedule.schedule_id,
+                        channel_id = %channel_id,
+                        "scheduler notification: no channel_context_id for non-TUI channel"
+                    );
+                }
+            }
+        } else {
+            // Legacy schedule (no origin): broadcast to all in-memory sessions.
+            let users = self.users.read().await;
+            if let Some(user) = users.get(&schedule.user_id) {
+                let sessions = user.sessions.read().await;
+                for session in sessions.values() {
+                    session.publish(frame.clone());
+                }
             }
         }
     }

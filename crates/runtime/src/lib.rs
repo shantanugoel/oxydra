@@ -206,6 +206,8 @@ impl AgentRuntime {
             session_id: Some(session_id.to_owned()),
             channel_capabilities: None,
             event_sender: None,
+            channel_id: None,
+            channel_context_id: None,
         };
         self.run_session_internal(Some(session_id), context, cancellation, None, &tool_context)
             .await

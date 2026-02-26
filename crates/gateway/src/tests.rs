@@ -39,7 +39,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         input: turn_runner::UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
-        _channel_capabilities: Option<types::ChannelCapabilities>,
+        _origin: turn_runner::TurnOrigin,
     ) -> Result<Response, RuntimeError> {
         self.recorded_calls
             .lock()

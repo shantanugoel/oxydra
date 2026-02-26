@@ -1,5 +1,6 @@
 use super::*;
 use runtime::ScheduledTurnRunner;
+use types::ChannelCapabilities;
 
 #[async_trait]
 pub trait GatewayTurnRunner: Send + Sync {
@@ -10,6 +11,7 @@ pub trait GatewayTurnRunner: Send + Sync {
         prompt: String,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
+        channel_capabilities: Option<ChannelCapabilities>,
     ) -> Result<Response, RuntimeError>;
 }
 
@@ -49,10 +51,13 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         prompt: String,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
+        channel_capabilities: Option<ChannelCapabilities>,
     ) -> Result<Response, RuntimeError> {
         let tool_context = types::ToolExecutionContext {
             user_id: Some(user_id.to_owned()),
             session_id: Some(session_id.to_owned()),
+            channel_capabilities,
+            event_sender: None,
         };
 
         let mut context = {
@@ -99,10 +104,11 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
             tokio::select! {
                 maybe_event = stream_events_rx.recv() => {
                     match maybe_event {
-                        // Forward text deltas and progress events to the gateway.
-                        // Other stream item types (tool call assembly, reasoning
-                        // traces, usage updates) are not surfaced to channels.
-                        Some(item @ StreamItem::Text(_)) | Some(item @ StreamItem::Progress(_)) => {
+                        // Forward text deltas, progress events, and media
+                        // attachments to the gateway.
+                        Some(item @ StreamItem::Text(_))
+                        | Some(item @ StreamItem::Progress(_))
+                        | Some(item @ StreamItem::Media(_)) => {
                             let _ = delta_sender.send(item);
                         }
                         _ => {}
@@ -138,7 +144,7 @@ impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
     ) -> Result<String, RuntimeError> {
         let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
         let response = self
-            .run_turn(user_id, session_id, prompt, cancellation, delta_tx)
+            .run_turn(user_id, session_id, prompt, cancellation, delta_tx, None)
             .await?;
         Ok(response.message.content.unwrap_or_default())
     }

@@ -39,6 +39,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         prompt: String,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
+        _channel_capabilities: Option<types::ChannelCapabilities>,
     ) -> Result<Response, RuntimeError> {
         self.recorded_calls
             .lock()
@@ -823,10 +824,7 @@ async fn two_sessions_for_same_user_run_turns_concurrently() {
             "ses1-done",
             Duration::from_millis(200),
         ),
-        ScriptedTurn::completed(
-            vec![(Duration::from_millis(0), "ses2-delta")],
-            "ses2-done",
-        ),
+        ScriptedTurn::completed(vec![(Duration::from_millis(0), "ses2-delta")], "ses2-done"),
     ]));
     let (address, server_task) = spawn_gateway_server(runtime).await;
 
@@ -984,7 +982,9 @@ async fn concurrent_turn_limit_enforced() {
     let app = Arc::clone(&gateway).router();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("local addr");
-    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.ok(); });
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
 
     let mut socket1 = connect_gateway(address).await;
     send_client_frame(
@@ -1043,7 +1043,11 @@ async fn concurrent_turn_limit_enforced() {
 
     match receive_server_frame(&mut socket2).await {
         GatewayServerFrame::Error(e) => {
-            assert!(e.message.contains("too many concurrent turns"), "got: {}", e.message);
+            assert!(
+                e.message.contains("too many concurrent turns"),
+                "got: {}",
+                e.message
+            );
         }
         other => panic!("expected error frame, got {other:?}"),
     }
@@ -1058,24 +1062,39 @@ async fn concurrent_turn_limit_enforced() {
 async fn build_gateway_with_session_store(
     runtime: Arc<dyn GatewayTurnRunner>,
 ) -> (Arc<GatewayServer>, Arc<dyn types::SessionStore>) {
-    let db = libsql::Builder::new_local(":memory:").build().await.expect("db");
-    let conn = db.connect().expect("connect");
-    conn.execute_batch(include_str!("../../memory/migrations/0020_create_gateway_sessions.sql"))
+    let db = libsql::Builder::new_local(":memory:")
+        .build()
         .await
-        .expect("migration");
+        .expect("db");
+    let conn = db.connect().expect("connect");
+    conn.execute_batch(include_str!(
+        "../../memory/migrations/0020_create_gateway_sessions.sql"
+    ))
+    .await
+    .expect("migration");
     let store: Arc<dyn types::SessionStore> = Arc::new(memory::LibsqlSessionStore::new(conn));
-    let gateway = Arc::new(GatewayServer::with_session_store(runtime, None, store.clone()));
+    let gateway = Arc::new(GatewayServer::with_session_store(
+        runtime,
+        None,
+        store.clone(),
+    ));
     (gateway, store)
 }
 
 async fn spawn_gateway_with_session_store(
     runtime: Arc<dyn GatewayTurnRunner>,
-) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<dyn types::SessionStore>) {
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<dyn types::SessionStore>,
+) {
     let (gateway, store) = build_gateway_with_session_store(runtime).await;
     let app = Arc::clone(&gateway).router();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("addr");
-    let task = tokio::spawn(async move { axum::serve(listener, app).await.ok(); });
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
     (address, task, store)
 }
 
@@ -1131,7 +1150,13 @@ async fn touch_session_called_on_turn_completion() {
         GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
         other => panic!("expected hello_ack, got {other:?}"),
     };
-    let before = store.get_session(&sid).await.unwrap().unwrap().last_active_at.clone();
+    let before = store
+        .get_session(&sid)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_active_at
+        .clone();
     send_client_frame(
         &mut socket,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
@@ -1149,7 +1174,12 @@ async fn touch_session_called_on_turn_completion() {
         other => panic!("expected turn_completed, got {other:?}"),
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let after = store.get_session(&sid).await.unwrap().unwrap().last_active_at;
+    let after = store
+        .get_session(&sid)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_active_at;
     assert!(after >= before, "last_active_at should be updated");
     server_task.abort();
 }
@@ -1159,10 +1189,23 @@ async fn internal_api_create_and_list_sessions() {
     let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
     let (gateway, store) =
         build_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
-    let _s1 = gateway.create_or_get_session("alice", None, "default", "tui").await.unwrap();
-    let _s2 = gateway.create_or_get_session("alice", None, "default", "tui").await.unwrap();
+    let _s1 = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .unwrap();
+    let _s2 = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .unwrap();
     assert_eq!(store.list_sessions("alice", false).await.unwrap().len(), 2);
-    assert_eq!(gateway.list_user_sessions("alice", false).await.unwrap().len(), 2);
+    assert_eq!(
+        gateway
+            .list_user_sessions("alice", false)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -1170,9 +1213,15 @@ async fn internal_api_get_existing_session_by_id() {
     let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
     let (gateway, _store) =
         build_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
-    let ses = gateway.create_or_get_session("alice", None, "default", "tui").await.unwrap();
+    let ses = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .unwrap();
     let sid = ses.session_id.clone();
-    let same = gateway.create_or_get_session("alice", Some(&sid), "default", "tui").await.unwrap();
+    let same = gateway
+        .create_or_get_session("alice", Some(&sid), "default", "tui")
+        .await
+        .unwrap();
     assert_eq!(same.session_id, sid);
 }
 
@@ -1205,9 +1254,10 @@ async fn default_session_backward_compat() {
 
 #[tokio::test]
 async fn create_session_frame_creates_and_switches_to_new_session() {
-    let runtime = Arc::new(ScriptedTurnRunner::new(vec![
-        ScriptedTurn::completed(vec![(Duration::from_millis(0), "hi")], "hello"),
-    ]));
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![ScriptedTurn::completed(
+        vec![(Duration::from_millis(0), "hi")],
+        "hello",
+    )]));
     let (address, server_task, store) =
         spawn_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
     let mut socket = connect_gateway(address).await;
@@ -1271,7 +1321,11 @@ async fn create_session_frame_creates_and_switches_to_new_session() {
 
     // Verify persistence: at least 2 sessions in store.
     let sessions = store.list_sessions("alice", false).await.unwrap();
-    assert!(sessions.len() >= 2, "expected at least 2 sessions, got {}", sessions.len());
+    assert!(
+        sessions.len() >= 2,
+        "expected at least 2 sessions, got {}",
+        sessions.len()
+    );
 
     server_task.abort();
 }
@@ -1323,7 +1377,11 @@ async fn list_sessions_returns_user_sessions() {
     match receive_server_frame(&mut socket).await {
         GatewayServerFrame::SessionList(list) => {
             assert_eq!(list.request_id, "req-list");
-            assert!(list.sessions.len() >= 2, "expected at least 2 sessions, got {}", list.sessions.len());
+            assert!(
+                list.sessions.len() >= 2,
+                "expected at least 2 sessions, got {}",
+                list.sessions.len()
+            );
         }
         other => panic!("expected session_list, got {other:?}"),
     }
@@ -1333,9 +1391,10 @@ async fn list_sessions_returns_user_sessions() {
 
 #[tokio::test]
 async fn switch_session_changes_active_session() {
-    let runtime = Arc::new(ScriptedTurnRunner::new(vec![
-        ScriptedTurn::completed(vec![(Duration::from_millis(0), "from-s1")], "done"),
-    ]));
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![ScriptedTurn::completed(
+        vec![(Duration::from_millis(0), "from-s1")],
+        "done",
+    )]));
     let (address, server_task, _store) =
         spawn_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
     let mut socket = connect_gateway(address).await;

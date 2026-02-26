@@ -376,3 +376,97 @@ telegram = ["dep:channels", "channels/telegram"]
 - Sender authentication is non-negotiable: there is no "open mode" that skips allowlist validation for external channels
 - The TUI remains a WebSocket client adapter, not a privileged path — it follows the same gateway protocol as always
 - In-process adapters use the gateway's internal API; the existing `Channel` trait is for WebSocket-based client adapters only
+
+## Channel Capabilities and Rich Media
+
+### Overview
+
+When connected via a rich channel (Telegram, Discord, etc.), the agent is aware of the channel's media capabilities and can send photos, audio, documents, videos, and voice messages to the user. This is implemented through:
+
+1. **Channel capabilities** — A `ChannelCapabilities` struct describes what each channel supports
+2. **System prompt augmentation** — The runtime injects channel-specific instructions into the system prompt per-session
+3. **`send_media` tool** — A tool that reads workspace files and delivers them through the channel
+4. **StreamItem::Media pipeline** — Media flows through the existing event streaming infrastructure
+
+### Channel Capabilities
+
+Defined in `types/src/channel.rs`:
+
+```rust
+pub struct ChannelCapabilities {
+    pub channel_type: String,          // "tui", "telegram", "discord", etc.
+    pub media: MediaCapabilities,
+}
+
+pub struct MediaCapabilities {
+    pub photo: bool,       // images (JPEG, PNG, GIF)
+    pub audio: bool,       // audio files (MP3, OGG)
+    pub document: bool,    // arbitrary file attachments
+    pub voice: bool,       // voice messages (OGG/OPUS)
+    pub video: bool,       // video files (MP4)
+}
+```
+
+Capabilities are resolved from the session's `channel_origin` via `ChannelCapabilities::from_channel_origin()`. Known channel types (e.g. "telegram") get full media capabilities; unknown types default to text-only.
+
+### System Prompt Augmentation
+
+When a session is connected via a media-capable channel, the runtime appends a "Channel Media Capabilities" section to the system prompt. This section:
+- Tells the agent what media types it can send
+- Explains how to use the `send_media` tool
+- Encourages the agent to send actual files instead of just describing them
+
+The augmentation happens per-session in `run_session_internal()` based on the `ToolExecutionContext.channel_capabilities`. Sessions from the TUI get no augmentation (text-only).
+
+### The `send_media` Tool
+
+**File:** `tools/src/media_tools.rs`
+
+The `send_media` tool allows the agent to deliver workspace files as media attachments:
+
+```
+send_media(path: "/shared/chart.png", media_type: "photo", caption: "Monthly sales chart")
+```
+
+**Parameters:**
+- `path` — Workspace file path (e.g. `/shared/output.pdf`, `/tmp/audio.mp3`)
+- `media_type` — One of: `photo`, `audio`, `document`, `voice`, `video`
+- `caption` — Optional description
+
+**How it works:**
+1. Validates channel supports the requested media type
+2. Reads file bytes from the workspace path
+3. Emits a `StreamItem::Media(MediaAttachment)` through the `ToolExecutionContext.event_sender`
+4. Returns a confirmation message to the agent
+
+The tool is registered globally but validates channel capabilities at runtime — calling it from a text-only channel (TUI) returns a clear error.
+
+### Media Pipeline
+
+```
+Agent calls send_media tool
+    │
+    ▼
+Tool reads file, emits StreamItem::Media(MediaAttachment)
+    │
+    ▼ via ToolExecutionContext.event_sender
+RuntimeGatewayTurnRunner forwards StreamItem::Media to gateway
+    │
+    ▼
+Gateway publishes GatewayServerFrame::MediaAttachment
+    │
+    ▼ via session broadcast
+Channel adapter receives frame
+    │
+    ├── Telegram: calls send_photo / send_document / send_audio / etc.
+    ├── TUI: shows "📎 Sent photo: chart.png" system message
+    └── Future channels: handle per their capabilities
+```
+
+### Telegram Media Handling
+
+The Telegram adapter handles `GatewayServerFrame::MediaAttachment` by:
+1. Writing file bytes to a temporary file (frankenstein requires file paths for upload)
+2. Calling the appropriate Telegram API method (`send_photo`, `send_document`, `send_audio`, `send_voice`, `send_video`)
+3. Cleaning up the temporary file
+4. On failure, sending a text fallback message

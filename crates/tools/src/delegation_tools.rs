@@ -1,10 +1,11 @@
-
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use crate::{execution_failed, parse_args, Tool, ToolError, ToolExecutionContext, FunctionDecl, SafetyTier};
+use crate::{
+    FunctionDecl, SafetyTier, Tool, ToolError, ToolExecutionContext, execution_failed, parse_args,
+};
 use types::{DelegationRequest, DelegationResult};
 
 pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
@@ -31,7 +32,10 @@ impl Tool for DelegateToAgentTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             DELEGATE_TO_AGENT_TOOL_NAME,
-            Some("Delegate the given goal to a named specialist agent. Returns the agent's output.".to_owned()),
+            Some(
+                "Delegate the given goal to a named specialist agent. Returns the agent's output."
+                    .to_owned(),
+            ),
             json!({
                 "type": "object",
                 "required": ["agent_name", "goal"],
@@ -53,13 +57,16 @@ impl Tool for DelegateToAgentTool {
     ) -> Result<String, ToolError> {
         let request: DelegateArgs = parse_args(DELEGATE_TO_AGENT_TOOL_NAME, args)?;
 
-        let user_id = context
-            .user_id
-            .clone()
-            .ok_or_else(|| execution_failed(DELEGATE_TO_AGENT_TOOL_NAME, "user context not available"))?;
+        let user_id = context.user_id.clone().ok_or_else(|| {
+            execution_failed(DELEGATE_TO_AGENT_TOOL_NAME, "user context not available")
+        })?;
 
-        let executor = types::get_global_delegation_executor()
-            .ok_or_else(|| execution_failed(DELEGATE_TO_AGENT_TOOL_NAME, "delegation executor not available"))?;
+        let executor = types::get_global_delegation_executor().ok_or_else(|| {
+            execution_failed(
+                DELEGATE_TO_AGENT_TOOL_NAME,
+                "delegation executor not available",
+            )
+        })?;
 
         let parent_session_id = context.session_id.clone().unwrap_or_else(|| "".to_owned());
 
@@ -79,7 +86,12 @@ impl Tool for DelegateToAgentTool {
         let result = executor
             .delegate(del_req, &cancellation, None)
             .await
-            .map_err(|e| execution_failed(DELEGATE_TO_AGENT_TOOL_NAME, format!("delegation failed: {e}")))?;
+            .map_err(|e| {
+                execution_failed(
+                    DELEGATE_TO_AGENT_TOOL_NAME,
+                    format!("delegation failed: {e}"),
+                )
+            })?;
 
         // Return the subagent output as plain text. Caller can parse the JSON
         // if they require metadata; otherwise plain string is most convenient.

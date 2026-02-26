@@ -19,16 +19,16 @@ const INVALID_TOOL_ARGS_ERROR_KEY: &str = "__oxydra_invalid_tool_args_error";
 pub type RuntimeStreamEventSender = mpsc::UnboundedSender<StreamItem>;
 
 mod budget;
+mod delegation;
 mod memory;
 mod provider_response;
 mod scheduler_executor;
 mod scrubbing;
-mod delegation;
 mod tool_execution;
 
+pub use delegation::RuntimeDelegationExecutor;
 pub use scheduler_executor::{SchedulerExecutor, SchedulerNotifier};
 pub use scrubbing::PathScrubMapping;
-pub use delegation::RuntimeDelegationExecutor;
 
 /// Trait that the gateway layer implements so the scheduler executor can
 /// trigger agent turns without depending on the gateway crate directly.
@@ -204,6 +204,8 @@ impl AgentRuntime {
         let tool_context = ToolExecutionContext {
             user_id: None,
             session_id: Some(session_id.to_owned()),
+            channel_capabilities: None,
+            event_sender: None,
         };
         self.run_session_internal(Some(session_id), context, cancellation, None, &tool_context)
             .await
@@ -280,17 +282,37 @@ impl AgentRuntime {
                 .iter()
                 .any(|m| m.role == MessageRole::System);
             if !has_system {
+                // Augment with channel capability info when available.
+                let augmented_prompt = if let Some(ref caps) = tool_context.channel_capabilities
+                    && let Some(section) = caps.system_prompt_section()
+                {
+                    format!("{prompt}\n\n{section}")
+                } else {
+                    prompt.clone()
+                };
                 context.messages.insert(
                     0,
                     Message {
                         role: MessageRole::System,
-                        content: Some(prompt.clone()),
+                        content: Some(augmented_prompt),
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                     },
                 );
             }
         }
+
+        // Build a tool context that includes the event sender so tools like
+        // `send_media` can emit stream items (e.g. media attachments).
+        let tool_context = {
+            let mut ctx = tool_context.clone();
+            if ctx.event_sender.is_none()
+                && let Some(ref sender) = stream_events
+            {
+                ctx.event_sender = Some(sender.clone());
+            }
+            ctx
+        };
 
         let mut next_memory_sequence = self.next_memory_sequence(session_id).await?;
         self.persist_context_tail_if_needed(session_id, &mut next_memory_sequence, context)
@@ -399,9 +421,9 @@ impl AgentRuntime {
                     current_batch.push(tool_call);
                 } else {
                     if !current_batch.is_empty() {
-                        let futures = current_batch
-                            .drain(..)
-                            .map(|tc| self.execute_tool_and_format(tc, cancellation, tool_context));
+                        let futures = current_batch.drain(..).map(|tc| {
+                            self.execute_tool_and_format(tc, cancellation, &tool_context)
+                        });
                         let batch_results = futures::future::join_all(futures).await;
                         for result in batch_results {
                             let message = result?;
@@ -426,7 +448,7 @@ impl AgentRuntime {
                     }
 
                     let result = self
-                        .execute_tool_and_format(tool_call, cancellation, tool_context)
+                        .execute_tool_and_format(tool_call, cancellation, &tool_context)
                         .await?;
                     context.messages.push(result.clone());
                     self.persist_message_if_needed(session_id, &mut next_memory_sequence, &result)
@@ -437,7 +459,7 @@ impl AgentRuntime {
             if !current_batch.is_empty() {
                 let futures = current_batch
                     .drain(..)
-                    .map(|tc| self.execute_tool_and_format(tc, cancellation, tool_context));
+                    .map(|tc| self.execute_tool_and_format(tc, cancellation, &tool_context));
                 let batch_results = futures::future::join_all(futures).await;
                 for result in batch_results {
                     let message = result?;

@@ -30,8 +30,9 @@ use types::{
 mod registry;
 pub mod sandbox;
 
-pub mod memory_tools;
 mod delegation_tools;
+pub mod media_tools;
+pub mod memory_tools;
 pub mod scheduler_tools;
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ mod tests;
 
 pub use delegation_tools::register_delegation_tools;
 
+pub use media_tools::{SEND_MEDIA_TOOL_NAME, register_media_tools};
 pub use memory_tools::{
     MEMORY_DELETE_TOOL_NAME, MEMORY_SAVE_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
     MEMORY_UPDATE_TOOL_NAME, register_memory_tools,
@@ -810,7 +812,7 @@ impl Tool for BashTool {
     }
 }
 
-fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
+pub fn default_wasm_runner() -> Arc<dyn WasmToolRunner> {
     let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     #[cfg(feature = "wasm-isolation")]
     {

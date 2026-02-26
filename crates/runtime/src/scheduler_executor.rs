@@ -105,12 +105,7 @@ impl SchedulerExecutor {
 
         let result = self
             .turn_runner
-            .run_scheduled_turn(
-                &schedule.user_id,
-                &session_id,
-                prompt,
-                child_cancellation,
-            )
+            .run_scheduled_turn(&schedule.user_id, &session_id, prompt, child_cancellation)
             .await;
 
         let finished_at = Utc::now().to_rfc3339();

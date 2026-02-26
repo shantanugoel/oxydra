@@ -480,8 +480,7 @@ fn sender_binding_serde_round_trip() {
         display_name: Some("Test User".to_owned()),
     };
     let json = serde_json::to_string(&binding).expect("binding should serialize");
-    let decoded: SenderBinding =
-        serde_json::from_str(&json).expect("binding should deserialize");
+    let decoded: SenderBinding = serde_json::from_str(&json).expect("binding should deserialize");
     assert_eq!(decoded, binding);
 }
 

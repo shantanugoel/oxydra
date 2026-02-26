@@ -370,6 +370,11 @@ impl TuiChannelAdapter {
                     state.clear_active_turn();
                 }
             }
+            GatewayServerFrame::MediaAttachment(_) => {
+                // Media attachments are handled by rich channel adapters
+                // (Telegram, etc.). The TUI ignores them — the text response
+                // from the agent already describes what was sent.
+            }
         }
     }
 }
@@ -571,10 +576,7 @@ mod tests {
 
     fn assert_channel_impl<T: Channel>() {}
 
-    fn hello_ack(
-        session_id: &str,
-        active_turn: Option<GatewayTurnStatus>,
-    ) -> GatewayServerFrame {
+    fn hello_ack(session_id: &str, active_turn: Option<GatewayTurnStatus>) -> GatewayServerFrame {
         GatewayServerFrame::HelloAck(GatewayHelloAck {
             request_id: "req-hello".to_owned(),
             protocol_version: GATEWAY_PROTOCOL_VERSION,
@@ -615,11 +617,7 @@ mod tests {
         })
     }
 
-    fn turn_completed(
-        turn_id: &str,
-        session_id: &str,
-        message: &str,
-    ) -> GatewayServerFrame {
+    fn turn_completed(turn_id: &str, session_id: &str, message: &str) -> GatewayServerFrame {
         GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
             request_id: "req-turn".to_owned(),
             session: GatewaySession {

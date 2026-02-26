@@ -299,18 +299,17 @@ impl Runner {
         let workspace = self.provision_user_workspace(&user_id)?;
         let endpoint_path = workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
         let gateway_endpoint = read_gateway_endpoint_marker(&endpoint_path, &user_id)?;
-        let session_id =
-            probe_gateway_health(&gateway_endpoint, &user_id).map_err(|error| {
-                if let RunnerError::GatewayProbeFailed { endpoint, message } = error {
-                    RunnerError::StaleGatewayEndpoint {
-                        endpoint,
-                        marker_path: endpoint_path.clone(),
-                        message,
-                    }
-                } else {
-                    error
+        let session_id = probe_gateway_health(&gateway_endpoint, &user_id).map_err(|error| {
+            if let RunnerError::GatewayProbeFailed { endpoint, message } = error {
+                RunnerError::StaleGatewayEndpoint {
+                    endpoint,
+                    marker_path: endpoint_path.clone(),
+                    message,
                 }
-            })?;
+            } else {
+                error
+            }
+        })?;
 
         Ok(RunnerTuiConnection {
             user_id,
@@ -1007,10 +1006,7 @@ impl RunnerStartup {
 
     /// Async variant of [`Self::handle_control`] for use inside the daemon
     /// control loop. Uses async shutdown to avoid nested tokio runtimes.
-    pub async fn handle_control_async(
-        &mut self,
-        request: RunnerControl,
-    ) -> RunnerControlResponse {
+    pub async fn handle_control_async(&mut self, request: RunnerControl) -> RunnerControlResponse {
         match request {
             RunnerControl::HealthCheck => self.handle_control(request),
             RunnerControl::ShutdownUser { user_id } => {
@@ -1031,27 +1027,23 @@ impl RunnerStartup {
 
                 if self.shutdown_complete {
                     info!(user_id = %self.user_id, "runner control shutdown acknowledged as already stopped");
-                    return RunnerControlResponse::ShutdownStatus(
-                        RunnerControlShutdownStatus {
-                            user_id,
-                            shutdown: true,
-                            already_stopped: true,
-                            message: Some("user runtime already shut down".to_owned()),
-                        },
-                    );
+                    return RunnerControlResponse::ShutdownStatus(RunnerControlShutdownStatus {
+                        user_id,
+                        shutdown: true,
+                        already_stopped: true,
+                        message: Some("user runtime already shut down".to_owned()),
+                    });
                 }
 
                 match self.shutdown_async().await {
                     Ok(()) => {
                         info!(user_id = %self.user_id, "runner control shutdown completed");
-                        RunnerControlResponse::ShutdownStatus(
-                            RunnerControlShutdownStatus {
-                                user_id,
-                                shutdown: true,
-                                already_stopped: false,
-                                message: Some("shutdown completed".to_owned()),
-                            },
-                        )
+                        RunnerControlResponse::ShutdownStatus(RunnerControlShutdownStatus {
+                            user_id,
+                            shutdown: true,
+                            already_stopped: false,
+                            message: Some("shutdown completed".to_owned()),
+                        })
                     }
                     Err(error) => {
                         warn!(
@@ -1749,9 +1741,7 @@ fn shutdown_docker_container(handle: DockerContainerHandle) -> Result<(), Runner
     })
 }
 
-async fn shutdown_docker_container_async(
-    handle: DockerContainerHandle,
-) -> Result<(), RunnerError> {
+async fn shutdown_docker_container_async(handle: DockerContainerHandle) -> Result<(), RunnerError> {
     let docker = docker_client(&handle.endpoint)?;
     let _ = docker
         .stop_container(
@@ -2469,22 +2459,21 @@ fn probe_gateway_health(gateway_endpoint: &str, user_id: &str) -> Result<String,
         )
         .await?;
 
-        let session_id =
-            match receive_gateway_server_frame(&mut socket, &gateway_endpoint).await? {
-                GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
-                GatewayServerFrame::Error(error) => {
-                    return Err(RunnerError::GatewayProbeFailed {
-                        endpoint: gateway_endpoint,
-                        message: format!("gateway rejected hello: {}", error.message),
-                    });
-                }
-                frame => {
-                    return Err(RunnerError::GatewayProbeFailed {
-                        endpoint: gateway_endpoint,
-                        message: format!("expected hello_ack, got {frame:?}"),
-                    });
-                }
-            };
+        let session_id = match receive_gateway_server_frame(&mut socket, &gateway_endpoint).await? {
+            GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+            GatewayServerFrame::Error(error) => {
+                return Err(RunnerError::GatewayProbeFailed {
+                    endpoint: gateway_endpoint,
+                    message: format!("gateway rejected hello: {}", error.message),
+                });
+            }
+            frame => {
+                return Err(RunnerError::GatewayProbeFailed {
+                    endpoint: gateway_endpoint,
+                    message: format!("expected hello_ack, got {frame:?}"),
+                });
+            }
+        };
 
         send_gateway_client_frame(
             &mut socket,

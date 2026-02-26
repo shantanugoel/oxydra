@@ -12,24 +12,25 @@ mod tool;
 mod tracing;
 
 pub use channel::{
-    Channel, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream, ChannelOutboundEvent,
-    GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn, GatewayClientFrame,
-    GatewayClientHello, GatewayCreateSession, GatewayErrorFrame, GatewayHealthCheck,
-    GatewayHealthStatus, GatewayHelloAck, GatewayListSessions, GatewayScheduledNotification,
-    GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewaySessionCreated,
-    GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched, GatewaySwitchSession,
-    GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
-    GatewayTurnState, GatewayTurnStatus,
+    Channel, ChannelCapabilities, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream,
+    ChannelOutboundEvent, GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn,
+    GatewayClientFrame, GatewayClientHello, GatewayCreateSession, GatewayErrorFrame,
+    GatewayHealthCheck, GatewayHealthStatus, GatewayHelloAck, GatewayListSessions,
+    GatewayMediaAttachment, GatewayScheduledNotification, GatewaySendTurn, GatewayServerFrame,
+    GatewaySession, GatewaySessionCreated, GatewaySessionList, GatewaySessionSummary,
+    GatewaySessionSwitched, GatewaySwitchSession, GatewayTurnCancelled, GatewayTurnCompleted,
+    GatewayTurnProgress, GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus, MediaAttachment,
+    MediaCapabilities, MediaType,
 };
 pub use config::{
-    AgentConfig, AgentDefinition, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig, ProviderConfigs,
-    ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig,
-    RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SchedulerConfig, ShellConfig,
+    AgentConfig, AgentDefinition, CatalogConfig, ConfigError, ContextBudgetConfig, MemoryConfig,
+    ProviderConfigs, ProviderRegistryEntry, ProviderSelection, ProviderType, ReliabilityConfig,
+    RetrievalConfig, RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION, SchedulerConfig, ShellConfig,
     SummarizationConfig, ToolsConfig, UnknownModelCaps, WebSearchConfig, validate_config_version,
 };
 pub use delegation::{
-    DelegationExecutor, DelegationRequest, DelegationResult, DelegationStatus, DelegationProgressSender,
-    set_global_delegation_executor, get_global_delegation_executor,
+    DelegationExecutor, DelegationProgressSender, DelegationRequest, DelegationResult,
+    DelegationStatus, get_global_delegation_executor, set_global_delegation_executor,
 };
 pub use error::{
     ChannelError, MemoryError, ProviderError, RuntimeError, SchedulerError, ToolError,

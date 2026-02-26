@@ -36,10 +36,7 @@ fn turn_status(turn_id: &str, state: GatewayTurnState) -> GatewayTurnStatus {
     }
 }
 
-fn hello_ack_frame(
-    session_id: &str,
-    active_turn: Option<GatewayTurnStatus>,
-) -> GatewayServerFrame {
+fn hello_ack_frame(session_id: &str, active_turn: Option<GatewayTurnStatus>) -> GatewayServerFrame {
     GatewayServerFrame::HelloAck(GatewayHelloAck {
         request_id: "req-hello".to_owned(),
         protocol_version: GATEWAY_PROTOCOL_VERSION,
@@ -65,11 +62,7 @@ fn delta_frame(turn_id: &str, session_id: &str, text: &str) -> GatewayServerFram
     })
 }
 
-fn completed_frame(
-    turn_id: &str,
-    session_id: &str,
-    final_text: &str,
-) -> GatewayServerFrame {
+fn completed_frame(turn_id: &str, session_id: &str, final_text: &str) -> GatewayServerFrame {
     GatewayServerFrame::TurnCompleted(GatewayTurnCompleted {
         request_id: "req-turn".to_owned(),
         session: session(session_id),

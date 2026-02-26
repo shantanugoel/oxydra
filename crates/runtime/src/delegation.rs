@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use types::{AgentDefinition, DelegationRequest, DelegationResult, DelegationStatus, RuntimeError};
 use types::DelegationProgressSender;
-use types::{Context, Message, MessageRole, ProviderId, ModelId};
+use types::{AgentDefinition, DelegationRequest, DelegationResult, DelegationStatus, RuntimeError};
+use types::{Context, Message, MessageRole, ModelId, ProviderId};
 
 use crate::AgentRuntime;
 
@@ -60,7 +60,11 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
 
         // Inject the agent's configured system prompt if any. Use a system
         // message so the runtime will not inject the global system prompt.
-        if let Some(system_prompt) = agent_def.system_prompt.as_ref().or(agent_def.system_prompt_file.as_ref()) {
+        if let Some(system_prompt) = agent_def
+            .system_prompt
+            .as_ref()
+            .or(agent_def.system_prompt_file.as_ref())
+        {
             // Prefer inline prompt; if file path provided, the bootstrap
             // validated its existence but we do not re-read file here for
             // simplicity.
@@ -91,7 +95,11 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
         });
 
         // Construct a subagent session id. Use a simple prefix plus a UUID.
-        let subagent_session_id = format!("subagent:{}:{}", request.parent_session_id, uuid::Uuid::new_v4());
+        let subagent_session_id = format!(
+            "subagent:{}:{}",
+            request.parent_session_id,
+            uuid::Uuid::new_v4()
+        );
 
         // Run the session on the parent's runtime instance. We reuse the
         // parent's runtime rather than constructing a new AgentRuntime so we

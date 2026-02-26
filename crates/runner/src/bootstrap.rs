@@ -19,7 +19,8 @@ use serde::Serialize;
 use thiserror::Error;
 use tools::{
     RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
-    register_memory_tools, register_scheduler_tools, register_delegation_tools,
+    register_delegation_tools, register_media_tools, register_memory_tools,
+    register_scheduler_tools,
 };
 use types::{
     AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
@@ -595,6 +596,11 @@ pub async fn bootstrap_vm_runtime_with_paths(
     // tool will return a clear error if invoked without a concrete executor.
     register_delegation_tools(&mut registry);
     tracing::info!("delegation tools registered");
+
+    // Register send_media tool — the tool validates channel capabilities at
+    // runtime and returns a clear error when the channel doesn't support media.
+    register_media_tools(&mut registry);
+    tracing::info!("media tools registered");
 
     let startup_status = availability.startup_status(bootstrap.as_ref());
     let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());

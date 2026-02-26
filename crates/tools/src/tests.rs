@@ -734,6 +734,8 @@ mod memory_tool_tests {
         ToolExecutionContext {
             user_id: Some(user_id.to_owned()),
             session_id: Some(session_id.to_owned()),
+            channel_capabilities: None,
+            event_sender: None,
         }
     }
 

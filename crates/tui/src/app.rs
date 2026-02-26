@@ -697,10 +697,7 @@ impl TuiApp {
         match command {
             "/new" => {
                 let display_name = arg.filter(|a| !a.is_empty()).map(|a| a.to_owned());
-                match self
-                    .adapter
-                    .create_session(next_request_id(), display_name)
-                {
+                match self.adapter.create_session(next_request_id(), display_name) {
                     Ok(()) => Some(Ok(())),
                     Err(e) => Some(Err(format!("failed to create session: {e}"))),
                 }
@@ -711,14 +708,9 @@ impl TuiApp {
             },
             "/switch" => {
                 let Some(session_id) = arg.filter(|a| !a.is_empty()) else {
-                    return Some(Err(
-                        "usage: /switch <session_id>".to_owned(),
-                    ));
+                    return Some(Err("usage: /switch <session_id>".to_owned()));
                 };
-                match self
-                    .adapter
-                    .switch_session(next_request_id(), session_id)
-                {
+                match self.adapter.switch_session(next_request_id(), session_id) {
                     Ok(()) => Some(Ok(())),
                     Err(e) => Some(Err(format!("failed to switch session: {e}"))),
                 }

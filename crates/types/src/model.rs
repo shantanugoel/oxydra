@@ -155,6 +155,9 @@ pub enum StreamItem {
     /// Channels can surface these to users in whatever way fits their UX
     /// (status line update, transient system message, etc.).
     Progress(RuntimeProgressEvent),
+    /// A media attachment emitted by the `send_media` tool. Forwarded through
+    /// the gateway to the channel adapter for delivery to the user.
+    Media(crate::channel::MediaAttachment),
 }
 
 /// A progress notification emitted by the runtime during a multi-step turn.

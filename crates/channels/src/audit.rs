@@ -86,9 +86,7 @@ impl AuditLogger {
         }
 
         let mut line =
-            serde_json::to_string(entry).map_err(|source| AuditWriteError::Serialize {
-                source,
-            })?;
+            serde_json::to_string(entry).map_err(|source| AuditWriteError::Serialize { source })?;
         line.push('\n');
 
         let mut file = OpenOptions::new()

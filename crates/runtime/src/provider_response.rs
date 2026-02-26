@@ -103,6 +103,10 @@ impl AgentRuntime {
                     // no-op; it should not be forwarded from within this collect
                     // loop since the runtime already emits progress independently.
                 }
+                Ok(StreamItem::Media(_)) => {
+                    // Media events are emitted by tools (send_media), not by
+                    // provider streams. Ignore if one somehow arrives here.
+                }
                 Err(error) => return Err(StreamCollectError::Provider(error)),
             }
         }

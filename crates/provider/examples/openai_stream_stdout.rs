@@ -63,6 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Progress events are emitted by the runtime layer, not
                         // by provider streams; ignored in this example.
                     }
+                    StreamItem::Media(_) => {
+                        // Media events are emitted by tools; ignored in this example.
+                    }
                 }
             }
             println!();

@@ -126,7 +126,12 @@ impl AgentRuntime {
         tracing::debug!(tool = %tool_call.name, "executing tool call");
         let start = std::time::Instant::now();
         let output = match self
-            .execute_tool_call(&tool_call.name, &tool_call.arguments, cancellation, tool_context)
+            .execute_tool_call(
+                &tool_call.name,
+                &tool_call.arguments,
+                cancellation,
+                tool_context,
+            )
             .await
         {
             Ok(out) => {

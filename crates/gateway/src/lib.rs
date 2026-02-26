@@ -37,8 +37,8 @@ mod turn_runner;
 mod tests;
 
 use runtime::SchedulerNotifier;
-use session::{ActiveTurnState, SessionState, UserState};
 pub use session::SessionState as GatewaySessionState;
+use session::{ActiveTurnState, SessionState, UserState};
 pub use turn_runner::{GatewayTurnRunner, RuntimeGatewayTurnRunner};
 
 const WS_ROUTE: &str = "/ws";
@@ -146,6 +146,7 @@ impl GatewayServer {
                     record.user_id.clone(),
                     record.agent_name.clone(),
                     record.parent_session_id.clone(),
+                    record.channel_origin.clone(),
                 ));
                 let mut sessions = user.sessions.write().await;
                 sessions.insert(record.session_id.clone(), Arc::clone(&session));
@@ -167,6 +168,7 @@ impl GatewayServer {
             user_id.to_owned(),
             agent_name.to_owned(),
             None,
+            channel_origin.to_owned(),
         ));
         let mut sessions = user.sessions.write().await;
         sessions.insert(new_session_id.clone(), Arc::clone(&session));
@@ -597,13 +599,12 @@ impl GatewayServer {
                         *updates = new_session.events.subscribe();
                         *active_session = Arc::clone(&new_session);
 
-                        let frame =
-                            GatewayServerFrame::SessionCreated(GatewaySessionCreated {
-                                request_id: create.request_id,
-                                session: new_session.gateway_session(),
-                                display_name: create.display_name,
-                                agent_name: new_session.agent_name.clone(),
-                            });
+                        let frame = GatewayServerFrame::SessionCreated(GatewaySessionCreated {
+                            request_id: create.request_id,
+                            session: new_session.gateway_session(),
+                            display_name: create.display_name,
+                            agent_name: new_session.agent_name.clone(),
+                        });
                         send_server_frame(sender, &frame).await
                     }
                     Err(msg) => {
@@ -629,8 +630,7 @@ impl GatewayServer {
                             .into_iter()
                             .filter(|r| {
                                 // Filter out subagent sessions unless requested.
-                                list.include_subagent_sessions
-                                    || r.parent_session_id.is_none()
+                                list.include_subagent_sessions || r.parent_session_id.is_none()
                             })
                             .map(|r| GatewaySessionSummary {
                                 session_id: r.session_id,
@@ -642,11 +642,10 @@ impl GatewayServer {
                                 archived: r.archived,
                             })
                             .collect();
-                        let frame =
-                            GatewayServerFrame::SessionList(GatewaySessionList {
-                                request_id: list.request_id,
-                                sessions,
-                            });
+                        let frame = GatewayServerFrame::SessionList(GatewaySessionList {
+                            request_id: list.request_id,
+                            sessions,
+                        });
                         send_server_frame(sender, &frame).await
                     }
                     Err(msg) => {
@@ -673,12 +672,11 @@ impl GatewayServer {
                         let active_turn = target_session.active_turn_status().await;
                         *active_session = Arc::clone(&target_session);
 
-                        let frame =
-                            GatewayServerFrame::SessionSwitched(GatewaySessionSwitched {
-                                request_id: switch.request_id,
-                                session: target_session.gateway_session(),
-                                active_turn,
-                            });
+                        let frame = GatewayServerFrame::SessionSwitched(GatewaySessionSwitched {
+                            request_id: switch.request_id,
+                            session: target_session.gateway_session(),
+                            active_turn,
+                        });
                         send_server_frame(sender, &frame).await
                     }
                     Err(msg) => {
@@ -744,6 +742,7 @@ impl GatewayServer {
                 record.user_id.clone(),
                 record.agent_name.clone(),
                 record.parent_session_id.clone(),
+                record.channel_origin.clone(),
             ));
             let mut sessions = user.sessions.write().await;
             sessions.insert(default_id, Arc::clone(&session));
@@ -756,6 +755,7 @@ impl GatewayServer {
             hello.user_id.clone(),
             "default".to_owned(),
             None,
+            GATEWAY_CHANNEL_ID.to_owned(),
         ));
         let mut sessions = user.sessions.write().await;
         sessions.insert(default_id.clone(), Arc::clone(&session));
@@ -854,12 +854,16 @@ impl GatewayServer {
         let session_store = self.session_store.clone();
         tokio::spawn(async move {
             let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
+            let channel_capabilities = Some(types::ChannelCapabilities::from_channel_origin(
+                &session.channel_origin,
+            ));
             let runtime_future = runtime.run_turn(
                 &session.user_id,
                 &session.session_id,
                 send_turn.prompt,
                 cancellation,
                 delta_tx,
+                channel_capabilities,
             );
             tokio::pin!(runtime_future);
 
@@ -883,6 +887,13 @@ impl GatewayServer {
                                             session: session.gateway_session(),
                                             turn: running_turn.clone(),
                                             progress,
+                                        }));
+                                    }
+                                    Some(StreamItem::Media(attachment)) => {
+                                        session.publish(GatewayServerFrame::MediaAttachment(types::GatewayMediaAttachment {
+                                            request_id: send_turn.request_id.clone(),
+                                            session: session.gateway_session(),
+                                            attachment,
                                         }));
                                     }
                                     _ => {}

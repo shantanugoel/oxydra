@@ -11,15 +11,19 @@ use std::time::{Duration, Instant};
 use frankenstein::AsyncTelegramApi;
 use frankenstein::ParseMode;
 use frankenstein::client_reqwest::Bot;
-use frankenstein::methods::{EditMessageTextParams, GetUpdatesParams, SendMessageParams};
+use frankenstein::methods::{
+    EditMessageTextParams, GetUpdatesParams, SendAudioParams, SendDocumentParams,
+    SendMessageParams, SendPhotoParams, SendVideoParams, SendVoiceParams,
+};
 use frankenstein::types::{AllowedUpdate, ChatId, Message as TgMessage};
 use frankenstein::updates::UpdateContent;
+use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use types::{
-    GatewayCancelActiveTurn, GatewaySendTurn, GatewayServerFrame, SessionStore,
-    TelegramChannelConfig,
+    GatewayCancelActiveTurn, GatewaySendTurn, GatewayServerFrame, MediaAttachment, MediaType,
+    SessionStore, TelegramChannelConfig,
 };
 
 use crate::audit::{AuditEntry, AuditLogger, now_iso8601};
@@ -279,23 +283,15 @@ impl TelegramAdapter {
                         } else {
                             let mut lines = Vec::with_capacity(sessions.len() + 1);
                             lines.push("📋 Sessions:".to_owned());
-                            for s in sessions
-                                .iter()
-                                .filter(|s| s.parent_session_id.is_none())
-                            {
-                                let id_short =
-                                    &s.session_id[..8.min(s.session_id.len())];
-                                let name = s
-                                    .display_name
-                                    .as_deref()
-                                    .unwrap_or("(unnamed)");
+                            for s in sessions.iter().filter(|s| s.parent_session_id.is_none()) {
+                                let id_short = &s.session_id[..8.min(s.session_id.len())];
+                                let name = s.display_name.as_deref().unwrap_or("(unnamed)");
                                 lines.push(format!(
                                     "  {id_short} — {name} [{origin}]",
                                     origin = s.channel_origin
                                 ));
                             }
-                            self.send_reply(chat_id, thread_id, &lines.join("\n"))
-                                .await;
+                            self.send_reply(chat_id, thread_id, &lines.join("\n")).await;
                         }
                     }
                     Err(e) => {
@@ -319,17 +315,12 @@ impl TelegramAdapter {
                     Ok(session) => {
                         if let Err(e) = self
                             .session_map
-                            .set_session_id(
-                                CHANNEL_ID,
-                                channel_context_id,
-                                &session.session_id,
-                            )
+                            .set_session_id(CHANNEL_ID, channel_context_id, &session.session_id)
                             .await
                         {
                             warn!(error = %e, "failed to update channel session mapping on switch");
                         }
-                        let id_short =
-                            &session.session_id[..8.min(session.session_id.len())];
+                        let id_short = &session.session_id[..8.min(session.session_id.len())];
                         self.send_reply(
                             chat_id,
                             thread_id,
@@ -356,12 +347,7 @@ impl TelegramAdapter {
                 };
                 match self
                     .gateway
-                    .create_or_get_session(
-                        &self.user_id,
-                        Some(&session_id),
-                        "default",
-                        CHANNEL_ID,
-                    )
+                    .create_or_get_session(&self.user_id, Some(&session_id), "default", CHANNEL_ID)
                     .await
                 {
                     Ok(session) => {
@@ -370,16 +356,14 @@ impl TelegramAdapter {
                             session_id: session.session_id.clone(),
                             turn_id: String::new(),
                         };
-                        if let Some(error_frame) =
-                            self.gateway.cancel_session_turn(&session, cancel_turn).await
+                        if let Some(error_frame) = self
+                            .gateway
+                            .cancel_session_turn(&session, cancel_turn)
+                            .await
                         {
                             if let GatewayServerFrame::Error(ref err) = error_frame {
-                                self.send_reply(
-                                    chat_id,
-                                    thread_id,
-                                    &format!("ℹ️ {}", err.message),
-                                )
-                                .await;
+                                self.send_reply(chat_id, thread_id, &format!("ℹ️ {}", err.message))
+                                    .await;
                             }
                         } else {
                             self.send_reply(chat_id, thread_id, "🛑 Turn cancelled.")
@@ -403,7 +387,9 @@ impl TelegramAdapter {
                 let status = match session_id {
                     Some(ref id) => {
                         let id_short = &id[..8.min(id.len())];
-                        format!("Session: {id_short}\nChannel: {CHANNEL_ID}\nContext: {channel_context_id}")
+                        format!(
+                            "Session: {id_short}\nChannel: {CHANNEL_ID}\nContext: {channel_context_id}"
+                        )
                     }
                     None => "No session mapped to this chat.".to_owned(),
                 };
@@ -438,12 +424,7 @@ impl TelegramAdapter {
             .await
             && let Ok(session) = self
                 .gateway
-                .create_or_get_session(
-                    &self.user_id,
-                    Some(&session_id),
-                    "default",
-                    CHANNEL_ID,
-                )
+                .create_or_get_session(&self.user_id, Some(&session_id), "default", CHANNEL_ID)
                 .await
         {
             return Ok(session);
@@ -475,8 +456,12 @@ impl TelegramAdapter {
         mut events_rx: broadcast::Receiver<GatewayServerFrame>,
         cancel: &CancellationToken,
     ) {
-        let mut streamer =
-            ResponseStreamer::new(&self.bot, chat_id, thread_id, self.config.max_message_length);
+        let mut streamer = ResponseStreamer::new(
+            &self.bot,
+            chat_id,
+            thread_id,
+            self.config.max_message_length,
+        );
 
         // Send placeholder.
         streamer.send_placeholder().await;
@@ -494,6 +479,9 @@ impl TelegramAdapter {
                         }
                         Ok(GatewayServerFrame::AssistantDelta(delta)) => {
                             streamer.append_text(&delta.delta).await;
+                        }
+                        Ok(GatewayServerFrame::MediaAttachment(media)) => {
+                            self.send_media_attachment(chat_id, thread_id, &media.attachment).await;
                         }
                         Ok(GatewayServerFrame::TurnCompleted(completed)) => {
                             let final_text = completed
@@ -545,6 +533,172 @@ impl TelegramAdapter {
         };
         if let Err(e) = self.bot.send_message(&params).await {
             warn!(error = %e, chat_id, "failed to send telegram reply");
+        }
+    }
+
+    /// Send a media attachment (photo, audio, document, voice, video) to a chat.
+    async fn send_media_attachment(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        attachment: &MediaAttachment,
+    ) {
+        // Write the file data to a temporary file so frankenstein can upload it.
+        let file_name = attachment.file_name.as_deref().unwrap_or("attachment");
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join(format!("oxydra-tg-{}-{}", uuid::Uuid::new_v4(), file_name));
+
+        if let Err(e) = tokio::fs::write(&temp_path, &attachment.data).await {
+            warn!(error = %e, "failed to write temp file for telegram media upload");
+            // Fallback: send a text message about the failure.
+            self.send_reply(
+                chat_id,
+                thread_id,
+                &format!("📎 [Failed to send media: {}]", e),
+            )
+            .await;
+            return;
+        }
+
+        let file_upload: PathBuf = temp_path.clone();
+        let caption = attachment.caption.clone();
+        let result = match attachment.media_type {
+            MediaType::Photo => {
+                let params = SendPhotoParams {
+                    chat_id: ChatId::Integer(chat_id),
+                    photo: file_upload.into(),
+                    caption,
+                    message_thread_id: thread_id,
+                    business_connection_id: None,
+                    direct_messages_topic_id: None,
+                    parse_mode: None,
+                    caption_entities: None,
+                    show_caption_above_media: None,
+                    has_spoiler: None,
+                    disable_notification: None,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: None,
+                    reply_markup: None,
+                };
+                self.bot.send_photo(&params).await.map(|_| ())
+            }
+            MediaType::Audio => {
+                let params = SendAudioParams {
+                    chat_id: ChatId::Integer(chat_id),
+                    audio: file_upload.into(),
+                    caption,
+                    message_thread_id: thread_id,
+                    business_connection_id: None,
+                    direct_messages_topic_id: None,
+                    parse_mode: None,
+                    caption_entities: None,
+                    duration: None,
+                    performer: None,
+                    title: None,
+                    thumbnail: None,
+                    disable_notification: None,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: None,
+                    reply_markup: None,
+                };
+                self.bot.send_audio(&params).await.map(|_| ())
+            }
+            MediaType::Document => {
+                let params = SendDocumentParams {
+                    chat_id: ChatId::Integer(chat_id),
+                    document: file_upload.into(),
+                    caption,
+                    message_thread_id: thread_id,
+                    business_connection_id: None,
+                    direct_messages_topic_id: None,
+                    parse_mode: None,
+                    caption_entities: None,
+                    thumbnail: None,
+                    disable_content_type_detection: None,
+                    disable_notification: None,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: None,
+                    reply_markup: None,
+                };
+                self.bot.send_document(&params).await.map(|_| ())
+            }
+            MediaType::Voice => {
+                let params = SendVoiceParams {
+                    chat_id: ChatId::Integer(chat_id),
+                    voice: file_upload.into(),
+                    caption,
+                    message_thread_id: thread_id,
+                    business_connection_id: None,
+                    direct_messages_topic_id: None,
+                    parse_mode: None,
+                    caption_entities: None,
+                    duration: None,
+                    disable_notification: None,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: None,
+                    reply_markup: None,
+                };
+                self.bot.send_voice(&params).await.map(|_| ())
+            }
+            MediaType::Video => {
+                let params = SendVideoParams {
+                    chat_id: ChatId::Integer(chat_id),
+                    video: file_upload.into(),
+                    caption,
+                    message_thread_id: thread_id,
+                    business_connection_id: None,
+                    direct_messages_topic_id: None,
+                    parse_mode: None,
+                    caption_entities: None,
+                    duration: None,
+                    width: None,
+                    height: None,
+                    thumbnail: None,
+                    cover: None,
+                    start_timestamp: None,
+                    show_caption_above_media: None,
+                    has_spoiler: None,
+                    supports_streaming: None,
+                    disable_notification: None,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: None,
+                    reply_markup: None,
+                };
+                self.bot.send_video(&params).await.map(|_| ())
+            }
+        };
+
+        // Clean up temp file.
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        if let Err(e) = result {
+            warn!(
+                error = %e,
+                media_type = ?attachment.media_type,
+                chat_id,
+                "failed to send telegram media"
+            );
+            // Fallback: send a text notification about the failure.
+            let fallback = format!(
+                "📎 [Tried to send a {:?} but the upload failed: {}]",
+                attachment.media_type, e
+            );
+            self.send_reply(chat_id, thread_id, &fallback).await;
         }
     }
 }
@@ -826,9 +980,7 @@ pub fn markdown_to_telegram_html(input: &str) -> String {
                 i += 1;
             }
             let start = i;
-            while i + 2 < len
-                && !(chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`')
-            {
+            while i + 2 < len && !(chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`') {
                 i += 1;
             }
             let code_content: String = chars[start..i].iter().collect();

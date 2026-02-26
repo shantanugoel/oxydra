@@ -203,18 +203,11 @@ impl TuiViewModel {
             }
             GatewayServerFrame::SessionList(list) => {
                 if list.sessions.is_empty() {
-                    self.push_message(ChatMessage::System(
-                        "No sessions found.".to_owned(),
-                    ));
+                    self.push_message(ChatMessage::System("No sessions found.".to_owned()));
                 } else {
-                    self.push_message(ChatMessage::System(
-                        "Sessions:".to_owned(),
-                    ));
+                    self.push_message(ChatMessage::System("Sessions:".to_owned()));
                     for s in &list.sessions {
-                        let name = s
-                            .display_name
-                            .as_deref()
-                            .unwrap_or("-");
+                        let name = s.display_name.as_deref().unwrap_or("-");
                         let short_id = if s.session_id.len() > 13 {
                             &s.session_id[..13]
                         } else {
@@ -243,6 +236,15 @@ impl TuiViewModel {
                     ));
                     self.push_message(ChatMessage::Assistant(String::new()));
                 }
+            }
+            GatewayServerFrame::MediaAttachment(media) => {
+                // In the TUI, media attachments cannot be displayed inline.
+                // Show a system message indicating media was sent via the channel.
+                let file_name = media.attachment.file_name.as_deref().unwrap_or("file");
+                self.push_message(ChatMessage::System(format!(
+                    "📎 Sent {:?}: {file_name}",
+                    media.attachment.media_type,
+                )));
             }
         }
     }

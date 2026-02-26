@@ -226,9 +226,7 @@ fn record_from_row(row: &libsql::Row) -> Result<SessionRecord, MemoryError> {
     let last_active_at = row
         .get::<String>(7)
         .map_err(|e| query_error(e.to_string()))?;
-    let archived_int = row
-        .get::<i64>(8)
-        .map_err(|e| query_error(e.to_string()))?;
+    let archived_int = row.get::<i64>(8).map_err(|e| query_error(e.to_string()))?;
 
     Ok(SessionRecord {
         session_id,

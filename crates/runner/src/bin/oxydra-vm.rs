@@ -305,11 +305,11 @@ fn spawn_telegram_adapter(
         format!("environment variable `{bot_token_env}` for telegram bot token is not set")
     })?;
 
-    let session_store = session_store
-        .ok_or("session store is required for telegram adapter but memory backend is not available")?;
+    let session_store = session_store.ok_or(
+        "session store is required for telegram adapter but memory backend is not available",
+    )?;
 
-    let sender_auth =
-        channels::SenderAuthPolicy::from_bindings(&config.senders);
+    let sender_auth = channels::SenderAuthPolicy::from_bindings(&config.senders);
     if sender_auth.is_empty() {
         warn!("telegram adapter has no authorized senders; all messages will be rejected");
     }

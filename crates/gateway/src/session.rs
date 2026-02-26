@@ -58,6 +58,8 @@ pub struct SessionState {
     pub(crate) user_id: String,
     pub(crate) agent_name: String,
     pub(crate) parent_session_id: Option<String>,
+    /// The channel that created this session (e.g. "tui", "telegram").
+    pub(crate) channel_origin: String,
     #[allow(dead_code)]
     pub(crate) created_at: Instant,
     pub(crate) events: broadcast::Sender<GatewayServerFrame>,
@@ -71,6 +73,7 @@ impl SessionState {
         user_id: String,
         agent_name: String,
         parent_session_id: Option<String>,
+        channel_origin: String,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_BUFFER_CAPACITY);
         Self {
@@ -78,6 +81,7 @@ impl SessionState {
             user_id,
             agent_name,
             parent_session_id,
+            channel_origin,
             created_at: Instant::now(),
             events,
             active_turn: Mutex::new(None),

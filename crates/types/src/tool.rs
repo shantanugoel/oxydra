@@ -3,8 +3,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::ToolError;
+use crate::channel::ChannelCapabilities;
+use crate::model::StreamItem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,16 +63,38 @@ impl FunctionDecl {
 
 /// Per-invocation context passed to [`Tool::execute`].
 ///
-/// Carries runtime state that varies per turn (user identity, active session).
-/// Tools that do not need this context simply ignore the parameter. Memory
-/// tools read `user_id` and `session_id` to scope operations to the correct
-/// user namespace.
-#[derive(Debug, Clone, Default)]
+/// Carries runtime state that varies per turn (user identity, active session,
+/// channel capabilities). Tools that do not need this context simply ignore
+/// the parameter. Memory tools read `user_id` and `session_id` to scope
+/// operations; the `send_media` tool uses `channel_capabilities` and
+/// `event_sender` to deliver media through the connected channel.
+#[derive(Clone, Default)]
 pub struct ToolExecutionContext {
     /// The authenticated user ID for the current turn, if known.
     pub user_id: Option<String>,
     /// The active conversation session ID for the current turn, if known.
     pub session_id: Option<String>,
+    /// Capabilities of the channel the user is connected through.
+    /// `None` when channel info is not available (e.g., tests).
+    pub channel_capabilities: Option<ChannelCapabilities>,
+    /// Stream event sender for emitting out-of-band data (e.g., media
+    /// attachments) during tool execution. Tools like `send_media` use this
+    /// to push media through the gateway to the channel adapter.
+    pub event_sender: Option<mpsc::UnboundedSender<StreamItem>>,
+}
+
+impl std::fmt::Debug for ToolExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolExecutionContext")
+            .field("user_id", &self.user_id)
+            .field("session_id", &self.session_id)
+            .field("channel_capabilities", &self.channel_capabilities)
+            .field(
+                "event_sender",
+                &self.event_sender.as_ref().map(|_| "<sender>"),
+            )
+            .finish()
+    }
 }
 
 #[async_trait]

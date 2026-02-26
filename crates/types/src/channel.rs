@@ -8,6 +8,177 @@ use crate::{ChannelError, Response};
 
 pub const GATEWAY_PROTOCOL_VERSION: u16 = 2;
 
+// ---------------------------------------------------------------------------
+// Channel capabilities — describes what a channel can do beyond plain text.
+// ---------------------------------------------------------------------------
+
+/// Describes the media-sending capabilities of the channel the user is
+/// connected through. Used to inform the agent (via the system prompt) what
+/// kinds of content it can deliver, and to gate the `send_media` tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChannelCapabilities {
+    /// Human-readable channel type name (e.g. "telegram", "discord", "tui").
+    pub channel_type: String,
+    /// Rich-media capabilities of the channel.
+    #[serde(default)]
+    pub media: MediaCapabilities,
+}
+
+/// Flags indicating which media types the channel supports sending.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MediaCapabilities {
+    /// Can send image files (JPEG, PNG, GIF, etc.).
+    #[serde(default)]
+    pub photo: bool,
+    /// Can send audio files (MP3, OGG, etc.).
+    #[serde(default)]
+    pub audio: bool,
+    /// Can send arbitrary document/file attachments.
+    #[serde(default)]
+    pub document: bool,
+    /// Can send voice messages (OGG/OPUS).
+    #[serde(default)]
+    pub voice: bool,
+    /// Can send video files (MP4, etc.).
+    #[serde(default)]
+    pub video: bool,
+}
+
+impl MediaCapabilities {
+    /// Returns `true` if the channel supports sending at least one media type.
+    pub fn any(&self) -> bool {
+        self.photo || self.audio || self.document || self.voice || self.video
+    }
+}
+
+impl ChannelCapabilities {
+    /// Build capabilities for the TUI (text-only).
+    pub fn tui() -> Self {
+        Self {
+            channel_type: "tui".to_owned(),
+            media: MediaCapabilities::default(),
+        }
+    }
+
+    /// Build capabilities for Telegram.
+    pub fn telegram() -> Self {
+        Self {
+            channel_type: "telegram".to_owned(),
+            media: MediaCapabilities {
+                photo: true,
+                audio: true,
+                document: true,
+                voice: true,
+                video: true,
+            },
+        }
+    }
+
+    /// Map a channel origin string to its known capabilities.
+    pub fn from_channel_origin(origin: &str) -> Self {
+        match origin {
+            "telegram" => Self::telegram(),
+            _ => Self::tui(),
+        }
+    }
+
+    /// Generate a human-readable description of media capabilities for
+    /// inclusion in the system prompt.
+    pub fn system_prompt_section(&self) -> Option<String> {
+        if !self.media.any() {
+            return None;
+        }
+        let mut types = Vec::new();
+        if self.media.photo {
+            types.push("photos/images (JPEG, PNG, GIF)");
+        }
+        if self.media.audio {
+            types.push("audio files (MP3, OGG)");
+        }
+        if self.media.voice {
+            types.push("voice messages (OGG/OPUS)");
+        }
+        if self.media.video {
+            types.push("videos (MP4)");
+        }
+        if self.media.document {
+            types.push("documents/files (PDF, CSV, TXT, etc.)");
+        }
+        let list = types.join(", ");
+        Some(format!(
+            "## Channel Media Capabilities\n\n\
+             You are connected to the user via **{channel}** which supports sending rich media.\n\
+             You can send the following media types directly to the user: {list}.\n\n\
+             To send a file, first prepare it in the workspace (e.g. `/shared/output.png`) using \
+             file tools or shell commands, then use the `send_media` tool to deliver it to the user.\n\
+             The `send_media` tool takes a `path` (workspace file path), a `media_type` \
+             (one of: photo, audio, document, voice, video), and an optional `caption`.\n\n\
+             When the user asks for something that would be better as a file (charts, reports, \
+             audio, images, etc.), prefer generating and sending the actual file rather than \
+             just describing it in text.",
+            channel = self.channel_type
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Media attachment — a file to be delivered through the channel.
+// ---------------------------------------------------------------------------
+
+/// The type of media being sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaType {
+    Photo,
+    Audio,
+    Document,
+    Voice,
+    Video,
+}
+
+/// A media attachment emitted by the `send_media` tool, to be delivered
+/// through the connected channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaAttachment {
+    /// Workspace path of the file (virtual, e.g. `/shared/photo.jpg`).
+    pub file_path: String,
+    /// What kind of media this is.
+    pub media_type: MediaType,
+    /// Optional caption/description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    /// The raw file bytes (base64-encoded in JSON serialization).
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+    /// Original file name (for document attachments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+}
+
+/// Serde helper for encoding `Vec<u8>` as base64 strings in JSON.
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(d)?;
+        STANDARD.decode(&encoded).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A gateway-level media attachment frame forwarded to channel adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayMediaAttachment {
+    pub request_id: String,
+    pub session: GatewaySession,
+    pub attachment: MediaAttachment,
+}
+
 pub type ChannelListenStream = mpsc::Receiver<Result<ChannelInboundEvent, ChannelError>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +412,9 @@ pub enum GatewayServerFrame {
     SessionList(GatewaySessionList),
     /// Confirmation that the connection was switched to a different session.
     SessionSwitched(GatewaySessionSwitched),
+    /// A media attachment to be delivered through the channel (photo, audio,
+    /// document, etc.). Emitted when the agent uses the `send_media` tool.
+    MediaAttachment(GatewayMediaAttachment),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

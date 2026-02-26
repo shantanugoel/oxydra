@@ -1,3 +1,5 @@
+![Oxydra](./static/oxydra-1.png)
+
 # Oxydra
 
 A high-performance AI agent orchestrator written in Rust. Oxydra provides a modular runtime for building, isolating, and orchestrating AI agents with provider-agnostic LLM integration, tool execution, persistent memory, and multi-agent coordination.

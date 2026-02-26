@@ -15,15 +15,15 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use types::{
-    CatalogProvider, Context, FunctionDecl, Memory, MemoryChunkUpsertRequest,
+    CatalogProvider, Context, FunctionDecl, InlineMedia, Memory, MemoryChunkUpsertRequest,
     MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
     MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord, MemoryRetrieval,
     MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
     MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
     ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId, Response,
-    RunnerBootstrapEnvelope, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier, SandboxTier,
-    SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall, ToolCallDelta, ToolError,
-    ToolExecutionContext, UsageUpdate,
+    RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier,
+    SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall, ToolCallDelta,
+    ToolError, ToolExecutionContext, UsageUpdate,
 };
 
 use super::{AgentRuntime, RuntimeLimits};
@@ -1120,6 +1120,69 @@ async fn run_session_for_session_persists_initial_context_and_new_turns() {
 }
 
 #[tokio::test]
+async fn run_session_for_session_strips_attachment_bytes_before_persisting() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), false),
+        vec![ProviderStep::Complete(assistant_response("ok", vec![]))],
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        supports_tools: true,
+        ..ProviderCaps::default()
+    });
+    let memory = Arc::new(RecordingMemory::default());
+    let runtime = AgentRuntime::new(
+        Box::new(provider),
+        ToolRegistry::default(),
+        RuntimeLimits::default(),
+    )
+    .with_memory(memory.clone());
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("describe this".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![InlineMedia {
+                mime_type: "image/jpeg".to_owned(),
+                data: vec![1, 2, 3, 4, 5],
+            }],
+        }],
+    };
+
+    runtime
+        .run_session_for_session(
+            "session-strip-attachments",
+            &mut context,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("runtime turn should complete");
+
+    let stored = memory
+        .recall(MemoryRecallRequest {
+            session_id: "session-strip-attachments".to_owned(),
+            limit: None,
+        })
+        .await
+        .expect("persisted records should be recallable");
+    let restored_user: Message =
+        serde_json::from_value(stored[0].payload.clone()).expect("payload should deserialize");
+    assert_eq!(restored_user.attachments.len(), 1);
+    assert!(
+        restored_user.attachments[0].data.is_empty(),
+        "attachment bytes should be stripped before persistence"
+    );
+    assert_eq!(restored_user.attachments[0].mime_type, "image/jpeg");
+}
+
+#[tokio::test]
 async fn restore_session_hydrates_context_when_memory_is_configured() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
@@ -1132,6 +1195,7 @@ async fn restore_session_hydrates_context_when_memory_is_configured() {
                 content: Some("hello".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             })
             .expect("message should serialize"),
         },
@@ -1143,6 +1207,7 @@ async fn restore_session_hydrates_context_when_memory_is_configured() {
                 content: Some("world".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             })
             .expect("message should serialize"),
         },
@@ -1263,6 +1328,7 @@ async fn run_session_recovers_from_validation_error() {
             content: Some("read".to_owned()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
         tools: Vec::new(),
         model: model_id,
@@ -1339,6 +1405,7 @@ async fn run_session_recovers_from_malformed_streamed_json_arguments() {
             content: Some("read".to_owned()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
         tools: Vec::new(),
         model: model_id,
@@ -1409,6 +1476,7 @@ async fn run_session_executes_readonly_tools_in_parallel() {
             content: Some("do slow things".to_owned()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
         tools: Vec::new(),
         model: model_id,
@@ -1767,36 +1835,42 @@ async fn run_session_trims_provider_context_to_max_context_budget() {
                 content: Some("system ".repeat(120)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("older user ".repeat(90)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("older assistant ".repeat(90)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("middle user ".repeat(90)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("middle assistant ".repeat(90)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("latest user turn".to_owned()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -1815,6 +1889,59 @@ async fn run_session_trims_provider_context_to_max_context_budget() {
         context.messages[5].content.as_deref(),
         Some("latest user turn")
     );
+}
+
+#[tokio::test]
+async fn run_session_budget_exceeded_when_latest_user_message_does_not_fit() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let mut provider = MockProviderContract::new();
+    provider
+        .expect_provider_id()
+        .return_const(provider_id.clone());
+    provider
+        .expect_model_catalog()
+        .return_const(test_catalog_with_max_context(
+            provider_id.clone(),
+            model_id.clone(),
+            false,
+            Some(64),
+        ));
+    provider.expect_capabilities().returning(|_| {
+        Ok(ProviderCaps {
+            supports_streaming: false,
+            supports_tools: true,
+            max_context_tokens: Some(64),
+            ..ProviderCaps::default()
+        })
+    });
+    provider.expect_stream().never();
+    provider.expect_complete().never();
+
+    let mut limits = RuntimeLimits::default();
+    limits.context_budget.safety_buffer_tokens = 8;
+    let runtime = AgentRuntime::new(Box::new(provider), ToolRegistry::default(), limits);
+    let mut context = Context {
+        provider: provider_id,
+        model: model_id,
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("latest user turn".to_owned()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            attachments: vec![InlineMedia {
+                mime_type: "image/jpeg".to_owned(),
+                data: vec![1_u8; 20_000],
+            }],
+        }],
+    };
+
+    let error = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect_err("latest user message that does not fit should fail the turn");
+    assert!(matches!(error, RuntimeError::BudgetExceeded));
 }
 
 #[tokio::test]
@@ -1861,18 +1988,21 @@ async fn run_session_uses_fallback_context_limit_when_model_cap_is_missing() {
                 content: Some("older user ".repeat(100)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("older assistant ".repeat(100)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("latest user".to_owned()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -1968,18 +2098,21 @@ async fn run_session_for_session_enforces_budget_with_retrieval_injection() {
                 content: Some("older user detail ".repeat(120)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("older assistant detail ".repeat(120)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("latest user turn".to_owned()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -2072,6 +2205,7 @@ async fn run_session_for_session_injects_retrieved_memory_snippets() {
             content: Some("what did we persist?".to_owned()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     };
 
@@ -2151,30 +2285,35 @@ async fn run_session_for_session_triggers_rolling_summary_when_threshold_exceede
                 content: Some("older user detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("older assistant detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("middle user detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("middle assistant detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("latest user question".to_owned()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -2260,30 +2399,35 @@ async fn run_session_for_session_discards_stale_rolling_summary_writes() {
                 content: Some("older user detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("older assistant detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("middle user detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
                 content: Some("middle assistant detail ".repeat(80)),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("latest user question".to_owned()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -2377,6 +2521,7 @@ fn test_context(provider_id: ProviderId, model_id: ModelId) -> Context {
             content: Some("Read Cargo.toml".to_owned()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     }
 }
@@ -2421,6 +2566,7 @@ fn assistant_response(content: &str, tool_calls: Vec<ToolCall>) -> Response {
             content: Some(content.to_owned()),
             tool_calls: tool_calls.clone(),
             tool_call_id: None,
+            attachments: Vec::new(),
         },
         tool_calls,
         finish_reason: Some("stop".to_owned()),

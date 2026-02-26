@@ -162,6 +162,7 @@ impl AgentRuntime {
             content: Some(output),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call.id.clone()),
+            attachments: Vec::new(),
         })
     }
 }

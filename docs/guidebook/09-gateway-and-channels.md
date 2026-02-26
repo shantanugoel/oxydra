@@ -28,7 +28,7 @@ Communication between channels and the gateway uses typed JSON frames over WebSo
 ```rust
 pub enum GatewayClientFrame {
     Hello(GatewayClientHello),      // { user_id, session_id?, create_new_session }
-    SendTurn(GatewaySendTurn),      // { session_id, turn_id, prompt }
+    SendTurn(GatewaySendTurn),      // { session_id, turn_id, prompt, attachments? }
     CancelActiveTurn(GatewayCancelActiveTurn),  // { session_id, turn_id }
     HealthCheck(GatewayHealthCheck),
     CreateSession(GatewayCreateSession),        // { display_name?, agent_name? }
@@ -136,10 +136,11 @@ Both the WebSocket handler and in-process adapters call these same methods, ensu
 
 When a `SendTurn` frame arrives:
 
-1. The gateway locates the user's session
-2. If an active turn exists, the request is rejected with an error
-3. A `RuntimeGatewayTurnRunner` is created to bridge gateway and runtime
-4. The runner constructs a `Context` and a per-turn `ToolExecutionContext` (with user_id and session_id), then calls `AgentRuntime::run_session_for_session_with_stream_events`, passing the tool context as a parameter (not stored as shared state)
+1. The gateway validates any inline attachments (count limit, per-file size limit, total payload limit, MIME type format)
+2. The gateway locates the user's session
+3. If an active turn exists, the request is rejected with an error
+4. A `RuntimeGatewayTurnRunner` is created to bridge gateway and runtime
+5. The runner constructs a `Context` and a per-turn `ToolExecutionContext` (with user_id and session_id), then calls `AgentRuntime::run_session_for_session_with_stream_events`, passing the tool context as a parameter (not stored as shared state)
 5. Stream items from the runtime are forwarded according to type:
    - `StreamItem::Text(delta)` → published as an `AssistantDelta` frame
    - `StreamItem::Progress(event)` → published as a `TurnProgress` frame (channels display it however fits their UX; the TUI shows it in the input bar title)
@@ -374,3 +375,26 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
 - **Scheduled notifications are session-scoped:** If no user session is connected when a scheduled notification fires, the notification is lost (results persist in memory via the scheduled turn's session, but the push notification is not queued)
+
+## Inline Attachment Ingress Limits
+
+The gateway enforces ingress limits on inline media attachments at the protocol level, before any turn processing begins:
+
+| Limit | Value |
+|-------|-------|
+| Max attachments per turn | 4 |
+| Max size per attachment | 10 MB |
+| Max total attachment payload | 40 MB |
+
+Additionally, each attachment's MIME type is validated for format correctness (must contain exactly one `/` separator, ASCII alphanumeric characters plus `-._+`).
+
+These limits are enforced in `validate_inline_attachments()` and apply uniformly to all channels (WebSocket, Telegram, etc.). Violations produce an immediate `GatewayServerFrame::Error` response.
+
+The `UserTurnInput` struct bundles the user's text prompt and optional attachments for the turn runner:
+
+```rust
+pub struct UserTurnInput {
+    pub prompt: String,
+    pub attachments: Vec<InlineMedia>,
+}
+```

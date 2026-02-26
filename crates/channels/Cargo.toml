@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["telegram"]
-telegram = ["dep:frankenstein", "dep:gateway", "dep:tokio", "dep:tokio-util", "dep:uuid"]
+telegram = ["dep:frankenstein", "dep:gateway", "dep:reqwest", "dep:tokio", "dep:tokio-util", "dep:uuid"]
 
 [dependencies]
 types = { path = "../types" }
@@ -16,6 +16,7 @@ tracing = "0.1"
 # Telegram feature-gated dependencies
 frankenstein = { version = "0.47", optional = true, features = ["client-reqwest"] }
 gateway = { path = "../gateway", optional = true }
+reqwest = { version = "0.13", optional = true, features = ["rustls"] }
 tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
 tokio-util = { version = "0.7", optional = true, features = ["rt"] }
 uuid = { version = "1", optional = true, features = ["v4"] }

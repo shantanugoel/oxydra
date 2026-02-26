@@ -365,6 +365,12 @@ pub struct ProviderRegistryEntry {
     /// Per-entry capability overrides for unknown models (used only when
     /// `skip_catalog_validation` is enabled and the model is not in the catalog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<bool>,
+    /// Supported attachment input modalities for unknown models
+    /// (e.g. `["image", "audio"]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<u32>,
@@ -382,6 +388,8 @@ impl ProviderRegistryEntry {
     /// Extracts capability overrides for use with unknown model synthesis.
     pub fn unknown_model_caps(&self) -> UnknownModelCaps {
         UnknownModelCaps {
+            attachment: self.attachment,
+            input_modalities: self.input_modalities.clone(),
             reasoning: self.reasoning,
             max_input_tokens: self.max_input_tokens,
             max_output_tokens: self.max_output_tokens,
@@ -645,6 +653,8 @@ impl Default for SchedulerConfig {
 /// catalog, to provide sensible defaults for the synthetic descriptor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnknownModelCaps {
+    pub attachment: Option<bool>,
+    pub input_modalities: Option<Vec<String>>,
     pub reasoning: Option<bool>,
     pub max_input_tokens: Option<u32>,
     pub max_output_tokens: Option<u32>,
@@ -774,6 +784,8 @@ fn default_provider_registry() -> BTreeMap<String, ProviderRegistryEntry> {
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
             extra_headers: None,
             catalog_provider: None,
+            attachment: None,
+            input_modalities: None,
             reasoning: None,
             max_input_tokens: None,
             max_output_tokens: None,
@@ -789,6 +801,8 @@ fn default_provider_registry() -> BTreeMap<String, ProviderRegistryEntry> {
             api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
             extra_headers: None,
             catalog_provider: None,
+            attachment: None,
+            input_modalities: None,
             reasoning: None,
             max_input_tokens: None,
             max_output_tokens: None,
@@ -922,6 +936,8 @@ mod tests {
                 api_key_env: Some("CORP_OPENAI_KEY".to_owned()),
                 extra_headers: None,
                 catalog_provider: None,
+                attachment: None,
+                input_modalities: None,
                 reasoning: None,
                 max_input_tokens: None,
                 max_output_tokens: None,
@@ -958,6 +974,8 @@ mod tests {
             api_key_env: None,
             extra_headers: None,
             catalog_provider: None,
+            attachment: None,
+            input_modalities: None,
             reasoning: None,
             max_input_tokens: None,
             max_output_tokens: None,
@@ -1064,6 +1082,8 @@ mod tests {
                 "value".to_owned(),
             )])),
             catalog_provider: Some("openai".to_owned()),
+            attachment: None,
+            input_modalities: None,
             reasoning: None,
             max_input_tokens: None,
             max_output_tokens: None,
@@ -1073,6 +1093,33 @@ mod tests {
         let deserialized: ProviderRegistryEntry =
             serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(entry, deserialized);
+    }
+
+    #[test]
+    fn unknown_model_caps_include_attachment_and_modalities() {
+        let entry = ProviderRegistryEntry {
+            provider_type: ProviderType::Openai,
+            base_url: None,
+            api_key: None,
+            api_key_env: None,
+            extra_headers: None,
+            catalog_provider: None,
+            attachment: Some(true),
+            input_modalities: Some(vec!["image".to_owned(), "audio".to_owned()]),
+            reasoning: Some(true),
+            max_input_tokens: Some(200_000),
+            max_output_tokens: Some(16_000),
+            max_context_tokens: Some(200_000),
+        };
+
+        let caps = entry.unknown_model_caps();
+        assert_eq!(caps.attachment, Some(true));
+        assert_eq!(
+            caps.input_modalities,
+            Some(vec!["image".to_owned(), "audio".to_owned()])
+        );
+        assert_eq!(caps.reasoning, Some(true));
+        assert_eq!(caps.max_input_tokens, Some(200_000));
     }
 
     fn test_catalog_with(provider: &str, model: &str) -> ModelCatalog {

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fmt, fs, io,
     path::{Path, PathBuf},
 };
@@ -86,6 +86,17 @@ pub struct ToolCall {
     pub metadata: Option<Value>,
 }
 
+/// Inline media (image, audio, etc.) attached to a user message for
+/// multi-modal model input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineMedia {
+    /// MIME type, e.g. `"image/jpeg"`, `"audio/ogg"`.
+    pub mime_type: String,
+    /// Raw file bytes (base64-encoded in JSON serialisation).
+    #[serde(with = "crate::channel::base64_bytes")]
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: MessageRole,
@@ -95,6 +106,9 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Inline media attachments (images, audio, etc.) for multi-modal input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<InlineMedia>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,6 +224,74 @@ pub struct ProviderCaps {
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+}
+
+/// Normalized input modality for attachment handling across providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputModality {
+    Image,
+    Audio,
+    Video,
+    Pdf,
+    Document,
+}
+
+impl InputModality {
+    /// Parse a models.dev modality string (e.g. "image", "audio", "pdf").
+    pub fn from_models_dev(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "image" => Some(Self::Image),
+            "audio" => Some(Self::Audio),
+            "video" => Some(Self::Video),
+            "pdf" => Some(Self::Pdf),
+            "document" | "file" => Some(Self::Document),
+            _ => None,
+        }
+    }
+
+    /// Infer input modality from a MIME type.
+    pub fn from_mime_type(mime_type: &str) -> Self {
+        let normalized = mime_type.trim().to_ascii_lowercase();
+        if normalized.starts_with("image/") {
+            return Self::Image;
+        }
+        if normalized.starts_with("audio/") {
+            return Self::Audio;
+        }
+        if normalized.starts_with("video/") {
+            return Self::Video;
+        }
+        if normalized == "application/pdf" {
+            return Self::Pdf;
+        }
+        Self::Document
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Pdf => "pdf",
+            Self::Document => "document",
+        }
+    }
+}
+
+/// Effective model input capabilities for attachment handling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelInputCaps {
+    #[serde(default)]
+    pub supports_attachments: bool,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub input_modalities: BTreeSet<InputModality>,
+}
+
+impl ModelInputCaps {
+    pub fn accepts_modality(&self, modality: InputModality) -> bool {
+        self.supports_attachments && self.input_modalities.contains(&modality)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +428,7 @@ impl ModelDescriptor {
             id: model_id.to_owned(),
             name: model_id.to_owned(),
             family: None,
-            attachment: false,
+            attachment: overrides.attachment.unwrap_or(false),
             reasoning: overrides.reasoning.unwrap_or(false),
             tool_call: true,
             interleaved: None,
@@ -355,7 +437,10 @@ impl ModelDescriptor {
             knowledge: None,
             release_date: None,
             last_updated: None,
-            modalities: Modalities::default(),
+            modalities: Modalities {
+                input: overrides.input_modalities.clone().unwrap_or_default(),
+                output: Vec::new(),
+            },
             open_weights: false,
             cost: ModelCost::default(),
             limit: ModelLimits {
@@ -393,6 +478,25 @@ impl ModelDescriptor {
             max_context_tokens: context,
         }
     }
+
+    /// Derives effective attachment/modality capabilities from models.dev fields.
+    pub fn to_input_caps(&self) -> ModelInputCaps {
+        if !self.attachment {
+            return ModelInputCaps::default();
+        }
+
+        let input_modalities = self
+            .modalities
+            .input
+            .iter()
+            .filter_map(|value| InputModality::from_models_dev(value))
+            .collect::<BTreeSet<_>>();
+
+        ModelInputCaps {
+            supports_attachments: true,
+            input_modalities,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +521,12 @@ pub struct CapsOverrideEntry {
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Overrides attachment support for the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<bool>,
+    /// Overrides input modalities for attachment handling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<String>>,
     /// Marks a model as deprecated. Since models.dev does not have a universal
     /// deprecated field, this is tracked exclusively via the Oxydra overlay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,6 +589,31 @@ pub fn derive_caps(
     caps
 }
 
+/// Derives [`ModelInputCaps`] from model descriptor + Oxydra overlay.
+///
+/// Resolution order (later wins):
+/// 1. Baseline from models.dev (`ModelDescriptor::to_input_caps`)
+/// 2. Provider-level defaults
+/// 3. Model-specific overrides
+pub fn derive_input_caps(
+    catalog_provider_id: &str,
+    model: &ModelDescriptor,
+    overrides: &CapsOverrides,
+) -> ModelInputCaps {
+    let mut caps = model.to_input_caps();
+
+    if let Some(provider_entry) = overrides.provider_defaults.get(catalog_provider_id) {
+        apply_input_override(&mut caps, provider_entry);
+    }
+
+    let model_key = format!("{}/{}", catalog_provider_id, model.id);
+    if let Some(model_entry) = overrides.overrides.get(&model_key) {
+        apply_input_override(&mut caps, model_entry);
+    }
+
+    caps
+}
+
 /// Applies non-`None` fields from an override entry onto existing caps.
 fn apply_override(caps: &mut ProviderCaps, entry: &CapsOverrideEntry) {
     if let Some(v) = entry.supports_streaming {
@@ -501,6 +636,23 @@ fn apply_override(caps: &mut ProviderCaps, entry: &CapsOverrideEntry) {
     }
     if let Some(v) = entry.max_context_tokens {
         caps.max_context_tokens = Some(v);
+    }
+}
+
+fn apply_input_override(caps: &mut ModelInputCaps, entry: &CapsOverrideEntry) {
+    if let Some(v) = entry.attachment {
+        caps.supports_attachments = v;
+        if !v {
+            caps.input_modalities.clear();
+        }
+    }
+
+    if let Some(values) = &entry.input_modalities {
+        let parsed = values
+            .iter()
+            .filter_map(|value| InputModality::from_models_dev(value))
+            .collect::<BTreeSet<_>>();
+        caps.input_modalities = parsed;
     }
 }
 
@@ -687,6 +839,20 @@ impl ModelCatalog {
                 provider: provider.clone(),
                 model: model.clone(),
             })
+    }
+
+    /// Resolves effective attachment/modality capabilities for a model.
+    pub fn input_caps(
+        &self,
+        provider: &ProviderId,
+        model: &ModelId,
+    ) -> Result<ModelInputCaps, ProviderError> {
+        let descriptor = self.validate(provider, model)?;
+        Ok(derive_input_caps(
+            provider.0.as_str(),
+            descriptor,
+            &self.caps_overrides,
+        ))
     }
 
     /// Iterates over all models in the catalog as

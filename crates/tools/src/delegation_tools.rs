@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     FunctionDecl, SafetyTier, Tool, ToolError, ToolExecutionContext, execution_failed, parse_args,
 };
-use types::{DelegationRequest, DelegationResult};
+use types::DelegationRequest;
 
 pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
 

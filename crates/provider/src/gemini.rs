@@ -12,7 +12,7 @@ use types::{
 
 use crate::{
     DEFAULT_STREAM_BUFFER_SIZE, GEMINI_DEFAULT_BASE_URL, extract_http_error_message,
-    normalize_base_url_or_default, openai::SseDataParser,
+    normalize_base_url_or_default, openai::SseDataParser, validate_context_attachments,
 };
 
 #[derive(Debug, Clone)]
@@ -58,6 +58,19 @@ impl GeminiProvider {
         }
         self.model_catalog
             .validate(&self.catalog_provider_id, &context.model)?;
+        validate_context_attachments(
+            context,
+            &self.provider_id,
+            &self.catalog_provider_id,
+            &self.model_catalog,
+            &[
+                types::InputModality::Image,
+                types::InputModality::Audio,
+                types::InputModality::Video,
+                types::InputModality::Pdf,
+                types::InputModality::Document,
+            ],
+        )?;
         Ok(())
     }
 
@@ -323,11 +336,21 @@ impl GeminiGenerateContentRequest {
                     }
                 }
                 MessageRole::User => {
+                    let mut parts = Vec::new();
                     if let Some(text) = message.content.as_deref().filter(|t| !t.trim().is_empty())
                     {
+                        parts.push(GeminiPart::text(text));
+                    }
+                    for attachment in &message.attachments {
+                        parts.push(GeminiPart::inline_data(
+                            &attachment.mime_type,
+                            &attachment.data,
+                        ));
+                    }
+                    if !parts.is_empty() {
                         contents.push(GeminiContent {
                             role: "user".to_owned(),
-                            parts: vec![GeminiPart::text(text)],
+                            parts,
                         });
                     }
                 }
@@ -446,6 +469,8 @@ pub(crate) struct GeminiPart {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) thought_signature: Option<String>,
+    #[serde(rename = "inlineData", skip_serializing_if = "Option::is_none")]
+    pub(crate) inline_data: Option<GeminiInlineData>,
 }
 
 impl GeminiPart {
@@ -455,6 +480,7 @@ impl GeminiPart {
             function_call: None,
             function_response: None,
             thought_signature: None,
+            inline_data: None,
         }
     }
 
@@ -467,6 +493,7 @@ impl GeminiPart {
             }),
             function_response: None,
             thought_signature: thought_signature.map(ToOwned::to_owned),
+            inline_data: None,
         }
     }
 
@@ -479,8 +506,30 @@ impl GeminiPart {
                 response,
             }),
             thought_signature: None,
+            inline_data: None,
         }
     }
+
+    fn inline_data(mime_type: &str, data: &[u8]) -> Self {
+        use base64::Engine;
+        Self {
+            text: None,
+            function_call: None,
+            function_response: None,
+            thought_signature: None,
+            inline_data: Some(GeminiInlineData {
+                mime_type: mime_type.to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(data),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GeminiInlineData {
+    #[serde(rename = "mimeType")]
+    pub(crate) mime_type: String,
+    pub(crate) data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -655,6 +704,7 @@ pub(crate) fn normalize_gemini_response(
         },
         tool_calls: tool_calls.clone(),
         tool_call_id: None,
+        attachments: Vec::new(),
     };
 
     Ok(Response {

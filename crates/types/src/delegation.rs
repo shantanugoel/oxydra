@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{RuntimeError, StreamItem};
@@ -57,9 +57,24 @@ pub trait DelegationExecutor: Send + Sync {
 // startup once the AgentRuntime has been constructed.
 static GLOBAL_DELEGATION_EXECUTOR: OnceCell<Arc<dyn DelegationExecutor>> = OnceCell::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetGlobalDelegationExecutorError;
+
+impl fmt::Display for SetGlobalDelegationExecutorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("delegation executor already initialized")
+    }
+}
+
+impl std::error::Error for SetGlobalDelegationExecutorError {}
+
 /// Set the global delegation executor. Returns Err if already set.
-pub fn set_global_delegation_executor(ex: Arc<dyn DelegationExecutor>) -> Result<(), ()> {
-    GLOBAL_DELEGATION_EXECUTOR.set(ex).map_err(|_| ())
+pub fn set_global_delegation_executor(
+    ex: Arc<dyn DelegationExecutor>,
+) -> Result<(), SetGlobalDelegationExecutorError> {
+    GLOBAL_DELEGATION_EXECUTOR
+        .set(ex)
+        .map_err(|_| SetGlobalDelegationExecutorError)
 }
 
 /// Get a clone of the global delegation executor if present.

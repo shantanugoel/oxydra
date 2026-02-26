@@ -396,3 +396,73 @@ Provider request serialization is verified using `insta` snapshot tests. These e
 - Responses API request with session chaining
 - Streaming chunk parsing for all provider types
 - Error envelope parsing
+
+## Multi-Modal Input (Attachments)
+
+Oxydra supports sending rich media (images, audio, video, PDFs, documents) from users to LLM providers as inline attachments. Media flows from channel adapters through the gateway and runtime, arriving at the provider layer as `InlineMedia` structs on each `Message`.
+
+### InlineMedia
+
+Defined in `types/src/model.rs`:
+
+```rust
+pub struct InlineMedia {
+    pub mime_type: String,   // e.g. "image/jpeg", "audio/ogg"
+    pub data: Vec<u8>,       // raw file bytes (base64-encoded in JSON)
+}
+```
+
+Attachments are carried on the `Message` struct via `attachments: Vec<InlineMedia>`, defaulting to an empty vec for backward compatibility.
+
+### Model Input Capabilities
+
+Not all models support attachments, and those that do vary in supported modalities. The `ModelInputCaps` struct captures effective attachment capabilities:
+
+```rust
+pub struct ModelInputCaps {
+    pub supports_attachments: bool,
+    pub input_modalities: BTreeSet<InputModality>,
+}
+```
+
+`InputModality` normalizes modality types across providers:
+
+| Modality | MIME examples |
+|----------|--------------|
+| `Image` | `image/jpeg`, `image/png`, `image/webp` |
+| `Audio` | `audio/ogg`, `audio/mpeg`, `audio/wav` |
+| `Video` | `video/mp4`, `video/webm` |
+| `Pdf` | `application/pdf` |
+| `Document` | everything else |
+
+Input capabilities are derived from models.dev catalog fields (`attachment`, `modalities.input`) via `ModelDescriptor::to_input_caps()`, and follow the same three-tier override system as `ProviderCaps`:
+1. Baseline from models.dev
+2. Provider-level defaults from `CapsOverrides.provider_defaults`
+3. Model-specific overrides from `CapsOverrides.overrides`
+
+Unknown models (with `skip_catalog_validation = true`) default to `attachment=false` unless overridden via `ProviderRegistryEntry.attachment` and `input_modalities` fields.
+
+### Attachment Validation
+
+Before every provider request, `validate_context_attachments()` checks each attachment against two capability layers:
+
+1. **Model capabilities** — Does the model support attachments? Does it accept this modality (e.g., audio)? Derived from `ModelInputCaps`.
+2. **Provider transport capabilities** — Can the provider's wire format encode this modality? Each provider declares its supported transport modalities.
+
+If either check fails, an explicit `ProviderError::RequestFailed` is returned with a clear reason — no silent dropping.
+
+| Provider | Transport modalities |
+|----------|---------------------|
+| Gemini | Image, Audio, Video, Pdf, Document |
+| OpenAI Chat | Image |
+| OpenAI Responses | Image |
+| Anthropic | Image, Pdf |
+
+### Provider-Specific Encoding
+
+Each provider encodes attachments in its native wire format:
+
+- **Gemini:** `inlineData` parts with base64-encoded data and `mimeType`
+- **OpenAI Chat:** Content array with `image_url` data URIs (`data:{mime};base64,{data}`)
+- **OpenAI Responses:** Content array with `input_image` and data URI `image_url`
+- **Anthropic:** `image` content blocks with base64 source for images; `document` content blocks for PDFs

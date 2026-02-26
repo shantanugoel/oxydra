@@ -470,3 +470,71 @@ The Telegram adapter handles `GatewayServerFrame::MediaAttachment` by:
 2. Calling the appropriate Telegram API method (`send_photo`, `send_document`, `send_audio`, `send_voice`, `send_video`)
 3. Cleaning up the temporary file
 4. On failure, sending a text fallback message
+
+## Receiving Media from Users (Multi-Modal Input)
+
+### Overview
+
+Users can send rich media (photos, audio, voice messages, video, documents) to the agent through Telegram. The adapter extracts media attachments, downloads them from Telegram servers, and passes them through the gateway to the LLM provider as inline multi-modal input.
+
+### Telegram Media Extraction
+
+The `TelegramAdapter` handles the following Telegram message types:
+
+| Message type | Default MIME | Notes |
+|-------------|-------------|-------|
+| Photo | `image/jpeg` | Telegram provides multiple sizes; the largest is selected |
+| Voice | `audio/ogg` | Voice messages recorded in Telegram |
+| Audio | `audio/mpeg` | Audio files sent as media |
+| Video | `video/mp4` | Video files |
+| Video note | `video/mp4` | Round video messages |
+| Document | `application/octet-stream` | Generic file attachments |
+
+For media messages, the `caption` field is used as the text prompt. If no caption is provided, a placeholder text `"[The user sent media without a caption.]"` is used so the model knows media was sent.
+
+### Download and Size Limits
+
+| Limit | Value |
+|-------|-------|
+| Max file size | 10 MB |
+| Max attachments per message | 4 |
+
+File size is checked both via the Telegram API's reported `file_size` (before downloading) and during streaming download (to handle cases where the reported size is incorrect). Downloads use a 30-second timeout.
+
+The download uses a streaming approach with chunk-by-chunk accumulation, aborting early if the file exceeds the size limit during download rather than loading the entire file first.
+
+### Data Flow
+
+```
+Telegram user sends photo with caption
+    │
+    ▼
+TelegramAdapter.extract_media_attachments()
+    ├── Telegram Bot API: getFile → resolve file_path
+    ├── Check file_size before download (if available)
+    ├── Download from https://api.telegram.org/file/bot<token>/<path>
+    ├── Streaming download with per-chunk size validation
+    └── Create InlineMedia { mime_type, data }
+    │
+    ▼
+GatewaySendTurn { prompt: caption, attachments: [InlineMedia] }
+    │
+    ▼
+Gateway validates attachment limits
+    │
+    ▼
+Turn runner strips older attachment bytes, appends new user message
+    │
+    ▼
+Runtime context budget management (with media-aware handling)
+    │
+    ▼
+Provider validates modality support, encodes in provider wire format
+    │
+    ▼
+LLM receives multi-modal input
+```
+
+### Command Interception
+
+Commands (`/new`, `/sessions`, etc.) are only intercepted for text-only messages. Media messages with a caption starting with `/` are treated as normal media turns, not commands.

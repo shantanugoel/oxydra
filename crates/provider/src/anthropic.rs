@@ -14,6 +14,7 @@ use crate::{
     ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_VERSION,
     DEFAULT_ANTHROPIC_MAX_TOKENS, DEFAULT_STREAM_BUFFER_SIZE, extract_http_error_message,
     non_empty, normalize_base_url_or_default, openai::SseDataParser,
+    validate_context_attachments,
 };
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,13 @@ impl AnthropicProvider {
         }
         self.model_catalog
             .validate(&self.catalog_provider_id, &context.model)?;
+        validate_context_attachments(
+            context,
+            &self.provider_id,
+            &self.catalog_provider_id,
+            &self.model_catalog,
+            &[types::InputModality::Image, types::InputModality::Pdf],
+        )?;
         Ok(())
     }
 
@@ -354,6 +362,26 @@ impl AnthropicMessagesRequest {
                     if let Some(text) = message.content.clone().and_then(non_empty) {
                         content.push(AnthropicRequestContentBlock::Text { text });
                     }
+                    if message.role == MessageRole::User {
+                        use base64::Engine;
+                        for attachment in &message.attachments {
+                            let source = AnthropicBase64Source {
+                                kind: "base64".to_owned(),
+                                media_type: attachment.mime_type.clone(),
+                                data: base64::engine::general_purpose::STANDARD
+                                    .encode(&attachment.data),
+                            };
+                            match types::InputModality::from_mime_type(&attachment.mime_type) {
+                                types::InputModality::Image => {
+                                    content.push(AnthropicRequestContentBlock::Image { source });
+                                }
+                                types::InputModality::Pdf => {
+                                    content.push(AnthropicRequestContentBlock::Document { source });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     for tool_call in &message.tool_calls {
                         content.push(AnthropicRequestContentBlock::ToolUse {
                             id: tool_call.id.clone(),
@@ -441,6 +469,20 @@ enum AnthropicRequestContentBlock {
         tool_use_id: String,
         content: String,
     },
+    Image {
+        source: AnthropicBase64Source,
+    },
+    Document {
+        source: AnthropicBase64Source,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicBase64Source {
+    #[serde(rename = "type")]
+    kind: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1064,6 +1106,7 @@ pub(crate) fn normalize_anthropic_response(
         content: (!text_chunks.is_empty()).then(|| text_chunks.join("\n")),
         tool_calls: tool_calls.clone(),
         tool_call_id: None,
+        attachments: Vec::new(),
     };
 
     Ok(Response {

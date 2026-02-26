@@ -26,8 +26,8 @@ use types::{
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
     GatewaySessionCreated, GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched,
     GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
-    GatewayTurnState, GatewayTurnStatus, Message, MessageRole, ModelId, ProviderId, Response,
-    RuntimeError, SessionRecord, SessionStore, StartupStatusReport, StreamItem,
+    GatewayTurnState, GatewayTurnStatus, InlineMedia, Message, MessageRole, ModelId, ProviderId,
+    Response, RuntimeError, SessionRecord, SessionStore, StartupStatusReport, StreamItem,
 };
 
 mod session;
@@ -44,6 +44,10 @@ pub use turn_runner::{GatewayTurnRunner, RuntimeGatewayTurnRunner};
 const WS_ROUTE: &str = "/ws";
 const GATEWAY_CHANNEL_ID: &str = "tui";
 const EVENT_BUFFER_CAPACITY: usize = 1024;
+const MAX_INLINE_ATTACHMENTS_PER_TURN: usize = 4;
+const MAX_INLINE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_INLINE_ATTACHMENT_TOTAL_BYTES: usize =
+    MAX_INLINE_ATTACHMENTS_PER_TURN * MAX_INLINE_ATTACHMENT_BYTES;
 
 /// Default maximum number of concurrent top-level turns per user.
 const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 3;
@@ -792,6 +796,15 @@ impl GatewayServer {
         session: &Arc<SessionState>,
         send_turn: GatewaySendTurn,
     ) -> Option<GatewayServerFrame> {
+        if let Err(message) = validate_inline_attachments(&send_turn.attachments) {
+            return Some(GatewayServerFrame::Error(GatewayErrorFrame {
+                request_id: Some(send_turn.request_id),
+                session: Some(session.gateway_session()),
+                turn: None,
+                message,
+            }));
+        }
+
         let cancellation = CancellationToken::new();
         {
             let mut active_turn = session.active_turn.lock().await;
@@ -857,10 +870,14 @@ impl GatewayServer {
             let channel_capabilities = Some(types::ChannelCapabilities::from_channel_origin(
                 &session.channel_origin,
             ));
+            let input = turn_runner::UserTurnInput {
+                prompt: send_turn.prompt,
+                attachments: send_turn.attachments,
+            };
             let runtime_future = runtime.run_turn(
                 &session.user_id,
                 &session.session_id,
-                send_turn.prompt,
+                input,
                 cancellation,
                 delta_tx,
                 channel_capabilities,
@@ -1113,6 +1130,57 @@ fn default_session_id(user_id: &str) -> String {
         })
         .collect::<String>();
     format!("runtime-{normalized}")
+}
+
+fn validate_inline_attachments(attachments: &[InlineMedia]) -> Result<(), String> {
+    if attachments.len() > MAX_INLINE_ATTACHMENTS_PER_TURN {
+        return Err(format!(
+            "too many attachments (limit: {MAX_INLINE_ATTACHMENTS_PER_TURN})"
+        ));
+    }
+
+    let mut total = 0usize;
+    for attachment in attachments {
+        if !is_valid_mime_type(attachment.mime_type.as_str()) {
+            return Err(format!(
+                "invalid attachment mime_type `{}`",
+                attachment.mime_type
+            ));
+        }
+
+        let size = attachment.data.len();
+        if size > MAX_INLINE_ATTACHMENT_BYTES {
+            return Err(format!(
+                "attachment too large ({} bytes, limit: {} bytes)",
+                size, MAX_INLINE_ATTACHMENT_BYTES
+            ));
+        }
+
+        total = total.saturating_add(size);
+        if total > MAX_INLINE_ATTACHMENT_TOTAL_BYTES {
+            return Err(format!(
+                "total attachment payload too large ({} bytes, limit: {} bytes)",
+                total, MAX_INLINE_ATTACHMENT_TOTAL_BYTES
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_mime_type(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 255 {
+        return false;
+    }
+    let Some((kind, subtype)) = trimmed.split_once('/') else {
+        return false;
+    };
+    if kind.is_empty() || subtype.is_empty() {
+        return false;
+    }
+    trimmed.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'+' | b'_')
+    })
 }
 
 fn chrono_now() -> String {

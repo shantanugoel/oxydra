@@ -73,6 +73,7 @@ fn completed_frame(turn_id: &str, session_id: &str, final_text: &str) -> Gateway
                 content: Some(final_text.to_owned()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_owned()),

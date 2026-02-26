@@ -198,6 +198,7 @@ async fn store_indexes_message_content_into_chunks_and_vectors() {
         ),
         tool_calls: vec![],
         tool_call_id: None,
+        attachments: Vec::new(),
     })
     .expect("message payload should serialize");
     backend

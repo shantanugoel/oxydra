@@ -1517,6 +1517,8 @@ api_key = "test-openai-key"
                 api_key_env: None,
                 extra_headers: None,
                 catalog_provider: None, // should default to "openai"
+                attachment: None,
+                input_modalities: None,
                 reasoning: None,
                 max_input_tokens: None,
                 max_output_tokens: None,

@@ -297,6 +297,7 @@ impl AgentRuntime {
                         content: Some(augmented_prompt),
                         tool_calls: Vec::new(),
                         tool_call_id: None,
+                        attachments: Vec::new(),
                     },
                 );
             }

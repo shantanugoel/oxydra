@@ -832,6 +832,7 @@ dependencies = [
  "async-trait",
  "frankenstein",
  "gateway",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tokio",
@@ -4351,6 +4352,7 @@ name = "provider"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "insta",
  "reqwest 0.13.2",
  "serde",
@@ -4879,6 +4881,7 @@ checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "encoding_rs",
  "futures-channel",
  "futures-core",
  "futures-util",
@@ -4891,6 +4894,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "mime_guess",
  "percent-encoding",
  "pin-project-lite",

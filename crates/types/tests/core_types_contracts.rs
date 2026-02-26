@@ -12,7 +12,7 @@ use types::{
     MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
     MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
     ModelLimits, ProviderCaps, ProviderError, ProviderId, Response, RuntimeError, ToolCall,
-    ToolError, derive_caps, init_tracing,
+    ToolError, UnknownModelCaps, derive_caps, derive_input_caps, init_tracing,
 };
 
 #[test]
@@ -29,6 +29,7 @@ fn serde_round_trip_for_core_types() {
         content: Some("Reading workspace manifest".to_owned()),
         tool_calls: vec![tool_call.clone()],
         tool_call_id: None,
+        attachments: Vec::new(),
     };
 
     let context = Context {
@@ -606,6 +607,151 @@ fn to_provider_caps_maps_fields_correctly() {
     };
     let reasoning_caps = reasoning_descriptor.to_provider_caps();
     assert!(reasoning_caps.supports_reasoning_traces);
+}
+
+#[test]
+fn to_input_caps_maps_attachment_modalities() {
+    let descriptor = ModelDescriptor {
+        id: "multi-modal".to_owned(),
+        name: "Multi Modal".to_owned(),
+        family: None,
+        attachment: true,
+        reasoning: false,
+        tool_call: false,
+        interleaved: None,
+        structured_output: false,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: types::Modalities {
+            input: vec![
+                "text".to_owned(),
+                "image".to_owned(),
+                "audio".to_owned(),
+                "pdf".to_owned(),
+                "unknown".to_owned(),
+            ],
+            output: vec!["text".to_owned()],
+        },
+        open_weights: false,
+        cost: Default::default(),
+        limit: ModelLimits {
+            context: 32_000,
+            output: 4096,
+        },
+    };
+
+    let caps = descriptor.to_input_caps();
+    assert!(caps.supports_attachments);
+    assert!(caps.accepts_modality(types::InputModality::Image));
+    assert!(caps.accepts_modality(types::InputModality::Audio));
+    assert!(caps.accepts_modality(types::InputModality::Pdf));
+    assert!(!caps.accepts_modality(types::InputModality::Video));
+}
+
+#[test]
+fn derive_input_caps_overlay_applies_and_model_override_wins() {
+    let descriptor = ModelDescriptor {
+        id: "special-model".to_owned(),
+        name: "Special".to_owned(),
+        family: None,
+        attachment: false,
+        reasoning: false,
+        tool_call: false,
+        interleaved: None,
+        structured_output: false,
+        temperature: true,
+        knowledge: None,
+        release_date: None,
+        last_updated: None,
+        modalities: Default::default(),
+        open_weights: false,
+        cost: Default::default(),
+        limit: Default::default(),
+    };
+
+    let mut overrides = CapsOverrides::default();
+    overrides.provider_defaults.insert(
+        "custom".to_owned(),
+        CapsOverrideEntry {
+            attachment: Some(true),
+            input_modalities: Some(vec!["image".to_owned()]),
+            ..Default::default()
+        },
+    );
+    overrides.overrides.insert(
+        "custom/special-model".to_owned(),
+        CapsOverrideEntry {
+            input_modalities: Some(vec!["audio".to_owned(), "video".to_owned()]),
+            ..Default::default()
+        },
+    );
+
+    let caps = derive_input_caps("custom", &descriptor, &overrides);
+    assert!(caps.supports_attachments);
+    assert!(!caps.accepts_modality(types::InputModality::Image));
+    assert!(caps.accepts_modality(types::InputModality::Audio));
+    assert!(caps.accepts_modality(types::InputModality::Video));
+}
+
+#[test]
+fn unknown_model_defaults_support_attachment_overrides() {
+    let descriptor = ModelDescriptor::default_for_unknown(
+        "custom-model",
+        &UnknownModelCaps {
+            attachment: Some(true),
+            input_modalities: Some(vec!["image".to_owned(), "document".to_owned()]),
+            reasoning: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
+        },
+    );
+
+    let caps = descriptor.to_input_caps();
+    assert!(caps.supports_attachments);
+    assert!(caps.accepts_modality(types::InputModality::Image));
+    assert!(caps.accepts_modality(types::InputModality::Document));
+}
+
+#[test]
+fn catalog_input_caps_uses_overrides() {
+    let mut catalog = ModelCatalog::from_snapshot_str(
+        r#"
+    {
+      "openai": {
+        "id": "openai",
+        "name": "OpenAI",
+        "models": {
+          "gpt-test": {
+            "id": "gpt-test",
+            "name": "GPT Test",
+            "attachment": false,
+            "modalities": { "input": [], "output": ["text"] },
+            "limit": { "context": 128000, "output": 8192 }
+          }
+        }
+      }
+    }
+    "#,
+    )
+    .expect("catalog should parse");
+
+    catalog.caps_overrides.provider_defaults.insert(
+        "openai".to_owned(),
+        CapsOverrideEntry {
+            attachment: Some(true),
+            input_modalities: Some(vec!["image".to_owned()]),
+            ..Default::default()
+        },
+    );
+
+    let caps = catalog
+        .input_caps(&ProviderId::from("openai"), &ModelId::from("gpt-test"))
+        .expect("input caps should resolve");
+    assert!(caps.supports_attachments);
+    assert!(caps.accepts_modality(types::InputModality::Image));
 }
 
 // ---------------------------------------------------------------------------

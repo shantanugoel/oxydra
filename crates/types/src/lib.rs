@@ -42,10 +42,11 @@ pub use memory::{
     MemorySummaryState, MemorySummaryWriteRequest, MemorySummaryWriteResult,
 };
 pub use model::{
-    CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, InterleavedSpec, Message,
-    MessageRole, Modalities, ModelCatalog, ModelCost, ModelDescriptor, ModelId, ModelLimits,
-    ProviderCaps, ProviderId, Response, RuntimeProgressEvent, RuntimeProgressKind, StreamItem,
-    ToolCall, ToolCallDelta, UsageUpdate, derive_caps,
+    CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, InlineMedia, InputModality,
+    InterleavedSpec, Message, MessageRole, Modalities, ModelCatalog, ModelCost, ModelDescriptor,
+    ModelId, ModelInputCaps, ModelLimits, ProviderCaps, ProviderId, Response, RuntimeProgressEvent,
+    RuntimeProgressKind, StreamItem, ToolCall, ToolCallDelta, UsageUpdate, derive_caps,
+    derive_input_caps,
 };
 pub use provider::{Provider, ProviderStream};
 pub use runner::{

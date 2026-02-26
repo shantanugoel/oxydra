@@ -116,6 +116,7 @@ async fn openai_compatible_runtime_e2e_exposes_tools_and_executes_loop() {
             content: Some("Read the file and summarize it.".to_owned()),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     };
 
@@ -224,6 +225,7 @@ async fn live_openrouter_tool_call_smoke() {
             )),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     };
 

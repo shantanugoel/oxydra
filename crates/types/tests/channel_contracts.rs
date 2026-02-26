@@ -29,6 +29,7 @@ fn sample_response() -> Response {
             content: Some("Done".to_owned()),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         },
         tool_calls: vec![],
         finish_reason: Some("stop".to_owned()),
@@ -51,6 +52,7 @@ fn gateway_client_frames_round_trip_through_serde() {
             session_id: "session-1".to_owned(),
             turn_id: "turn-1".to_owned(),
             prompt: "Summarize README".to_owned(),
+            attachments: Vec::new(),
         }),
         GatewayClientFrame::CancelActiveTurn(GatewayCancelActiveTurn {
             request_id: "req-cancel".to_owned(),

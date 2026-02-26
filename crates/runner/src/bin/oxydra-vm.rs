@@ -160,7 +160,7 @@ async fn run() -> Result<(), VmError> {
         let boxed: Arc<dyn types::DelegationExecutor> = Arc::new(exec);
         match types::set_global_delegation_executor(boxed) {
             Ok(()) => info!("delegation executor initialized"),
-            Err(()) => warn!("delegation executor already initialized"),
+            Err(_) => warn!("delegation executor already initialized"),
         }
     }
 

@@ -189,6 +189,15 @@ Before each provider call, the runtime prepares the context to fit within the mo
 
 Token counting uses `tiktoken-rs` with the `cl100k_base` encoding (GPT-4 compatible). History is filled in reverse-chronological order — newest messages first. When the budget is exhausted, older messages are dropped (they are already represented in the rolling summary if summarization is active).
 
+### Attachment-Aware Budget Management
+
+Messages with inline media attachments (images, audio, etc.) receive special handling during context window management:
+
+- **Latest user message guarantee:** If the most recent user message cannot fit within the token budget (common for large attachments), the turn fails with `RuntimeError::BudgetExceeded` rather than silently dropping it.
+- **Token estimation bypass:** When any message in the context contains non-empty attachments, the fast-path token estimation is disabled (media bytes cannot be token-counted), ensuring the full budget fitting algorithm is always used.
+- **Attachment stripping for older turns:** Before appending a new user message, attachment bytes on older user messages in the context are cleared to prevent unbounded memory growth across multi-turn conversations.
+- **Memory persistence:** Attachment metadata (mime type) is preserved when storing messages to memory, but raw bytes are cleared before persistence to avoid bloating the session store.
+
 ## Memory Integration
 
 The runtime treats memory as a write-through layer:

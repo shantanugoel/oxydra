@@ -120,6 +120,7 @@ impl AgentRuntime {
             content,
             tool_calls: tool_calls.clone(),
             tool_call_id: None,
+            attachments: Vec::new(),
         };
         Ok(Response {
             message,

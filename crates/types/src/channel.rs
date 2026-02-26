@@ -156,7 +156,7 @@ pub struct MediaAttachment {
 }
 
 /// Serde helper for encoding `Vec<u8>` as base64 strings in JSON.
-mod base64_bytes {
+pub(crate) mod base64_bytes {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -219,6 +219,9 @@ pub struct GatewaySendTurn {
     pub session_id: String,
     pub turn_id: String,
     pub prompt: String,
+    /// Inline media attachments sent by the user (images, audio, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::model::InlineMedia>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

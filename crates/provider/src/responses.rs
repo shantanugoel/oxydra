@@ -14,6 +14,7 @@ use types::{
 use crate::{
     DEFAULT_STREAM_BUFFER_SIZE, OPENAI_DEFAULT_BASE_URL, OPENAI_RESPONSES_PATH,
     extract_http_error_message, normalize_base_url_or_default, openai::SseEventParser,
+    validate_context_attachments,
 };
 
 #[derive(Debug)]
@@ -63,6 +64,13 @@ impl ResponsesProvider {
         }
         self.model_catalog
             .validate(&self.catalog_provider_id, &context.model)?;
+        validate_context_attachments(
+            context,
+            &self.provider_id,
+            &self.catalog_provider_id,
+            &self.model_catalog,
+            &[types::InputModality::Image],
+        )?;
         Ok(())
     }
 
@@ -411,11 +419,41 @@ impl ResponsesApiRequest {
                     }
                 }
                 MessageRole::User => {
-                    if let Some(text) = message.content.as_deref().filter(|t| !t.trim().is_empty())
-                    {
+                    let image_attachments: Vec<_> = message
+                        .attachments
+                        .iter()
+                        .filter(|a| a.mime_type.starts_with("image/"))
+                        .collect();
+                    let has_text = message
+                        .content
+                        .as_deref()
+                        .is_some_and(|t| !t.trim().is_empty());
+
+                    if has_text || !image_attachments.is_empty() {
+                        let content = if image_attachments.is_empty() {
+                            serde_json::Value::String(message.content.clone().unwrap_or_default())
+                        } else {
+                            use base64::Engine;
+                            let mut parts = Vec::new();
+                            if let Some(ref text) = message.content {
+                                parts.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": text
+                                }));
+                            }
+                            for att in image_attachments {
+                                let b64 =
+                                    base64::engine::general_purpose::STANDARD.encode(&att.data);
+                                parts.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": format!("data:{};base64,{}", att.mime_type, b64)
+                                }));
+                            }
+                            serde_json::Value::Array(parts)
+                        };
                         input.push(ResponsesInputItem::Message {
                             role: "user".to_owned(),
-                            content: text.to_owned(),
+                            content,
                         });
                     }
                 }
@@ -424,7 +462,7 @@ impl ResponsesApiRequest {
                     {
                         input.push(ResponsesInputItem::Message {
                             role: "assistant".to_owned(),
-                            content: text.to_owned(),
+                            content: serde_json::Value::String(text.to_owned()),
                         });
                     }
                     for tool_call in &message.tool_calls {
@@ -473,7 +511,7 @@ impl ResponsesApiRequest {
 pub(crate) enum ResponsesInputItem {
     Message {
         role: String,
-        content: String,
+        content: serde_json::Value,
     },
     FunctionCall {
         call_id: String,
@@ -655,6 +693,7 @@ pub(crate) fn normalize_responses_response(
         },
         tool_calls: tool_calls.clone(),
         tool_call_id: None,
+        attachments: Vec::new(),
     };
 
     let usage = response.usage.map(|usage| UsageUpdate {

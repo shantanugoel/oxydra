@@ -41,14 +41,21 @@ const TEXT_SPLIT_MARGIN: usize = 200;
 // ---------------------------------------------------------------------------
 
 /// In-process Telegram adapter that calls the gateway internal API directly.
+/// Maximum size of a single media attachment we will download (10 MB).
+const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+/// Maximum number of attachments per message.
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 4;
+
 pub struct TelegramAdapter {
     bot: Bot,
+    bot_token: String,
     sender_auth: SenderAuthPolicy,
     session_map: ChannelSessionMap,
     gateway: Arc<gateway::GatewayServer>,
     user_id: String,
     config: TelegramChannelConfig,
     audit_logger: AuditLogger,
+    http_client: reqwest::Client,
 }
 
 impl TelegramAdapter {
@@ -64,12 +71,14 @@ impl TelegramAdapter {
     ) -> Self {
         Self {
             bot: Bot::new(&bot_token),
+            bot_token,
             sender_auth,
             session_map: ChannelSessionMap::new(session_store),
             gateway,
             user_id,
             config,
             audit_logger,
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -152,11 +161,20 @@ impl TelegramAdapter {
             return;
         }
 
-        let Some(ref text) = message.text else {
-            return;
-        };
-        let text = text.trim();
-        if text.is_empty() {
+        // Extract text: either `text` (for plain text messages) or `caption`
+        // (for media messages that include a caption).
+        let text = message
+            .text
+            .as_deref()
+            .or(message.caption.as_deref())
+            .map(|t| t.trim())
+            .unwrap_or("");
+
+        // Extract inline media attachments from the message.
+        let attachments = self.extract_media_attachments(message).await;
+
+        // A message must have either text or media to be actionable.
+        if text.is_empty() && attachments.is_empty() {
             return;
         }
 
@@ -164,8 +182,10 @@ impl TelegramAdapter {
         let thread_id = message.message_thread_id;
         let channel_context_id = derive_channel_context_id(chat_id, thread_id);
 
-        // Command interception.
-        if let Some(cmd) = text.strip_prefix('/') {
+        // Command interception (only for text-only messages).
+        if attachments.is_empty()
+            && let Some(cmd) = text.strip_prefix('/')
+        {
             let handled = self
                 .handle_command(cmd, chat_id, thread_id, &channel_context_id)
                 .await;
@@ -186,13 +206,22 @@ impl TelegramAdapter {
             }
         };
 
+        // Build the prompt: use the text if present, otherwise a placeholder
+        // so the model knows media was sent.
+        let prompt = if text.is_empty() {
+            "[The user sent media without a caption.]".to_owned()
+        } else {
+            text.to_owned()
+        };
+
         // Submit the turn.
         let turn_id = uuid::Uuid::new_v4().to_string();
         let send_turn = GatewaySendTurn {
             request_id: format!("tg-{turn_id}"),
             session_id: session.session_id.clone(),
             turn_id: turn_id.clone(),
-            prompt: text.to_owned(),
+            prompt,
+            attachments,
         };
 
         // Subscribe BEFORE submit so we don't miss early frames.
@@ -218,6 +247,152 @@ impl TelegramAdapter {
         // Stream the response back using edit-message pattern.
         self.stream_response(chat_id, thread_id, events_rx, cancel)
             .await;
+    }
+
+    /// Extract media attachments from a Telegram message.
+    ///
+    /// Handles photo, audio, voice, video, and document messages by downloading
+    /// the file from Telegram servers.
+    async fn extract_media_attachments(&self, message: &TgMessage) -> Vec<types::InlineMedia> {
+        let mut file_ids: Vec<(String, String)> = Vec::new(); // (file_id, mime_type)
+
+        // Photo: Telegram provides multiple sizes; pick the largest.
+        if let Some(ref photos) = message.photo
+            && let Some(largest) = photos.last()
+        {
+            file_ids.push((largest.file_id.clone(), "image/jpeg".to_owned()));
+        }
+
+        // Voice message (OGG Opus).
+        if let Some(ref voice) = message.voice {
+            let mime = voice
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/ogg".to_owned());
+            file_ids.push((voice.file_id.clone(), mime));
+        }
+
+        // Audio file.
+        if let Some(ref audio) = message.audio {
+            let mime = audio
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/mpeg".to_owned());
+            file_ids.push((audio.file_id.clone(), mime));
+        }
+
+        // Video.
+        if let Some(ref video) = message.video {
+            let mime = video
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_owned());
+            file_ids.push((video.file_id.clone(), mime));
+        }
+
+        // Document (generic file).
+        if let Some(ref document) = message.document {
+            let mime = document
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_owned());
+            file_ids.push((document.file_id.clone(), mime));
+        }
+
+        // Video note (round video messages).
+        if let Some(ref video_note) = message.video_note {
+            file_ids.push((video_note.file_id.clone(), "video/mp4".to_owned()));
+        }
+
+        // Limit the number of attachments.
+        file_ids.truncate(MAX_ATTACHMENTS_PER_MESSAGE);
+
+        let mut attachments = Vec::with_capacity(file_ids.len());
+        for (file_id, mime_type) in file_ids {
+            match self.download_telegram_file(&file_id).await {
+                Ok(data) => {
+                    if data.len() as u64 > MAX_ATTACHMENT_BYTES {
+                        warn!(
+                            file_id = %file_id,
+                            size = data.len(),
+                            "telegram attachment exceeds size limit, skipping"
+                        );
+                        continue;
+                    }
+                    attachments.push(types::InlineMedia { mime_type, data });
+                }
+                Err(e) => {
+                    warn!(file_id = %file_id, error = %e, "failed to download telegram file");
+                }
+            }
+        }
+
+        attachments
+    }
+
+    /// Download a file from Telegram by its `file_id`.
+    ///
+    /// Uses the Bot API `getFile` to resolve the file path, then downloads
+    /// the content from `https://api.telegram.org/file/bot<token>/<path>`.
+    async fn download_telegram_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
+        use frankenstein::methods::GetFileParams;
+
+        let params = GetFileParams {
+            file_id: file_id.to_owned(),
+        };
+        let file_info = self
+            .bot
+            .get_file(&params)
+            .await
+            .map_err(|e| format!("getFile failed: {e}"))?;
+
+        let file_path = file_info
+            .result
+            .file_path
+            .ok_or_else(|| "Telegram file has no file_path".to_owned())?;
+
+        // Check file_size before downloading if available.
+        if let Some(size) = file_info.result.file_size
+            && size > MAX_ATTACHMENT_BYTES
+        {
+            return Err(format!(
+                "file too large ({size} bytes, limit {MAX_ATTACHMENT_BYTES})"
+            ));
+        }
+
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.bot_token, file_path
+        );
+
+        let mut response = self
+            .http_client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!("download returned status {}", response.status()));
+        }
+
+        let mut data = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("failed to read body chunk: {e}"))?
+        {
+            let next_len = data.len().saturating_add(chunk.len());
+            if next_len as u64 > MAX_ATTACHMENT_BYTES {
+                return Err(format!(
+                    "downloaded file too large (limit {MAX_ATTACHMENT_BYTES} bytes)"
+                ));
+            }
+            data.extend_from_slice(&chunk);
+        }
+
+        Ok(data)
     }
 
     /// Handle slash commands. Returns `true` if the command was handled.

@@ -108,12 +108,14 @@ fn anthropic_request_normalization_snapshot_is_stable() {
                 content: Some("You are concise".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("List project files".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
@@ -125,12 +127,14 @@ fn anthropic_request_normalization_snapshot_is_stable() {
                     metadata: None,
                 }],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Tool,
                 content: Some("{\"ok\":true}".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: Some("call_1".to_owned()),
+                attachments: Vec::new(),
             },
         ],
     };
@@ -214,6 +218,7 @@ fn anthropic_streaming_request_includes_stream_field() {
             content: Some("Hello".to_owned()),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     };
     let request = AnthropicMessagesRequest::from_context_with_stream(
@@ -279,6 +284,7 @@ fn request_normalization_maps_messages_and_tools() {
                 content: Some("List project files".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
@@ -290,6 +296,7 @@ fn request_normalization_maps_messages_and_tools() {
                     metadata: None,
                 }],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -1009,6 +1016,7 @@ fn sample_response(content: &str) -> Response {
             content: Some(content.to_owned()),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         },
         tool_calls: vec![],
         finish_reason: Some("stop".to_owned()),
@@ -1089,6 +1097,7 @@ fn test_context_for(provider: &str, model: &str, prompt: &str) -> Context {
             content: Some(prompt.to_owned()),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     }
 }
@@ -1672,12 +1681,14 @@ fn gemini_request_serialization_snapshot() {
                 content: Some("You are concise".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("List project files".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -1745,6 +1756,7 @@ fn gemini_response_normalization() {
                     function_call: None,
                     function_response: None,
                     thought_signature: None,
+                    inline_data: None,
                 }],
             }),
             finish_reason: Some("STOP".to_owned()),
@@ -1821,6 +1833,7 @@ fn gemini_function_call_response_mapping() {
                     }),
                     function_response: None,
                     thought_signature: None,
+                    inline_data: None,
                 }],
             }),
             finish_reason: Some("STOP".to_owned()),
@@ -1891,6 +1904,7 @@ fn gemini_tool_result_encoding() {
                 content: Some("What's the weather?".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
@@ -1902,12 +1916,14 @@ fn gemini_tool_result_encoding() {
                     metadata: None,
                 }],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Tool,
                 content: Some(r#"{"temp": 72}"#.to_owned()),
                 tool_calls: vec![],
                 tool_call_id: Some("call_1".to_owned()),
+                attachments: Vec::new(),
             },
         ],
     };
@@ -2071,12 +2087,14 @@ fn responses_request_serialization_snapshot() {
                 content: Some("You are concise".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("List project files".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Assistant,
@@ -2088,12 +2106,14 @@ fn responses_request_serialization_snapshot() {
                     metadata: None,
                 }],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::Tool,
                 content: Some("{\"ok\":true}".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: Some("call_1".to_owned()),
+                attachments: Vec::new(),
             },
         ],
     };
@@ -2254,18 +2274,21 @@ fn partial_input_on_chained_turn() {
                 content: Some("System".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("First".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
             Message {
                 role: MessageRole::User,
                 content: Some("Second".to_owned()),
                 tool_calls: vec![],
                 tool_call_id: None,
+                attachments: Vec::new(),
             },
         ],
     };
@@ -2769,4 +2792,458 @@ fn anthropic_sse_parser_handles_comment_lines_and_crlf() {
     let action =
         parse_anthropic_stream_payload(&payloads[2], &provider, &mut acc, &mut input_tokens);
     assert!(matches!(action, AnthropicEventAction::Done));
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal / attachment tests
+// ---------------------------------------------------------------------------
+
+fn test_multimodal_catalog_for(
+    provider: &str,
+    model: &str,
+    display_name: &str,
+    input_modalities: Vec<&str>,
+) -> ModelCatalog {
+    let mut models = BTreeMap::new();
+    models.insert(
+        model.to_owned(),
+        ModelDescriptor {
+            id: model.to_owned(),
+            name: display_name.to_owned(),
+            family: None,
+            attachment: true,
+            reasoning: false,
+            tool_call: false,
+            interleaved: None,
+            structured_output: false,
+            temperature: false,
+            knowledge: None,
+            release_date: None,
+            last_updated: None,
+            modalities: Modalities {
+                input: input_modalities.iter().map(|s| (*s).to_owned()).collect(),
+                output: vec!["text".to_owned()],
+            },
+            open_weights: false,
+            cost: Default::default(),
+            limit: Default::default(),
+        },
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        provider.to_owned(),
+        CatalogProvider {
+            id: provider.to_owned(),
+            name: provider.to_owned(),
+            env: vec![],
+            api: None,
+            doc: None,
+            models,
+        },
+    );
+
+    ModelCatalog::new(providers)
+}
+
+fn sample_image_attachment() -> InlineMedia {
+    InlineMedia {
+        mime_type: "image/png".to_owned(),
+        data: vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
+    }
+}
+
+fn sample_audio_attachment() -> InlineMedia {
+    InlineMedia {
+        mime_type: "audio/ogg".to_owned(),
+        data: vec![0x4F, 0x67, 0x67, 0x53], // OGG magic bytes
+    }
+}
+
+fn sample_pdf_attachment() -> InlineMedia {
+    InlineMedia {
+        mime_type: "application/pdf".to_owned(),
+        data: vec![0x25, 0x50, 0x44, 0x46], // %PDF magic bytes
+    }
+}
+
+// -- Gemini multimodal tests -----------------------------------------------
+
+#[test]
+fn gemini_request_includes_inline_data_for_image_attachment() {
+    let context = Context {
+        provider: ProviderId::from("gemini"),
+        model: ModelId::from("gemini-2.0-flash"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("Describe this image".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_image_attachment()],
+        }],
+    };
+
+    let request =
+        GeminiGenerateContentRequest::from_context(&context).expect("request should normalize");
+    let json = serde_json::to_value(&request).expect("should serialize");
+
+    let user_parts = &json["contents"][0]["parts"];
+    assert_eq!(user_parts[0]["text"], "Describe this image");
+
+    let inline_data = &user_parts[1]["inlineData"];
+    assert_eq!(inline_data["mimeType"], "image/png");
+    assert!(!inline_data["data"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn gemini_request_includes_inline_data_for_multiple_attachments() {
+    let context = Context {
+        provider: ProviderId::from("gemini"),
+        model: ModelId::from("gemini-2.0-flash"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("What is this?".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_image_attachment(), sample_audio_attachment()],
+        }],
+    };
+
+    let request =
+        GeminiGenerateContentRequest::from_context(&context).expect("request should normalize");
+    let json = serde_json::to_value(&request).expect("should serialize");
+
+    let user_parts = &json["contents"][0]["parts"];
+    assert_eq!(user_parts.as_array().unwrap().len(), 3); // text + 2 attachments
+    assert_eq!(user_parts[1]["inlineData"]["mimeType"], "image/png");
+    assert_eq!(user_parts[2]["inlineData"]["mimeType"], "audio/ogg");
+}
+
+#[test]
+fn gemini_validate_rejects_audio_when_model_only_supports_image() {
+    let catalog = test_multimodal_catalog_for(
+        "gemini",
+        "gemini-2.0-flash",
+        "Gemini 2.0 Flash",
+        vec!["text", "image"],
+    );
+    let context = Context {
+        provider: ProviderId::from("gemini"),
+        model: ModelId::from("gemini-2.0-flash"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("transcribe this".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_audio_attachment()],
+        }],
+    };
+
+    let error = validate_context_attachments(
+        &context,
+        &ProviderId::from("gemini"),
+        &ProviderId::from("gemini"),
+        &catalog,
+        &[
+            InputModality::Image,
+            InputModality::Audio,
+            InputModality::Video,
+            InputModality::Pdf,
+            InputModality::Document,
+        ],
+    )
+    .expect_err("audio should be rejected for image-only model");
+    let message = format!("{error}");
+    assert!(message.contains("audio"), "error should mention audio: {message}");
+}
+
+// -- OpenAI Chat multimodal tests ------------------------------------------
+
+#[test]
+fn openai_request_includes_image_url_content_for_image_attachment() {
+    let context = Context {
+        provider: ProviderId::from("openai"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("What is in this image?".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_image_attachment()],
+        }],
+    };
+
+    let request =
+        OpenAIChatCompletionRequest::from_context(&context).expect("request should normalize");
+    let json = serde_json::to_value(&request).expect("should serialize");
+
+    let user_msg = &json["messages"][0];
+    let content = &user_msg["content"];
+    assert!(content.is_array(), "content should be an array for multimodal");
+
+    let parts = content.as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[0]["text"], "What is in this image?");
+    assert_eq!(parts[1]["type"], "image_url");
+    let url = parts[1]["image_url"]["url"].as_str().unwrap();
+    assert!(url.starts_with("data:image/png;base64,"));
+}
+
+#[test]
+fn openai_validate_rejects_audio_attachment() {
+    let catalog = test_multimodal_catalog_for(
+        "openai",
+        "gpt-4o-mini",
+        "GPT-4o mini",
+        vec!["text", "image", "audio"],
+    );
+    let context = Context {
+        provider: ProviderId::from("openai"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("transcribe this".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_audio_attachment()],
+        }],
+    };
+
+    let error = validate_context_attachments(
+        &context,
+        &ProviderId::from("openai"),
+        &ProviderId::from("openai"),
+        &catalog,
+        &[InputModality::Image],
+    )
+    .expect_err("audio should be rejected for OpenAI Chat image-only transport");
+    let message = format!("{error}");
+    assert!(
+        message.contains("does not support audio"),
+        "error should mention audio transport: {message}"
+    );
+}
+
+#[test]
+fn openai_validate_rejects_attachment_for_non_attachment_model() {
+    // Default catalog has attachment=false
+    let catalog = test_model_catalog();
+    let context = Context {
+        provider: ProviderId::from("openai"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("describe this".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_image_attachment()],
+        }],
+    };
+
+    let error = validate_context_attachments(
+        &context,
+        &ProviderId::from("openai"),
+        &ProviderId::from("openai"),
+        &catalog,
+        &[InputModality::Image],
+    )
+    .expect_err("attachment on non-attachment model should fail");
+    let message = format!("{error}");
+    assert!(
+        message.contains("does not support attachments"),
+        "error should mention no attachment support: {message}"
+    );
+}
+
+// -- Anthropic multimodal tests --------------------------------------------
+
+#[test]
+fn anthropic_request_includes_image_block_for_image_attachment() {
+    let context = Context {
+        provider: ProviderId::from("anthropic"),
+        model: ModelId::from("claude-3-5-sonnet-latest"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("Describe this image".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_image_attachment()],
+        }],
+    };
+
+    let request = AnthropicMessagesRequest::from_context(&context, DEFAULT_ANTHROPIC_MAX_TOKENS)
+        .expect("request should normalize");
+    let json = serde_json::to_value(&request).expect("should serialize");
+
+    let user_content = &json["messages"][0]["content"];
+    assert!(user_content.is_array());
+    let blocks = user_content.as_array().unwrap();
+    assert_eq!(blocks.len(), 2); // text + image
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+}
+
+#[test]
+fn anthropic_request_includes_document_block_for_pdf_attachment() {
+    let context = Context {
+        provider: ProviderId::from("anthropic"),
+        model: ModelId::from("claude-3-5-sonnet-latest"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("Summarize this PDF".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_pdf_attachment()],
+        }],
+    };
+
+    let request = AnthropicMessagesRequest::from_context(&context, DEFAULT_ANTHROPIC_MAX_TOKENS)
+        .expect("request should normalize");
+    let json = serde_json::to_value(&request).expect("should serialize");
+
+    let user_content = &json["messages"][0]["content"];
+    let blocks = user_content.as_array().unwrap();
+    assert_eq!(blocks.len(), 2); // text + document
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "document");
+    assert_eq!(blocks[1]["source"]["media_type"], "application/pdf");
+}
+
+#[test]
+fn anthropic_validate_rejects_audio_attachment() {
+    let catalog = test_multimodal_catalog_for(
+        "anthropic",
+        "claude-3-5-sonnet-latest",
+        "Claude 3.5 Sonnet",
+        vec!["text", "image", "audio"],
+    );
+    let context = Context {
+        provider: ProviderId::from("anthropic"),
+        model: ModelId::from("claude-3-5-sonnet-latest"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("transcribe this".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_audio_attachment()],
+        }],
+    };
+
+    let error = validate_context_attachments(
+        &context,
+        &ProviderId::from("anthropic"),
+        &ProviderId::from("anthropic"),
+        &catalog,
+        &[InputModality::Image, InputModality::Pdf],
+    )
+    .expect_err("audio should be rejected for Anthropic transport");
+    let message = format!("{error}");
+    assert!(
+        message.contains("does not support audio"),
+        "error should mention audio transport: {message}"
+    );
+}
+
+// -- OpenAI Responses multimodal tests -------------------------------------
+
+#[test]
+fn responses_request_includes_input_image_for_image_attachment() {
+    let context = Context {
+        provider: ProviderId::from("openai"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("What is in this image?".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_image_attachment()],
+        }],
+    };
+
+    let request =
+        ResponsesApiRequest::from_context(&context, None, 0).expect("request should normalize");
+    let json = serde_json::to_value(&request).expect("should serialize");
+
+    let input = &json["input"];
+    assert!(input.is_array());
+    let items = input.as_array().unwrap();
+    // Find the user message
+    let user_item = items
+        .iter()
+        .find(|item| item["role"] == "user")
+        .expect("should have a user message");
+    let content = &user_item["content"];
+    assert!(content.is_array(), "content should be array for multimodal");
+    let parts = content.as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "input_text");
+    assert_eq!(parts[1]["type"], "input_image");
+    let url = parts[1]["image_url"].as_str().unwrap();
+    assert!(url.starts_with("data:image/png;base64,"));
+}
+
+#[test]
+fn responses_validate_rejects_audio_attachment() {
+    let catalog = test_multimodal_catalog_for(
+        "openai",
+        "gpt-4o-mini",
+        "GPT-4o mini",
+        vec!["text", "image", "audio"],
+    );
+    let context = Context {
+        provider: ProviderId::from("openai-responses"),
+        model: ModelId::from("gpt-4o-mini"),
+        tools: vec![],
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: Some("transcribe this".to_owned()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            attachments: vec![sample_audio_attachment()],
+        }],
+    };
+
+    let error = validate_context_attachments(
+        &context,
+        &ProviderId::from("openai-responses"),
+        &ProviderId::from("openai"),
+        &catalog,
+        &[InputModality::Image],
+    )
+    .expect_err("audio should be rejected for Responses transport");
+    let message = format!("{error}");
+    assert!(
+        message.contains("does not support audio"),
+        "error should mention audio transport: {message}"
+    );
+}
+
+// -- Cross-provider: no attachment on text-only model ----------------------
+
+#[test]
+fn validate_context_passes_when_no_attachments_present() {
+    let catalog = test_model_catalog();
+    let context = test_context("gpt-4o-mini");
+    // Should succeed — no attachments, text-only model
+    validate_context_attachments(
+        &context,
+        &ProviderId::from("openai"),
+        &ProviderId::from("openai"),
+        &catalog,
+        &[InputModality::Image],
+    )
+    .expect("should pass when no attachments");
 }

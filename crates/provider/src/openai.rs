@@ -12,7 +12,7 @@ use types::{
 
 use crate::{
     DEFAULT_STREAM_BUFFER_SIZE, OPENAI_CHAT_COMPLETIONS_PATH, OPENAI_DEFAULT_BASE_URL,
-    extract_http_error_message, normalize_base_url_or_default,
+    extract_http_error_message, normalize_base_url_or_default, validate_context_attachments,
 };
 
 #[derive(Debug, Clone)]
@@ -58,6 +58,13 @@ impl OpenAIProvider {
         }
         self.model_catalog
             .validate(&self.catalog_provider_id, &context.model)?;
+        validate_context_attachments(
+            context,
+            &self.provider_id,
+            &self.catalog_provider_id,
+            &self.model_catalog,
+            &[types::InputModality::Image],
+        )?;
         Ok(())
     }
 
@@ -307,7 +314,7 @@ struct OpenAIStreamOptions {
 struct OpenAIChatMessageRequest {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<OpenAIRequestToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,9 +330,39 @@ impl TryFrom<&Message> for OpenAIChatMessageRequest {
             .iter()
             .map(OpenAIRequestToolCall::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+
+        let image_attachments: Vec<_> = value
+            .attachments
+            .iter()
+            .filter(|a| a.mime_type.starts_with("image/"))
+            .collect();
+
+        let content = if image_attachments.is_empty() {
+            value.content.clone().map(serde_json::Value::String)
+        } else {
+            use base64::Engine;
+            let mut parts = Vec::new();
+            if let Some(ref text) = value.content {
+                parts.push(serde_json::json!({
+                    "type": "text",
+                    "text": text
+                }));
+            }
+            for attachment in &image_attachments {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&attachment.data);
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", attachment.mime_type, b64)
+                    }
+                }));
+            }
+            Some(serde_json::Value::Array(parts))
+        };
+
         Ok(Self {
             role: message_role_to_openai_role(&value.role).to_owned(),
-            content: value.content.clone(),
+            content,
             tool_calls,
             tool_call_id: value.tool_call_id.clone(),
         })
@@ -630,6 +667,7 @@ fn normalize_openai_message(
         content: message.content,
         tool_calls,
         tool_call_id: None,
+        attachments: Vec::new(),
     })
 }
 

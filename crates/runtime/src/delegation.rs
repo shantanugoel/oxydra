@@ -73,6 +73,7 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
                 content: Some(system_prompt.clone()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             });
         }
 
@@ -83,6 +84,7 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
                 content: Some(fact.clone()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                attachments: Vec::new(),
             });
         }
 
@@ -92,6 +94,7 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
             content: Some(request.goal.clone()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         });
 
         // Construct a subagent session id. Use a simple prefix plus a UUID.

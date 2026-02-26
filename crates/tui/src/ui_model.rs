@@ -449,6 +449,7 @@ mod tests {
                     content: Some(final_text.to_owned()),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    attachments: Vec::new(),
                 },
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),

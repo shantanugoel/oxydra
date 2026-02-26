@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             content: Some(prompt),
             tool_calls: vec![],
             tool_call_id: None,
+            attachments: Vec::new(),
         }],
     };
 

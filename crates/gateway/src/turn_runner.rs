@@ -1,6 +1,12 @@
 use super::*;
 use runtime::ScheduledTurnRunner;
-use types::ChannelCapabilities;
+use types::{ChannelCapabilities, InlineMedia};
+
+/// User-submitted content for a single turn (text + optional media).
+pub struct UserTurnInput {
+    pub prompt: String,
+    pub attachments: Vec<InlineMedia>,
+}
 
 #[async_trait]
 pub trait GatewayTurnRunner: Send + Sync {
@@ -8,7 +14,7 @@ pub trait GatewayTurnRunner: Send + Sync {
         &self,
         user_id: &str,
         session_id: &str,
-        prompt: String,
+        input: UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
         channel_capabilities: Option<ChannelCapabilities>,
@@ -48,11 +54,15 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         &self,
         user_id: &str,
         session_id: &str,
-        prompt: String,
+        input: UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
         channel_capabilities: Option<ChannelCapabilities>,
     ) -> Result<Response, RuntimeError> {
+        let UserTurnInput {
+            prompt,
+            attachments,
+        } = input;
         let tool_context = types::ToolExecutionContext {
             user_id: Some(user_id.to_owned()),
             session_id: Some(session_id.to_owned()),
@@ -68,6 +78,14 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
                 .clone()
         };
 
+        // Strip attachment bytes from older user messages to prevent unbounded
+        // memory growth when users send many images/audio clips.
+        for msg in &mut context.messages {
+            if msg.role == MessageRole::User && !msg.attachments.is_empty() {
+                msg.attachments.clear();
+            }
+        }
+
         // Save the message count before this turn so we can roll back on failure.
         // This prevents a failed turn from leaving dangling tool-call state in the
         // history that would confuse the LLM on the next user message.
@@ -78,6 +96,7 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
             content: Some(prompt),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments,
         });
 
         let (stream_events_tx, mut stream_events_rx): (RuntimeStreamEventSender, _) =
@@ -143,8 +162,12 @@ impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
         cancellation: CancellationToken,
     ) -> Result<String, RuntimeError> {
         let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
+        let input = UserTurnInput {
+            prompt,
+            attachments: Vec::new(),
+        };
         let response = self
-            .run_turn(user_id, session_id, prompt, cancellation, delta_tx, None)
+            .run_turn(user_id, session_id, input, cancellation, delta_tx, None)
             .await?;
         Ok(response.message.content.unwrap_or_default())
     }

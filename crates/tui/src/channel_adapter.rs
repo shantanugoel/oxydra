@@ -168,6 +168,7 @@ impl TuiChannelAdapter {
             session_id,
             turn_id,
             prompt,
+            attachments: Vec::new(),
         }))
     }
 
@@ -634,6 +635,7 @@ mod tests {
                     content: Some(message.to_owned()),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    attachments: Vec::new(),
                 },
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
@@ -655,6 +657,7 @@ mod tests {
             session_id: "runtime-alice".to_owned(),
             turn_id: "turn-1".to_owned(),
             prompt: "hello".to_owned(),
+            attachments: Vec::new(),
         }))
         .expect("client frame should encode");
         assert!(encoded.contains("\"send_turn\""));

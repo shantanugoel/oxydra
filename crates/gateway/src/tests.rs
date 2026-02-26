@@ -6,7 +6,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
-use types::{ProviderError, StreamItem};
+use types::{InlineMedia, ProviderError, StreamItem};
 use url::Url;
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -36,7 +36,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         &self,
         _user_id: &str,
         session_id: &str,
-        prompt: String,
+        input: turn_runner::UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
         _channel_capabilities: Option<types::ChannelCapabilities>,
@@ -44,7 +44,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         self.recorded_calls
             .lock()
             .await
-            .push((session_id.to_owned(), prompt));
+            .push((session_id.to_owned(), input.prompt));
 
         let scripted_turn = self
             .scripted_turns
@@ -80,6 +80,7 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
                     content: Some(content),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    attachments: Vec::new(),
                 },
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
@@ -232,6 +233,39 @@ async fn receive_server_frame(socket: &mut ClientSocket) -> GatewayServerFrame {
     .expect("timed out waiting for server frame")
 }
 
+fn sample_attachment(mime_type: &str, size: usize) -> InlineMedia {
+    InlineMedia {
+        mime_type: mime_type.to_owned(),
+        data: vec![0_u8; size],
+    }
+}
+
+#[test]
+fn validate_inline_attachments_rejects_too_many() {
+    let attachments = (0..(MAX_INLINE_ATTACHMENTS_PER_TURN + 1))
+        .map(|_| sample_attachment("image/jpeg", 32))
+        .collect::<Vec<_>>();
+    let error = validate_inline_attachments(&attachments).expect_err("expected too-many error");
+    assert!(error.contains("too many attachments"));
+}
+
+#[test]
+fn validate_inline_attachments_rejects_oversized_file() {
+    let attachments = vec![sample_attachment(
+        "image/jpeg",
+        MAX_INLINE_ATTACHMENT_BYTES.saturating_add(1),
+    )];
+    let error = validate_inline_attachments(&attachments).expect_err("expected size error");
+    assert!(error.contains("attachment too large"));
+}
+
+#[test]
+fn validate_inline_attachments_rejects_invalid_mime() {
+    let attachments = vec![sample_attachment("bad mime", 16)];
+    let error = validate_inline_attachments(&attachments).expect_err("expected mime error");
+    assert!(error.contains("invalid attachment mime_type"));
+}
+
 #[tokio::test]
 async fn handshake_returns_hello_ack_with_stable_session() {
     let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
@@ -331,6 +365,7 @@ async fn send_turn_streams_deltas_and_completes() {
             session_id,
             turn_id: "turn-1".to_owned(),
             prompt: "say hello".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -359,6 +394,53 @@ async fn send_turn_streams_deltas_and_completes() {
             assert_eq!(completed.response.message.content.as_deref(), Some("hello"));
         }
         other => panic!("expected turn_completed, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn send_turn_rejects_invalid_attachment_payload() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+    let mut socket = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: false,
+        }),
+    )
+    .await;
+
+    let hello_ack = receive_server_frame(&mut socket).await;
+    let session_id = match hello_ack {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-invalid".to_owned(),
+            session_id,
+            turn_id: "turn-1".to_owned(),
+            prompt: "bad mime".to_owned(),
+            attachments: vec![sample_attachment("bad mime", 16)],
+        }),
+    )
+    .await;
+
+    match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::Error(error) => {
+            assert_eq!(error.request_id.as_deref(), Some("req-turn-invalid"));
+            assert!(error.message.contains("invalid attachment mime_type"));
+        }
+        other => panic!("expected error frame, got {other:?}"),
     }
 
     server_task.abort();
@@ -398,6 +480,7 @@ async fn cancel_active_turn_cancels_only_current_turn() {
             session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "long task".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -434,6 +517,7 @@ async fn cancel_active_turn_cancels_only_current_turn() {
             session_id,
             turn_id: "turn-2".to_owned(),
             prompt: "short task".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -491,6 +575,7 @@ async fn reconnect_during_active_turn_reports_running_and_continues_streaming() 
             session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "stream".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -578,6 +663,7 @@ async fn reconnect_after_disconnected_completion_receives_terminal_outcome() {
             session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "stream".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -706,6 +792,7 @@ async fn runner_failure_maps_to_gateway_error_frame() {
             session_id,
             turn_id: "turn-1".to_owned(),
             prompt: "fail".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -870,6 +957,7 @@ async fn two_sessions_for_same_user_run_turns_concurrently() {
             session_id: session_id_1,
             turn_id: "turn-1".to_owned(),
             prompt: "task 1".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -880,6 +968,7 @@ async fn two_sessions_for_same_user_run_turns_concurrently() {
             session_id: session_id_2,
             turn_id: "turn-2".to_owned(),
             prompt: "task 2".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -940,6 +1029,7 @@ async fn session_id_in_hello_joins_existing_session() {
             session_id: session_id.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "hello".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1009,6 +1099,7 @@ async fn concurrent_turn_limit_enforced() {
             session_id: sid1,
             turn_id: "turn-1".to_owned(),
             prompt: "long".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1037,6 +1128,7 @@ async fn concurrent_turn_limit_enforced() {
             session_id: sid2,
             turn_id: "turn-2".to_owned(),
             prompt: "blocked".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1164,6 +1256,7 @@ async fn touch_session_called_on_turn_completion() {
             session_id: sid.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "greet".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1306,6 +1399,7 @@ async fn create_session_frame_creates_and_switches_to_new_session() {
                     session_id: new_sid.clone(),
                     turn_id: "turn-1".to_owned(),
                     prompt: "hello".to_owned(),
+                    attachments: Vec::new(),
                 }),
             )
             .await;
@@ -1458,6 +1552,7 @@ async fn switch_session_changes_active_session() {
             session_id: first_sid.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "hi".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1602,6 +1697,7 @@ async fn two_tui_windows_with_separate_sessions_work_independently() {
             session_id: sid1.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "q1".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1612,6 +1708,7 @@ async fn two_tui_windows_with_separate_sessions_work_independently() {
             session_id: sid2.clone(),
             turn_id: "turn-2".to_owned(),
             prompt: "q2".to_owned(),
+            attachments: Vec::new(),
         }),
     )
     .await;
@@ -1665,8 +1762,11 @@ async fn switch_session_supports_prefix_matching() {
     .await;
     let _ = receive_server_frame(&mut socket).await;
 
-    // Switch back using a prefix of the first session (first 13 chars).
-    let prefix = &first_sid[..13];
+    // Switch back using a prefix of the first session. UUID v7 sessions
+    // created in quick succession share their timestamp prefix, so we need
+    // most of the ID to guarantee uniqueness. Use all but the last 4 chars
+    // to still exercise prefix matching rather than exact match.
+    let prefix = &first_sid[..first_sid.len().saturating_sub(4)];
     send_client_frame(
         &mut socket,
         GatewayClientFrame::SwitchSession(types::GatewaySwitchSession {

@@ -57,7 +57,12 @@ impl AgentRuntime {
             return Ok(());
         };
 
-        let payload = serde_json::to_value(message)
+        let mut message_for_memory = message.clone();
+        for attachment in &mut message_for_memory.attachments {
+            attachment.data.clear();
+        }
+
+        let payload = serde_json::to_value(&message_for_memory)
             .map_err(MemoryError::from)
             .map_err(RuntimeError::from)?;
         memory

@@ -1,7 +1,8 @@
 use std::env;
 
 use types::{
-    ModelCatalog, Provider, ProviderError, ProviderId, ProviderRegistryEntry, ProviderType,
+    Context, InputModality, ModelCatalog, Provider, ProviderError, ProviderId,
+    ProviderRegistryEntry, ProviderType,
 };
 
 mod anthropic;
@@ -43,7 +44,7 @@ use responses::{
     ResponsesUsage, parse_responses_stream_event,
 };
 #[cfg(test)]
-use types::{Context, FunctionDecl, Message, MessageRole, Response, ToolCall};
+use types::{FunctionDecl, InlineMedia, Message, MessageRole, Modalities, Response, ToolCall};
 
 pub(crate) const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub(crate) const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
@@ -154,6 +155,78 @@ fn normalize_base_url_or_default(base_url: &str, default_base_url: &str) -> Stri
         default_base_url.to_owned()
     } else {
         trimmed.trim_end_matches('/').to_owned()
+    }
+}
+
+pub(crate) fn validate_context_attachments(
+    context: &Context,
+    provider_id: &ProviderId,
+    catalog_provider_id: &ProviderId,
+    model_catalog: &ModelCatalog,
+    transport_modalities: &[InputModality],
+) -> Result<(), ProviderError> {
+    if context
+        .messages
+        .iter()
+        .all(|message| message.attachments.is_empty())
+    {
+        return Ok(());
+    }
+
+    let model_caps = model_catalog.input_caps(catalog_provider_id, &context.model)?;
+
+    if !model_caps.supports_attachments {
+        return Err(ProviderError::RequestFailed {
+            provider: provider_id.clone(),
+            message: format!(
+                "model `{}` does not support attachments",
+                context.model
+            ),
+        });
+    }
+
+    for (message_index, message) in context.messages.iter().enumerate() {
+        for attachment in &message.attachments {
+            let modality = InputModality::from_mime_type(attachment.mime_type.as_str());
+            if !model_caps.accepts_modality(modality) {
+                return Err(ProviderError::RequestFailed {
+                    provider: provider_id.clone(),
+                    message: format!(
+                        "model `{}` does not support {} attachments (mime `{}`) at message index {}",
+                        context.model,
+                        modality.as_str(),
+                        attachment.mime_type,
+                        message_index
+                    ),
+                });
+            }
+            if !transport_modalities.contains(&modality) {
+                return Err(ProviderError::RequestFailed {
+                    provider: provider_id.clone(),
+                    message: format!(
+                        "provider `{}` endpoint does not support {} attachments (mime `{}`); supported: {}",
+                        provider_id,
+                        modality.as_str(),
+                        attachment.mime_type,
+                        format_supported_modalities(transport_modalities)
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn format_supported_modalities(modalities: &[InputModality]) -> String {
+    if modalities.is_empty() {
+        "none".to_owned()
+    } else {
+        modalities
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

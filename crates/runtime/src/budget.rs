@@ -86,6 +86,21 @@ impl AgentRuntime {
         let (selected_history, history_tokens) =
             self.select_messages_within_budget(&history_messages, message_budget, system_tokens)?;
 
+        if let Some(latest_user) = history_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            && !selected_history
+                .iter()
+                .any(|message| message == latest_user)
+        {
+            tracing::warn!(
+                model = %context.model,
+                "latest user message does not fit in provider context budget"
+            );
+            return Err(RuntimeError::BudgetExceeded);
+        }
+
         let mut provider_context = context.clone();
         provider_context.messages = selected_system;
         provider_context.messages.extend(retrieved_messages);
@@ -342,6 +357,7 @@ impl AgentRuntime {
             content: Some(format!("{ROLLING_SUMMARY_PREFIX}\n{summary}")),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         })
     }
 
@@ -379,6 +395,14 @@ impl AgentRuntime {
         max_context_tokens: u64,
         safety_buffer_tokens: u64,
     ) -> bool {
+        if context
+            .messages
+            .iter()
+            .any(|message| !message.attachments.is_empty())
+        {
+            return false;
+        }
+
         let available_tokens = max_context_tokens.saturating_sub(safety_buffer_tokens);
         if available_tokens == 0 {
             return false;
@@ -454,6 +478,7 @@ impl AgentRuntime {
             content: Some(memory_block),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }))
     }
 

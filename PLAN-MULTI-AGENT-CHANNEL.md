@@ -195,7 +195,7 @@ Both the WebSocket handler and the Telegram adapter call these same methods. Thi
 
 ### D11: Subagent semaphore accounting
 
-**Problem:** Step 11 originally said "Subagent turns also acquire parent user's permit." This creates a deadlock risk: with `max_concurrent_turns_per_user = 3` and max delegation depth = 3, a depth-3 chain consumes all permits, blocking any other concurrent session.
+**Problem:** Step 12 originally said "Subagent turns also acquire parent user's permit." This creates a deadlock risk: with `max_concurrent_turns_per_user = 3` and max delegation depth = 3, a depth-3 chain consumes all permits, blocking any other concurrent session.
 
 **Resolution:** Subagents run under the parent turn's permit. They are logically part of the parent's turn — the parent tool call synchronously awaits the result. The semaphore counts **top-level user-initiated turns only** (gateway `start_turn()` calls), not internal delegation executions. The delegation depth limit (max 3) and budget cascading already prevent fan-out abuse.
 
@@ -213,7 +213,7 @@ Both the WebSocket handler and the Telegram adapter call these same methods. Thi
 
 **Problem:** Guidebook Chapter 9 defines a `Channel` trait with `send()`, `listen()`, `health_check()`. Chapter 12 says adapters implement this trait. But the plan's Telegram adapter doesn't implement this trait — it calls the gateway's internal API directly.
 
-**Resolution:** The existing `Channel` trait is for **WebSocket-based client adapters** (TUI). In-process adapters (Telegram, future Discord/Slack) use the internal gateway API (D10) directly and do not implement `Channel`. The `Channel` trait may be deprecated or renamed to `WebSocketChannelClient` in a future cleanup pass. Document this distinction in the guidebook update (Step 12) so future contributors don't try to force-fit in-process adapters into the WebSocket client trait.
+**Resolution:** The existing `Channel` trait is for **WebSocket-based client adapters** (TUI). In-process adapters (Telegram, future Discord/Slack) use the internal gateway API (D10) directly and do not implement `Channel`. The `Channel` trait may be deprecated or renamed to `WebSocketChannelClient` in a future cleanup pass. Document this distinction in the guidebook update (Step 13) so future contributors don't try to force-fit in-process adapters into the WebSocket client trait.
 
 ### D14: Thread/topic-based session mapping for external channels
 
@@ -1239,7 +1239,50 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 11: Concurrent Turn Management
+### Step 11: Agent-Specific Model Selection Wiring
+
+**Goal:** Ensure every named agent actually runs with its configured provider/model (instead of inheriting a hardcoded/default runtime path).
+
+**Crates:** `types`, `runner`, `gateway`, `runtime`, `tools`
+
+**Changes:**
+
+1. **Selection semantics + validation (`types`, `runner`):**
+   - Treat `AgentDefinition.selection` as an override of root `[selection]`
+   - Effective selection resolution rules:
+     - Named agent with `selection`: use that provider/model
+     - Named agent without `selection`: inherit caller selection (delegation) or root `[selection]` (top-level session)
+     - `default` agent: always uses root `[selection]`
+   - During bootstrap, validate each agent's effective provider exists in `providers.registry`
+   - Validate each agent model against catalog namespace (`effective_catalog_provider`) using the same guardrails as root selection
+
+2. **Runtime construction per effective agent (`runner` + `runtime`):**
+   - Introduce an agent runtime factory/executor input that can build a provider from a resolved `ProviderSelection`
+   - Build child runtimes for delegation using the target agent's effective selection
+   - Remove hardcoded subagent `Context { provider: openai, model: gpt-4o-mini }`
+   - Keep budget, cancellation, and context limits behavior unchanged unless explicitly overridden by agent limits
+
+3. **Top-level session routing by `agent_name` (`gateway` + `runner`):**
+   - Ensure session `agent_name` affects execution path, not just metadata/persistence
+   - When a session is created with `agent_name != default`, resolve effective selection and execute turns with that model/provider
+   - Keep backward compatibility for existing sessions (`default` behavior unchanged)
+
+4. **Tooling and prompt consistency (`tools` + `runner`):**
+   - `delegate_to_agent` schema should expose available agent names/descriptions from config (no stale generic schema)
+   - System prompt augmentation should describe that specialists can run different models when configured
+
+5. **Testing and verification:**
+   - Delegation test: agent with explicit selection uses configured provider/model
+   - Inheritance test: agent without `selection` inherits parent/root as defined
+   - Gateway session test: `CreateSession(agent_name=...)` changes effective model route
+   - Startup validation test: unknown provider or unknown model in agent selection fails fast with clear error
+   - Regression test: `default` sessions and non-delegation flows remain unchanged
+
+**Verification gate:** A turn delegated to two differently-configured agents produces provider/model usage matching each agent definition; top-level named sessions route to their configured model without affecting default sessions.
+
+---
+
+### Step 12: Concurrent Turn Management
 
 **Goal:** Bounded per-user concurrency with fair queueing.
 
@@ -1297,7 +1340,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 12: Integration Polish
+### Step 13: Integration Polish
 
 **Goal:** End-to-end reliability, cross-feature interactions, docs.
 
@@ -1578,8 +1621,9 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | 8: Telegram | Update→auth→message construction; message splitting; command interception; channel_context_id derivation; markdown→HTML; edit-message throttling; turn-active rejection; mock API round-trip with streaming edits; 429 handling; reconnect; forum topic threading |
 | 9: Agent defs | Config parsing; tool validation; system prompt augmentation |
 | 10: Delegation | Round-trip delegation; budget cascading; cancel cascade; depth limit; cycle prevention |
-| 11: Concurrency | Semaphore enforcement (top-level only); subagent bypass; no deadlock at depth 3; TTL cleanup with race protection; context eviction |
-| 12: Integration | TUI + Telegram; delegation from Telegram; scheduled + interactive |
+| 11: Model selection | Agent-specific selection resolves correctly; delegation and named sessions use effective provider/model; inheritance and validation failure paths covered |
+| 12: Concurrency | Semaphore enforcement (top-level only); subagent bypass; no deadlock at depth 3; TTL cleanup with race protection; context eviction |
+| 13: Integration | TUI + Telegram; delegation from Telegram; scheduled + interactive |
 
 ### Mock Strategy
 
@@ -1619,7 +1663,7 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | Config complexity for users | Medium | Medium | All new sections optional with safe defaults; existing configs work unchanged |
 | DB migration on running system | Low | Medium | Migrations are additive (new tables only); WAL mode enables concurrent reads during migration |
 | Broadcast channel lag losing TurnCompleted | Medium | High | Increased capacity to 1024; Telegram adapter buffers via intermediate mpsc channel |
-| Turn runner context HashMap OOM | Medium | Medium | Context eviction on session archive (Step 11); `drop_session_context()` on `GatewayTurnRunner` trait |
+| Turn runner context HashMap OOM | Medium | Medium | Context eviction on session archive (Step 12); `drop_session_context()` on `GatewayTurnRunner` trait |
 | Semaphore deadlock with delegation | **Eliminated** | High | Subagents run under parent's permit (D11); depth limit prevents fan-out |
 
 ### What We Are NOT Doing (Explicitly Deferred)
@@ -1640,7 +1684,7 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | File | Change Type | Step |
 |------|------------|------|
 | `crates/types/src/channel.rs` | Modified — protocol v2, new frames | 2, 5 |
-| `crates/types/src/config.rs` | Modified — GatewayConfig, AgentDefinition | 9, 11 |
+| `crates/types/src/config.rs` | Modified — GatewayConfig, AgentDefinition | 9, 12 |
 | `crates/types/src/runner.rs` | Modified — ChannelsConfig, SenderBinding in RunnerUserConfig | 6, 8 |
 | `crates/types/src/session.rs` | **New** — SessionStore trait, SessionRecord | 4 |
 | `crates/types/src/delegation.rs` | **New** — DelegationExecutor trait, request/result types | 10 |
@@ -1650,7 +1694,7 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | `crates/runtime/src/lib.rs` | Modified — remove shared tool context, add context parameter | 1 |
 | `crates/runtime/src/tool_execution.rs` | Modified — accept tool context parameter | 1 |
 | `crates/runtime/src/delegation.rs` | **New** — RuntimeDelegationExecutor | 10 |
-| `crates/gateway/src/lib.rs` | **Major evolution** — multi-session, protocol v2 | 3, 4, 5, 11 |
+| `crates/gateway/src/lib.rs` | **Major evolution** — multi-session, protocol v2 | 3, 4, 5, 12 |
 | `crates/gateway/src/session.rs` | **New** — UserState, SessionState | 3 |
 | `crates/gateway/src/turn_runner.rs` | Modified — pass tool context directly | 1 |
 | `crates/channels/Cargo.toml` | Modified — add telegram feature + deps | 8 |
@@ -1674,7 +1718,6 @@ All new config sections use `#[serde(default)]` so existing configs work without
 | `crates/tui/src/ui_model.rs` | Modified — session info display | 5 |
 | `crates/tui/src/widgets.rs` | Modified — session info in status bar | 5 |
 | `crates/tui/src/channel_adapter.rs` | Modified — new frame handling | 5 |
-
 **Architecture:** Channel adapters run inside the VM alongside the gateway. They call gateway's internal API directly (D10) — no WebSocket. The WebSocket handler is a thin wrapper around the same internal API. The runner's only channel responsibility is including `ChannelsConfig` in the bootstrap envelope and forwarding bot token env vars. The existing `Channel` trait is for WebSocket-based client adapters (TUI) only; in-process adapters use the internal API (D13).
 
 ### New Crate Dependencies

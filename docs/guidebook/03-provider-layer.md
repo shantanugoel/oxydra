@@ -92,9 +92,10 @@ If the auto-fetched catalog uses an unsupported schema (parse failure), the syst
 ### Unknown Models and `skip_catalog_validation`
 
 When `catalog.skip_catalog_validation = true` in the agent config, models not found in any loaded catalog are assigned a synthetic `ModelDescriptor` with:
-- `supports_streaming = true`, `supports_tools = true`
+- `supports_streaming = true`, `supports_tools = true` (except unknown model IDs containing `"image"`, which default to `supports_tools = false`)
 - `supports_json_mode = false`, `supports_reasoning_traces = false` (unless overridden)
 - Default context: 128K tokens, default output: 16K tokens
+- Unknown model IDs containing `"image"` also default to `attachment=true` and `input_modalities=["image"]`
 - Per-registry-entry overrides (`reasoning`, `max_input_tokens`, `max_output_tokens`, `max_context_tokens`) can customize these defaults
 
 This enables OpenAI-compatible proxies (e.g. OpenRouter) to use models not in the pinned catalog.
@@ -285,6 +286,7 @@ Authentication is via the `x-goog-api-key` header (not Bearer token).
 - User/assistant messages map to Gemini's `contents` array with `user`/`model` roles
 - Tool call results are converted to `functionResponse` parts
 - Tools are encoded as `functionDeclarations` within a `tools` array
+- On assistant turns that include tool calls, assistant free-text is intentionally omitted and only `functionCall` parts are replayed; this avoids Gemini thinking-model request failures caused by non-replayable thought-signature text parts
 
 ### Response Normalization
 
@@ -440,7 +442,7 @@ Input capabilities are derived from models.dev catalog fields (`attachment`, `mo
 2. Provider-level defaults from `CapsOverrides.provider_defaults`
 3. Model-specific overrides from `CapsOverrides.overrides`
 
-Unknown models (with `skip_catalog_validation = true`) default to `attachment=false` unless overridden via `ProviderRegistryEntry.attachment` and `input_modalities` fields.
+Unknown models (with `skip_catalog_validation = true`) default to `attachment=false` unless overridden; unknown IDs containing `"image"` default to `attachment=true` with image modality and no tool-calling. Per-entry `ProviderRegistryEntry.attachment` and `input_modalities` still take precedence.
 
 ### Attachment Validation
 

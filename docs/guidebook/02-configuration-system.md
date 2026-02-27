@@ -140,6 +140,8 @@ pub struct ProviderRegistryEntry {
     pub api_key_env: Option<String>,           // Custom env var for API key
     pub extra_headers: Option<BTreeMap<String, String>>,  // Additional HTTP headers
     pub catalog_provider: Option<String>,       // Override catalog namespace for model validation
+    pub attachment: Option<bool>,              // Override unknown-model attachment support
+    pub input_modalities: Option<Vec<String>>, // Override unknown-model input modalities
     pub reasoning: Option<bool>,               // Override for unknown model reasoning capability
     pub max_input_tokens: Option<u32>,         // Override max input tokens for unknown models
     pub max_output_tokens: Option<u32>,        // Override max output tokens for unknown models
@@ -176,7 +178,7 @@ pub struct CatalogConfig {
 | `skip_catalog_validation` | `false` | When `true`, unknown models are allowed through with synthetic default capabilities |
 | `pinned_url` | (none) | Override the default URL for fetching the pinned catalog snapshot |
 
-When `skip_catalog_validation` is enabled, models not found in any loaded catalog are assigned a synthetic descriptor with sensible defaults (`supports_streaming=true`, `supports_tools=true`, context=128K, output=16K). Per-registry-entry capability overrides can fine-tune these defaults.
+When `skip_catalog_validation` is enabled, models not found in any loaded catalog are assigned a synthetic descriptor with sensible defaults (`supports_streaming=true`, context=128K, output=16K). By default, unknown models are tool-capable; for unknown model IDs containing `"image"`, defaults switch to image-generation-friendly behavior (`supports_tools=false`, `attachment=true`, `input_modalities=["image"]`). Per-registry-entry capability overrides can fine-tune these defaults.
 
 **Catalog cache locations:**
 - User-level: `~/.config/oxydra/model_catalog.json`
@@ -188,6 +190,8 @@ Each `ProviderRegistryEntry` supports optional capability fields used when `skip
 
 | Field | Type | Purpose |
 |-------|------|---------|
+| `attachment` | `Option<bool>` | Whether unknown models accept attachments |
+| `input_modalities` | `Option<Vec<String>>` | Supported attachment modalities (e.g. `["image"]`) |
 | `reasoning` | `Option<bool>` | Whether the model supports reasoning/thinking |
 | `max_input_tokens` | `Option<u32>` | Override max input tokens (default: 128000) |
 | `max_output_tokens` | `Option<u32>` | Override max output tokens (default: 16384) |

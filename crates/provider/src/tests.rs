@@ -1748,6 +1748,56 @@ fn gemini_request_serialization_snapshot() {
 }
 
 #[test]
+fn gemini_request_omits_assistant_text_when_tool_calls_present() {
+    let context = Context {
+        provider: ProviderId::from("gemini"),
+        model: ModelId::from("gemini-3.1-pro-preview"),
+        tools: vec![],
+        messages: vec![
+            Message {
+                role: MessageRole::User,
+                content: Some("Please read the file".to_owned()),
+                tool_calls: vec![],
+                tool_call_id: None,
+                attachments: Vec::new(),
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: Some("I'll read it now.".to_owned()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_owned(),
+                    name: "file_read".to_owned(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                    metadata: Some(json!({ "thought_signature": "abc123" })),
+                }],
+                tool_call_id: None,
+                attachments: Vec::new(),
+            },
+        ],
+    };
+
+    let request =
+        GeminiGenerateContentRequest::from_context(&context).expect("request should normalize");
+    let request_json = serde_json::to_value(request).expect("request should serialize");
+    let model_parts = request_json["contents"]
+        .as_array()
+        .expect("contents must be an array")
+        .iter()
+        .find(|entry| entry["role"] == "model")
+        .expect("assistant/model content should be present")["parts"]
+        .as_array()
+        .expect("model parts must be an array")
+        .clone();
+    assert_eq!(model_parts.len(), 1);
+    assert!(
+        model_parts[0].get("text").is_none(),
+        "assistant text should be omitted when tool calls are present"
+    );
+    assert_eq!(model_parts[0]["functionCall"]["name"], "file_read");
+    assert_eq!(model_parts[0]["thoughtSignature"], "abc123");
+}
+
+#[test]
 fn gemini_response_normalization() {
     let response = GeminiGenerateContentResponse {
         candidates: vec![GeminiCandidate {

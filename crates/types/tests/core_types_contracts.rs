@@ -716,6 +716,23 @@ fn unknown_model_defaults_support_attachment_overrides() {
 }
 
 #[test]
+fn unknown_image_model_defaults_disable_tools_and_infer_image_modality() {
+    let descriptor = ModelDescriptor::default_for_unknown(
+        "gemini-3.1-flash-image-preview",
+        &UnknownModelCaps::default(),
+    );
+
+    assert!(
+        !descriptor.tool_call,
+        "unknown image models should default to no tool calling"
+    );
+    assert!(descriptor.attachment);
+    let caps = descriptor.to_input_caps();
+    assert!(caps.supports_attachments);
+    assert!(caps.accepts_modality(types::InputModality::Image));
+}
+
+#[test]
 fn catalog_input_caps_uses_overrides() {
     let mut catalog = ModelCatalog::from_snapshot_str(
         r#"

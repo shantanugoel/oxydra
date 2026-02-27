@@ -424,13 +424,22 @@ impl ModelDescriptor {
     /// Used when `skip_catalog_validation` is enabled and the model is not
     /// found in any loaded catalog.
     pub fn default_for_unknown(model_id: &str, overrides: &UnknownModelCaps) -> Self {
+        let lower_model_id = model_id.to_ascii_lowercase();
+        let inferred_image_model = lower_model_id.contains("image");
+        let inferred_input_modalities = if inferred_image_model {
+            vec!["image".to_owned()]
+        } else {
+            Vec::new()
+        };
         Self {
             id: model_id.to_owned(),
             name: model_id.to_owned(),
             family: None,
-            attachment: overrides.attachment.unwrap_or(false),
+            attachment: overrides.attachment.unwrap_or(inferred_image_model),
             reasoning: overrides.reasoning.unwrap_or(false),
-            tool_call: true,
+            // Image-focused Gemini preview models generally do not support tool
+            // calling and perform better with direct completion responses.
+            tool_call: !inferred_image_model,
             interleaved: None,
             structured_output: false,
             temperature: true,
@@ -438,7 +447,10 @@ impl ModelDescriptor {
             release_date: None,
             last_updated: None,
             modalities: Modalities {
-                input: overrides.input_modalities.clone().unwrap_or_default(),
+                input: overrides
+                    .input_modalities
+                    .clone()
+                    .unwrap_or(inferred_input_modalities),
                 output: Vec::new(),
             },
             open_weights: false,

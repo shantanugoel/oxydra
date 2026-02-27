@@ -2149,10 +2149,12 @@ fn write_bootstrap_file(
     Ok(bootstrap_path)
 }
 
-/// Copy the host's agent configuration files (`agent.toml` and `providers.toml`)
-/// into the user's workspace internal directory (`<workspace>/.oxydra/`).
-/// This makes the config available inside the container, which mounts the
-/// workspace root. Files are copied (not moved) so the host config is preserved.
+/// Materialize the host's effective merged agent configuration into the user's
+/// workspace internal directory (`<workspace>/.oxydra/agent.toml`).
+///
+/// The guest runtime only reads config from its mounted workspace, so this
+/// ensures settings from all host search paths (system/user/workspace) are
+/// preserved consistently during startup.
 fn copy_agent_config_to_workspace(workspace: &UserWorkspace) -> Result<(), RunnerError> {
     let host_paths = bootstrap::ConfigSearchPaths::discover().map_err(|source| {
         RunnerError::ProvisionWorkspace {
@@ -2161,21 +2163,41 @@ fn copy_agent_config_to_workspace(workspace: &UserWorkspace) -> Result<(), Runne
         }
     })?;
 
-    for file_name in [
-        bootstrap::AGENT_CONFIG_FILE_NAME,
-        bootstrap::PROVIDERS_CONFIG_FILE_NAME,
-    ] {
-        let source_path = host_paths.workspace_dir.join(file_name);
-        if source_path.is_file() {
-            let dest_path = workspace.internal.join(file_name);
-            fs::copy(&source_path, &dest_path).map_err(|source| {
-                RunnerError::ProvisionWorkspace {
-                    path: dest_path,
-                    source,
-                }
-            })?;
+    copy_agent_config_to_workspace_with_paths(workspace, &host_paths)
+}
+
+fn copy_agent_config_to_workspace_with_paths(
+    workspace: &UserWorkspace,
+    host_paths: &bootstrap::ConfigSearchPaths,
+) -> Result<(), RunnerError> {
+    let merged = bootstrap::load_agent_config_with_paths(
+        host_paths,
+        None,
+        bootstrap::CliOverrides::default(),
+    )
+    .map_err(|source| RunnerError::ProvisionWorkspace {
+        path: workspace.internal.clone(),
+        source: io::Error::other(source.to_string()),
+    })?;
+
+    let serialized =
+        toml::to_string_pretty(&merged).map_err(|source| RunnerError::ProvisionWorkspace {
+            path: workspace.internal.join(bootstrap::AGENT_CONFIG_FILE_NAME),
+            source: io::Error::other(source.to_string()),
+        })?;
+    let agent_path = workspace.internal.join(bootstrap::AGENT_CONFIG_FILE_NAME);
+    fs::write(&agent_path, format!("{serialized}\n")).map_err(|source| {
+        RunnerError::ProvisionWorkspace {
+            path: agent_path,
+            source,
         }
-    }
+    })?;
+
+    // Keep a single canonical config file to avoid stale split-config overrides.
+    let providers_path = workspace
+        .internal
+        .join(bootstrap::PROVIDERS_CONFIG_FILE_NAME);
+    let _ = fs::remove_file(providers_path);
 
     Ok(())
 }

@@ -1262,22 +1262,76 @@ fn microvm_tier_launch_request_includes_bootstrap_file() {
 }
 
 #[test]
-fn copy_agent_config_to_workspace_copies_existing_config_files() {
+fn copy_agent_config_to_workspace_materializes_merged_config() {
     let root = temp_dir("copy-agent-config");
+    let host_paths = bootstrap::ConfigSearchPaths {
+        system_dir: root.join("system"),
+        user_dir: Some(root.join("user")),
+        workspace_dir: root.join("workspace"),
+    };
+    fs::create_dir_all(&host_paths.system_dir).expect("system config dir should be creatable");
+    fs::create_dir_all(
+        host_paths
+            .user_dir
+            .as_ref()
+            .expect("user config dir should exist in test paths"),
+    )
+    .expect("user config dir should be creatable");
+    fs::create_dir_all(&host_paths.workspace_dir)
+        .expect("workspace config dir should be creatable");
+
+    fs::write(
+        host_paths
+            .user_dir
+            .as_ref()
+            .expect("user config dir should exist")
+            .join(bootstrap::AGENT_CONFIG_FILE_NAME),
+        r#"
+config_version = "1.0.0"
+[selection]
+provider = "gemini"
+model = "gemini-3.1-flash-image-preview"
+[catalog]
+skip_catalog_validation = true
+"#
+        .trim_start(),
+    )
+    .expect("user agent config should be writable");
+    fs::write(
+        host_paths
+            .workspace_dir
+            .join(bootstrap::PROVIDERS_CONFIG_FILE_NAME),
+        r#"
+[providers.registry.gemini]
+provider_type = "gemini"
+api_key = "test-gemini-key"
+"#
+        .trim_start(),
+    )
+    .expect("workspace providers config should be writable");
+
     let workspace = provision_user_workspace(root.join("workspace-root"), "alice")
         .expect("workspace should provision");
+    copy_agent_config_to_workspace_with_paths(&workspace, &host_paths)
+        .expect("merged config should be materialized in workspace internal");
 
-    // Create a fake host-side .oxydra/ directory in CWD for the test.
-    // Since copy_agent_config_to_workspace uses ConfigSearchPaths::discover()
-    // which reads CWD/.oxydra/, we instead test the underlying copy logic
-    // by directly placing files in workspace.internal and verifying the path.
-    let agent_content = "config_version = \"1.0\"\n[selection]\nprovider = \"gemini\"\n";
-    fs::write(workspace.internal.join("agent.toml"), agent_content)
-        .expect("agent.toml should be writable");
-
-    let written = fs::read_to_string(workspace.internal.join("agent.toml"))
-        .expect("agent.toml should be readable in workspace internal");
-    assert_eq!(written, agent_content);
+    let persisted = fs::read_to_string(workspace.internal.join(bootstrap::AGENT_CONFIG_FILE_NAME))
+        .expect("materialized agent config should be readable");
+    let config: types::AgentConfig =
+        toml::from_str(&persisted).expect("materialized agent config should parse");
+    assert_eq!(config.selection.provider, types::ProviderId::from("gemini"));
+    assert_eq!(
+        config.selection.model,
+        types::ModelId::from("gemini-3.1-flash-image-preview")
+    );
+    assert!(config.catalog.skip_catalog_validation);
+    assert!(
+        !workspace
+            .internal
+            .join(bootstrap::PROVIDERS_CONFIG_FILE_NAME)
+            .exists(),
+        "providers.toml should be removed to avoid stale overrides"
+    );
 
     let _ = fs::remove_dir_all(root);
 }

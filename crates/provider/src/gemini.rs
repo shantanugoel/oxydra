@@ -358,7 +358,13 @@ impl GeminiGenerateContentRequest {
                 }
                 MessageRole::Assistant => {
                     let mut parts = Vec::new();
-                    if let Some(text) = message.content.as_deref().filter(|t| !t.trim().is_empty())
+                    // For assistant turns that include function calls, avoid
+                    // replaying free-form text parts because Gemini thinking
+                    // models can attach opaque thought signatures to those
+                    // parts that we cannot reliably persist across turns.
+                    if message.tool_calls.is_empty()
+                        && let Some(text) =
+                            message.content.as_deref().filter(|t| !t.trim().is_empty())
                     {
                         parts.push(GeminiPart::text(text));
                     }

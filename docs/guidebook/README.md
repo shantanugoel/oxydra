@@ -4,7 +4,7 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 
 ## Chapters
 
-### Implemented (Phases 1-13, 19)
+### Implemented (Phases 1-14, 18-19)
 
 | # | Chapter | Description |
 |---|---------|-------------|
@@ -19,14 +19,14 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 | 9 | [Gateway and Channels](09-gateway-and-channels.md) | Channel trait, gateway WebSocket server, TUI adapter, end-to-end message flow, scheduled notifications |
 | 10 | [Testing and Quality](10-testing-and-quality.md) | Test strategy, mocking, snapshot testing, CI/CD pipeline |
 
-### Forward-Looking (Phases 14-21)
+### Mixed Status (Phase 15 in progress; Phases 16-17, 20-21 planned)
 
 | # | Chapter | Description |
 |---|---------|-------------|
-| 11 | [Multi-Agent Orchestration](11-multi-agent-orchestration.md) | Subagent delegation, state graphs, lane-based routing, session trees |
-| 12 | [External Channels and Identity](12-external-channels-and-identity.md) | External channel adapters, sender authentication, session identity mapping |
+| 11 | [Multi-Agent Orchestration](11-multi-agent-orchestration.md) | In progress: subagent delegation and routing foundations are implemented; advanced orchestration graphs/session trees remain |
+| 12 | [External Channels and Identity](12-external-channels-and-identity.md) | Implemented: external channel adapters, sender authentication, and durable session identity mapping |
 | 13 | [Observability](13-observability.md) | OpenTelemetry traces, metrics, cost reporting, conversation replay |
-| 14 | [Productization](14-productization.md) | Model catalog governance, session lifecycle, scheduler, skills, persona, MCP |
+| 14 | [Productization](14-productization.md) | Mixed: model catalog governance, session lifecycle, and scheduler are implemented; MCP/skills/persona remain planned |
 
 ### Reference
 
@@ -77,8 +77,8 @@ Add the following step before any `cargo build` or `cargo test` step:
 ## Conventions
 
 - **Chapters 1-10** describe the system as built. Code references point to actual implementations.
-- **Chapters 11-14** describe planned features grounded in implementation reality. They reference existing infrastructure that the features build upon. Chapter 14's scheduler section describes the implemented system.
-- **Chapter 15** tracks the overall build plan with completion status and identified gaps.
+- **Chapters 11-14** are mixed-status chapters: Chapter 12 and parts of Chapters 11/14 are implemented, while Chapters 13 and remaining sections are forward-looking.
+- **Chapter 15** tracks the phase-by-phase completion status, in-progress work, and open gaps.
 
 ## Canonical Source
 

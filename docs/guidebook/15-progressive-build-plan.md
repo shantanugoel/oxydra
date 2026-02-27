@@ -2,7 +2,7 @@
 
 ## Overview
 
-This chapter tracks the implementation status of all 21 phases, documents identified gaps in completed phases, and provides the forward plan for phases 13-21. The plan is designed so no phase requires rewriting work from a previous phase — each phase extends the prior phase's output.
+This chapter tracks the implementation status of all 21 phases, documents identified gaps in completed phases, and provides the plan for phases 14-21 with clear completion state for delivered milestones and remaining scope. The plan is designed so no phase requires rewriting work from a previous phase — each phase extends the prior phase's output.
 
 ## Phase Status Summary
 
@@ -17,7 +17,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 7 | Anthropic provider + config + switching | **Complete** | Anthropic impl, figment config, ReliableProvider. |
 | 8 | Memory trait + libSQL persistence | **Complete** | Memory trait, libSQL, SQL migrations, session management |
 | 9 | Context window + hybrid retrieval | **Complete** | Token budgeting, FTS5, vector search, fastembed/blake3, note storage/deletion API. **Gap: upsert_chunks unimplemented** |
-| 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. All Phase 10 gaps resolved: daemon mode, log capture, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. |
+| 10 | Runner + isolation infrastructure | **Complete** | Runner, bootstrap envelope, shell daemon, sandbox tiers. Resolved: daemon mode, container/microvm bootstrap delivery, Firecracker config generation, control plane metadata. **Gap: Docker container log capture pending.** |
 | 11 | Security policy + WASM tool isolation | **Complete** | Security policy, SSRF protection, scrubbing. All Phase 11 gaps resolved: real wasmtime + WASI sandboxing with preopened directory enforcement. |
 | 12 | Channel trait + TUI + gateway daemon | **Complete** | Channel trait, TUI adapter, gateway WebSocket server, ratatui rendering loop, standalone `oxydra-tui` binary, `runner --tui` exec wiring. **Resolved:** multi-line input (Alt+Enter), runtime activity visibility (`TurnProgress`). **Protocol v2:** `runtime_session_id` renamed to `session_id` throughout; `GatewayClientHello` gains `create_new_session` field; `ToolExecutionContext` threaded as parameter (not shared state) for concurrent-session safety. |
 | 13 | Model catalog + provider registry | **Complete** | Provider registry, Gemini, Responses, catalog commands, caps overrides, cached catalog resolution, `skip_catalog_validation` escape hatch, updated CLI (`fetch --pinned`, unfiltered cache) |
@@ -32,7 +32,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 
 ## Identified Gaps in Completed Phases
 
-Three gaps were identified during the initial code review of phases 1-12, and two additional gaps were identified in a subsequent review. All five are documented here and incorporated into the forward plan.
+Two open gaps remain in otherwise completed phases. Both are documented here and incorporated into the phase plan.
 
 ### Gap 1: MemoryRetrieval::upsert_chunks (Phase 9)
 
@@ -43,6 +43,16 @@ Three gaps were identified during the initial code review of phases 1-12, and tw
 **Impact:** The hybrid retrieval pipeline works for conversation-based content. External document ingestion through `upsert_chunks` is not available. This blocks future use cases like codebase indexing or document upload.
 
 **Fix scope:** Implement the method body — embed chunk text via the existing embedding pipeline, insert into `chunks` + `chunks_vec` tables, and update the FTS5 index. All the infrastructure (embedding backends, table schema, SQL migrations) already exists.
+
+### Gap 2: Docker Container Log Capture (Phase 10)
+
+**What was planned:** Container-tier guests should stream container stdout/stderr into host-side runner logs for parity with process-tier diagnostics.
+
+**What was built:** Container lifecycle, bootstrap, and restart handling are implemented, but `bollard` log streaming is not yet wired to persistent runner log files.
+
+**Impact:** Debugging container-tier guest failures is harder because runtime logs are not captured in the same way as process-tier runs.
+
+**Fix scope:** Wire container log streaming into the existing runner log capture pipeline with bounded buffering and lifecycle cleanup.
 
 ## Completed Phases: Detail
 
@@ -250,7 +260,7 @@ Built a complete durable scheduler that lets the LLM create and manage one-off a
 - **Tests**: 19 scheduler store and cadence tests in memory crate; 7 scheduler executor tests in runtime crate with mock store, runner, and notifier
 
 
-## Forward Plan: Phases 14-21
+## Phase Plan: Phases 14-21 (Completed + Remaining)
 
 ### Phase 14: External Channels + Identity Mapping — ✅ Complete
 
@@ -270,7 +280,7 @@ Built a complete durable scheduler that lets the LLM create and manage one-off a
 **Crates:** `runtime`, `gateway`
 **Builds on:** Phases 5, 12, 14
 
-**Scope:**
+**Remaining scope:**
 - `SubagentBrief` struct for bounded context handoffs (goal, key facts, tool scope, budget)
 - Subagent spawning with child `CancellationToken`, per-agent timeout and cost budget
 - Lane-based per-user queueing replacing mutex-based rejection
@@ -369,7 +379,7 @@ Built a complete durable scheduler that lets the LLM create and manage one-off a
 
 ## Gap Resolution Plan
 
-The five identified gaps are incorporated as additional work items:
+The two open gaps are incorporated as additional work items:
 
 | Gap | Affected Phase | Resolution Target | Priority |
 |-----|---------------|-------------------|----------|

@@ -42,7 +42,7 @@ Therefore, this plan uses:
 | Retrieval engine | **libSQL native vector index/query only** | Best performance path; eliminates duplicated retrieval implementations. |
 | Embedding backend | **`model2vec` or `deterministic`** | Keeps semantic quality while preserving a minimal deterministic mode. |
 | Semantic model choice | **Configurable `potion-8m` / `potion-32m`** | Allows tuning quality vs memory/latency footprint. |
-| Default semantic profile | Start with `potion-8m`, keep `potion-32m` selectable | Practical default footprint with upgrade path for better recall. |
+| Default semantic profile | Start with `potion-32m`, keep `potion-8m` selectable | Practical default footprint with downgrade path for lesser memory use. |
 | Fastembed | **Not used** | Reduces dependency surface and binary bloat concerns. |
 | Remote embeddings | **Not used** | Keep architecture fully local for this phase. |
 | Deterministic mode | **Documented and explicit** | Predictable, tiny-dependency fallback for constrained/offline scenarios. |
@@ -124,7 +124,7 @@ Use cases:
    - `potion_32m`
 3. Add validation/defaults:
    - default backend: `model2vec`
-   - default model: `potion_8m`
+   - default model: `potion_32m`
 4. Remove old env-var-based embedding backend selection behavior from config contract.
 5. Add doc comments defining deterministic semantics.
 
@@ -226,7 +226,8 @@ Use cases:
 1. Add small session-scoped scratchpad state in `session_state`.
 2. Add strict JSON-schema tool(s) for scratchpad read/write.
 3. Enforce hard byte/field limits.
-4. Keep scratchpad separate from persistent user memory unless explicitly saved.
+4. Ensure the agent has a specific clear_scratchpad or prune_scratchpad tool. Otherwise, a highly active agent might hit the byte limit and get "stuck" unable to write new sub-tasks.
+5. Keep scratchpad separate from persistent user memory unless explicitly saved.
 
 **Verification:**
 - tool + runtime integration tests for long multi-step tasks.

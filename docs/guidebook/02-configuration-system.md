@@ -51,6 +51,7 @@ pub struct AgentConfig {
     pub catalog: CatalogConfig,        // Catalog resolution and validation
     pub tools: ToolsConfig,
     pub scheduler: SchedulerConfig,    // Scheduled task system (disabled by default)
+    pub agents: BTreeMap<String, AgentDefinition>, // Optional named specialist agents
 }
 ```
 
@@ -89,6 +90,35 @@ pub struct ProviderSelection {
 ```
 
 The `provider` field references a named entry in the provider registry, not a hardcoded provider type. This allows multiple instances of the same provider type (e.g., two OpenAI-compatible endpoints) with different names.
+
+### `AgentDefinition` and selection overrides
+
+Named specialists are defined under `[agents.<name>]` and can optionally override provider/model selection:
+
+```rust
+pub struct AgentDefinition {
+    pub system_prompt: Option<String>,
+    pub system_prompt_file: Option<String>,
+    pub selection: Option<ProviderSelection>,
+    pub tools: Option<Vec<String>>,
+    pub max_turns: Option<usize>,
+    pub max_cost: Option<f64>,
+}
+```
+
+Effective selection rules:
+
+1. **Top-level session (`CreateSession.agent_name`)**
+   - `default` always uses root `[selection]`
+   - named agent with `selection` uses that override
+   - named agent without `selection` inherits root `[selection]`
+
+2. **Delegation (`delegate_to_agent`)**
+   - `default` always uses root `[selection]`
+   - named agent with `selection` uses that override
+   - named agent without `selection` inherits the caller's current provider/model
+
+Only explicit per-agent `selection` overrides are separately validated during bootstrap; inherited paths are covered by root `[selection]` validation.
 
 ### `ProviderConfigs` (Provider Registry)
 
@@ -316,6 +346,7 @@ This can be overridden with the `catalog_provider` field, which is useful when a
 5. **Runtime limits** — `max_turns > 0`, `turn_timeout_secs > 0`
 6. **Memory coherence** — if `remote_url` is set, `auth_token` is required; retrieval weights must sum to `1.0`
 7. **Reliability bounds** — `backoff_base <= backoff_max`, both `> 0`
+8. **Explicit agent override checks** — each `[agents.<name>.selection]` (except `default`) must resolve to a known provider and valid catalog model using the same guardrails as root `[selection]`
 
 If validation fails, the system exits immediately with a descriptive error rather than entering an undefined state.
 
@@ -391,6 +422,23 @@ fts_weight    = 0.3
 [selection]
 provider = "anthropic"
 model = "claude-3-5-sonnet-latest"
+
+# Named specialists (optional)
+[agents.researcher]
+system_prompt = "You are a research specialist."
+tools = ["web_search", "web_fetch", "file_read"]
+max_turns = 12
+max_cost = 1.0
+
+[agents.researcher.selection]
+provider = "openai"
+model = "gpt-4o-mini"
+
+[agents.coder]
+system_prompt = "You are a coding specialist."
+tools = ["file_read", "file_edit", "file_write", "shell_exec"]
+# No [agents.coder.selection] => inherits root [selection] for top-level,
+# and caller selection during delegate_to_agent.
 
 [reliability]
 max_attempts    = 3

@@ -22,9 +22,9 @@ use tools::{
     register_delegation_tools, register_memory_tools, register_scheduler_tools,
 };
 use types::{
-    AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
-    MemoryRetrieval, ModelCatalog, ModelDescriptor, Provider, ProviderError, ProviderId,
-    RunnerBootstrapEnvelope, StartupStatusReport, WebSearchConfig,
+    AgentConfig, AgentDefinition, BootstrapEnvelopeError, CatalogProvider, ConfigError,
+    MemoryError, MemoryRetrieval, ModelCatalog, ModelDescriptor, Provider, ProviderError,
+    ProviderId, ProviderSelection, RunnerBootstrapEnvelope, StartupStatusReport, WebSearchConfig,
 };
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
@@ -320,10 +320,13 @@ pub fn resolve_model_catalog(provider_id: &ProviderId) -> Result<ModelCatalog, B
     })
 }
 
-pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, BootstrapError> {
+fn build_reliable_provider_for_selection(
+    config: &AgentConfig,
+    selection: &ProviderSelection,
+) -> Result<ReliableProvider, BootstrapError> {
     config.validate()?;
 
-    let provider_id = config.selection.provider.clone();
+    let provider_id = selection.provider.clone();
     let entry = config.providers.resolve(&provider_id.0)?;
     let mut model_catalog = resolve_model_catalog(&provider_id)?;
 
@@ -334,15 +337,15 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
     // If the model is not in the catalog and skip_catalog_validation is on,
     // insert a synthetic descriptor so downstream validation passes.
     let model_found = model_catalog
-        .get(&catalog_provider, &config.selection.model)
+        .get(&catalog_provider, &selection.model)
         .is_some();
 
     if !model_found {
         if skip_validation {
             let caps = entry.unknown_model_caps();
-            let synthetic = ModelDescriptor::default_for_unknown(&config.selection.model.0, &caps);
+            let synthetic = ModelDescriptor::default_for_unknown(&selection.model.0, &caps);
             tracing::info!(
-                model = %config.selection.model,
+                model = %selection.model,
                 catalog_provider = %catalog_provider_id,
                 "model not in catalog; using synthetic descriptor (skip_catalog_validation=true)"
             );
@@ -361,10 +364,10 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
                 });
             provider_entry
                 .models
-                .insert(config.selection.model.0.clone(), synthetic);
+                .insert(selection.model.0.clone(), synthetic);
         } else {
             return Err(ConfigError::UnknownModelForCatalogProvider {
-                model: config.selection.model.0.clone(),
+                model: selection.model.0.clone(),
                 catalog_provider: catalog_provider_id.clone(),
             }
             .into());
@@ -374,10 +377,10 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
     // Check for deprecated models via the Oxydra overlay and emit a warning.
     if model_catalog
         .caps_overrides
-        .is_deprecated(&catalog_provider_id, &config.selection.model.0)
+        .is_deprecated(&catalog_provider_id, &selection.model.0)
     {
         tracing::warn!(
-            model = %config.selection.model,
+            model = %selection.model,
             catalog_provider = %catalog_provider_id,
             "selected model is deprecated; consider switching to a supported alternative"
         );
@@ -388,7 +391,7 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
     // Skip the separate capabilities validation when using a synthetic
     // descriptor — the defaults already provide what's needed.
     if !skip_validation || model_found {
-        inner.capabilities(&config.selection.model)?;
+        inner.capabilities(&selection.model)?;
     }
 
     Ok(ReliableProvider::new(
@@ -401,8 +404,21 @@ pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider,
     ))
 }
 
+pub fn build_reliable_provider(config: &AgentConfig) -> Result<ReliableProvider, BootstrapError> {
+    build_reliable_provider_for_selection(config, &config.selection)
+}
+
 pub fn build_provider(config: &AgentConfig) -> Result<Box<dyn Provider>, BootstrapError> {
-    Ok(Box::new(build_reliable_provider(config)?))
+    build_provider_for_selection(config, &config.selection)
+}
+
+pub fn build_provider_for_selection(
+    config: &AgentConfig,
+    selection: &ProviderSelection,
+) -> Result<Box<dyn Provider>, BootstrapError> {
+    Ok(Box::new(build_reliable_provider_for_selection(
+        config, selection,
+    )?))
 }
 
 /// Well-known filename for the local memory database inside the `.oxydra/`
@@ -543,21 +559,12 @@ pub async fn bootstrap_vm_runtime_with_paths(
     // Validate agent definitions (if any) against available providers/tools and local prompt files.
     if !config.agents.is_empty() {
         for (agent_name, def) in config.agents.iter() {
-            if let Some(selection) = &def.selection {
-                // Validate provider exists in the registry
-                config
-                    .providers
-                    .resolve(&selection.provider.0)
-                    .map_err(|_| BootstrapError::UnsupportedProvider {
-                        provider: selection.provider.0.clone(),
-                    })?;
-                if selection.model.0.trim().is_empty() {
-                    return Err(BootstrapError::ConfigValidation(
-                        ConfigError::EmptyModelForProvider {
-                            provider: selection.provider.0.clone(),
-                        },
-                    ));
-                }
+            // Explicit per-agent selection overrides must pass the same
+            // provider/catalog guardrails as root [selection].
+            if agent_name != "default"
+                && let Some(selection) = &def.selection
+            {
+                let _ = build_reliable_provider_for_selection(&config, selection)?;
             }
 
             if let Some(tool_list) = &def.tools {
@@ -593,7 +600,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
     // Register delegation tool so it is visible in the runtime tool registry.
     // The actual executor is still only wired when agent definitions exist; the
     // tool will return a clear error if invoked without a concrete executor.
-    register_delegation_tools(&mut registry);
+    register_delegation_tools(&mut registry, &config.agents);
     tracing::info!("delegation tools registered");
 
     let startup_status = availability.startup_status(bootstrap.as_ref());
@@ -603,6 +610,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
         bootstrap.as_ref(),
         scheduler_store.is_some(),
         memory.is_some(),
+        &config.agents,
     );
 
     // Build session store for gateway session persistence.
@@ -807,6 +815,7 @@ fn build_system_prompt(
     bootstrap: Option<&RunnerBootstrapEnvelope>,
     scheduler_enabled: bool,
     memory_enabled: bool,
+    agents: &BTreeMap<String, AgentDefinition>,
 ) -> Option<String> {
     let sandbox_tier = bootstrap.map_or(types::SandboxTier::Process, |b| b.sandbox_tier);
     let shell_note = if sandbox_tier == types::SandboxTier::Process {
@@ -842,6 +851,46 @@ fn build_system_prompt(
         ""
     };
 
+    let specialists_note = if agents.is_empty() {
+        String::new()
+    } else {
+        let mut lines = vec![
+            "\n\n## Specialist Agents\n\n\
+             You can delegate focused tasks with `delegate_to_agent`.\n\
+             Specialists can run on different provider/model selections when configured.\n\
+             Available specialists:"
+                .to_owned(),
+        ];
+        for (name, definition) in agents {
+            if name == "default" {
+                continue;
+            }
+            let summary = definition
+                .system_prompt
+                .as_deref()
+                .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
+                .map(|line| line.trim().to_owned())
+                .or_else(|| {
+                    definition
+                        .system_prompt_file
+                        .as_ref()
+                        .map(|path| format!("uses prompt file `{path}`"))
+                })
+                .unwrap_or_else(|| "specialist agent".to_owned());
+            let tool_scope = definition
+                .tools
+                .as_ref()
+                .map(|tools| tools.join(", "))
+                .unwrap_or_else(|| "all tools".to_owned());
+            lines.push(format!("- `{name}` — {summary} (tools: {tool_scope})"));
+        }
+        if lines.len() == 1 {
+            String::new()
+        } else {
+            lines.join("\n")
+        }
+    };
+
     let default_prompt = format!(
         "You are Oxydra - an AI assistant with access to a sandboxed workspace.\n\n\
          ## File System\n\n\
@@ -851,7 +900,7 @@ fn build_system_prompt(
          - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
          When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
          always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
-         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}{scheduler_note}{memory_note}"
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}{scheduler_note}{memory_note}{specialists_note}"
     );
 
     // Look for a SYSTEM.md override/append file in the config search paths.
@@ -922,8 +971,8 @@ mod tests {
 
     use tokio::sync::Mutex as AsyncMutex;
     use types::{
-        ModelId, ProviderId, RunnerBootstrapEnvelope, SandboxTier, SidecarEndpoint,
-        SidecarTransport, StartupDegradedReasonCode,
+        AgentDefinition, ModelId, ProviderId, ProviderSelection, RunnerBootstrapEnvelope,
+        SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
     };
 
     use super::*;
@@ -1243,7 +1292,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_includes_memory_guidance_when_memory_is_enabled() {
         let root = temp_dir("system-prompt-memory-enabled");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true)
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
             .expect("system prompt should be generated");
         assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("corrected procedures"));
@@ -1255,10 +1304,38 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_omits_memory_guidance_when_memory_is_disabled() {
         let root = temp_dir("system-prompt-memory-disabled");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, false)
+        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new())
             .expect("system prompt should be generated");
         assert!(!prompt.contains("## Memory"));
         assert!(!prompt.contains("corrected procedures"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_includes_specialist_agent_note() {
+        let root = temp_dir("system-prompt-specialists");
+        let paths = test_paths(&root);
+        let mut agents = BTreeMap::new();
+        agents.insert(
+            "researcher".to_owned(),
+            AgentDefinition {
+                system_prompt: Some("Research specialist for web and docs.".to_owned()),
+                system_prompt_file: None,
+                selection: Some(ProviderSelection {
+                    provider: ProviderId::from("anthropic"),
+                    model: ModelId::from("claude-3-5-haiku-latest"),
+                }),
+                tools: Some(vec!["web_search".to_owned(), "web_fetch".to_owned()]),
+                max_turns: None,
+                max_cost: None,
+            },
+        );
+        let prompt = build_system_prompt(&paths, None, false, false, &agents)
+            .expect("system prompt should be generated");
+        assert!(prompt.contains("## Specialist Agents"));
+        assert!(prompt.contains("delegate_to_agent"));
+        assert!(prompt.contains("different provider/model selections"));
+        assert!(prompt.contains("`researcher`"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1535,6 +1612,86 @@ api_key = "test-openai-key"
             ),
             "expected UnknownModelForCatalogProvider but got: {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_unknown_provider_in_agent_selection() {
+        let _lock = async_test_lock().lock().await;
+        let root = temp_dir("agent-selection-unknown-provider");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE_NAME,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[providers.registry.openai]
+provider_type = "openai"
+api_key = "test-openai-key"
+[agents.researcher.selection]
+provider = "missing-provider"
+model = "gpt-4o-mini"
+"#,
+        );
+
+        let error = match bootstrap_vm_runtime_with_paths(
+            &paths,
+            None,
+            None,
+            CliOverrides::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("unknown agent provider should fail bootstrap"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            BootstrapError::ConfigValidation(ConfigError::UnsupportedProvider { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_unknown_model_in_agent_selection() {
+        let _lock = async_test_lock().lock().await;
+        let root = temp_dir("agent-selection-unknown-model");
+        let paths = test_paths(&root);
+        write_config(
+            &paths.workspace_dir,
+            AGENT_CONFIG_FILE_NAME,
+            r#"
+config_version = "1.0.0"
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+[providers.registry.openai]
+provider_type = "openai"
+api_key = "test-openai-key"
+[agents.researcher.selection]
+provider = "openai"
+model = "definitely-not-a-real-model"
+"#,
+        );
+
+        let error = match bootstrap_vm_runtime_with_paths(
+            &paths,
+            None,
+            None,
+            CliOverrides::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("unknown agent model should fail bootstrap"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            BootstrapError::ConfigValidation(ConfigError::UnknownModelForCatalogProvider { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     /// `openai-responses` provider type validates models against the `"openai"`

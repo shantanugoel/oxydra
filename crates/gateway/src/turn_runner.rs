@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use super::*;
 use runtime::ScheduledTurnRunner;
-use types::{ChannelCapabilities, InlineMedia};
+use types::{AgentDefinition, ChannelCapabilities, InlineMedia, ProviderSelection};
 
 /// User-submitted content for a single turn (text + optional media).
 pub struct UserTurnInput {
@@ -15,6 +17,8 @@ pub struct UserTurnInput {
 pub struct TurnOrigin {
     pub channel_id: Option<String>,
     pub channel_context_id: Option<String>,
+    /// Agent name associated with the active session.
+    pub agent_name: Option<String>,
     /// Capabilities of the channel the user is connected through.
     pub channel_capabilities: Option<ChannelCapabilities>,
 }
@@ -34,25 +38,49 @@ pub trait GatewayTurnRunner: Send + Sync {
 
 pub struct RuntimeGatewayTurnRunner {
     runtime: Arc<AgentRuntime>,
-    provider: ProviderId,
-    model: ModelId,
+    default_selection: ProviderSelection,
+    agent_selections: BTreeMap<String, ProviderSelection>,
     contexts: Mutex<HashMap<String, Context>>,
 }
 
 impl RuntimeGatewayTurnRunner {
-    pub fn new(runtime: Arc<AgentRuntime>, provider: ProviderId, model: ModelId) -> Self {
+    pub fn new(
+        runtime: Arc<AgentRuntime>,
+        default_selection: ProviderSelection,
+        agents: BTreeMap<String, AgentDefinition>,
+    ) -> Self {
+        let mut agent_selections = BTreeMap::new();
+        for (agent_name, definition) in agents {
+            if agent_name == "default" {
+                continue;
+            }
+            if let Some(selection) = definition.selection {
+                agent_selections.insert(agent_name, selection);
+            }
+        }
         Self {
             runtime,
-            provider,
-            model,
+            default_selection,
+            agent_selections,
             contexts: Mutex::new(HashMap::new()),
         }
     }
 
-    fn base_context(&self) -> Context {
+    fn selection_for_agent(&self, agent_name: &str) -> ProviderSelection {
+        if agent_name == "default" {
+            return self.default_selection.clone();
+        }
+        self.agent_selections
+            .get(agent_name)
+            .cloned()
+            .unwrap_or_else(|| self.default_selection.clone())
+    }
+
+    fn base_context(&self, agent_name: &str) -> Context {
+        let selection = self.selection_for_agent(agent_name);
         Context {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
+            provider: selection.provider,
+            model: selection.model,
             tools: Vec::new(),
             messages: Vec::new(),
         }
@@ -74,21 +102,30 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
             prompt,
             attachments,
         } = input;
-        let tool_context = types::ToolExecutionContext {
-            user_id: Some(user_id.to_owned()),
-            session_id: Some(session_id.to_owned()),
-            channel_capabilities: origin.channel_capabilities,
-            event_sender: None,
-            channel_id: origin.channel_id,
-            channel_context_id: origin.channel_context_id,
-        };
+        let TurnOrigin {
+            channel_id,
+            channel_context_id,
+            agent_name,
+            channel_capabilities,
+        } = origin;
+        let effective_agent_name = agent_name.as_deref().unwrap_or("default");
 
         let mut context = {
             let mut contexts = self.contexts.lock().await;
             contexts
                 .entry(session_id.to_owned())
-                .or_insert_with(|| self.base_context())
+                .or_insert_with(|| self.base_context(effective_agent_name))
                 .clone()
+        };
+        let tool_context = types::ToolExecutionContext {
+            user_id: Some(user_id.to_owned()),
+            session_id: Some(session_id.to_owned()),
+            provider: Some(context.provider.clone()),
+            model: Some(context.model.clone()),
+            channel_capabilities,
+            event_sender: None,
+            channel_id,
+            channel_context_id,
         };
 
         // Strip attachment bytes from older user messages to prevent unbounded

@@ -99,6 +99,48 @@ impl AgentConfig {
         }
         Ok(())
     }
+
+    /// Resolve the effective provider/model selection for a top-level session.
+    ///
+    /// Rules:
+    /// - `default` always uses the root `[selection]`
+    /// - Named agent with `selection` uses that override
+    /// - Named agent without `selection` inherits root `[selection]`
+    /// - Unknown agent names fall back to root `[selection]`
+    pub fn top_level_selection_for_agent(&self, agent_name: &str) -> ProviderSelection {
+        if agent_name == "default" {
+            return self.selection.clone();
+        }
+        self.agents
+            .get(agent_name)
+            .and_then(|definition| definition.selection.clone())
+            .unwrap_or_else(|| self.selection.clone())
+    }
+
+    /// Resolve the effective provider/model selection for delegation.
+    ///
+    /// Rules:
+    /// - `default` always uses the root `[selection]`
+    /// - Named agent with `selection` uses that override
+    /// - Named agent without `selection` inherits caller selection when present
+    /// - Otherwise falls back to root `[selection]`
+    pub fn delegation_selection_for_agent(
+        &self,
+        agent_name: &str,
+        caller_selection: Option<&ProviderSelection>,
+    ) -> ProviderSelection {
+        if agent_name == "default" {
+            return self.selection.clone();
+        }
+        if let Some(definition) = self.agents.get(agent_name)
+            && let Some(selection) = &definition.selection
+        {
+            return selection.clone();
+        }
+        caller_selection
+            .cloned()
+            .unwrap_or_else(|| self.selection.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1060,6 +1102,81 @@ mod tests {
             result,
             Err(ConfigError::UnsupportedProvider { provider }) if provider == "nonexistent"
         ));
+    }
+
+    #[test]
+    fn top_level_selection_uses_named_agent_override() {
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai");
+        config.selection.model = ModelId::from("gpt-4o-mini");
+        config.agents.insert(
+            "researcher".to_owned(),
+            AgentDefinition {
+                system_prompt: None,
+                system_prompt_file: None,
+                selection: Some(ProviderSelection {
+                    provider: ProviderId::from("anthropic"),
+                    model: ModelId::from("claude-3-5-sonnet-latest"),
+                }),
+                tools: None,
+                max_turns: None,
+                max_cost: None,
+            },
+        );
+
+        let selection = config.top_level_selection_for_agent("researcher");
+        assert_eq!(selection.provider, ProviderId::from("anthropic"));
+        assert_eq!(selection.model, ModelId::from("claude-3-5-sonnet-latest"));
+    }
+
+    #[test]
+    fn top_level_selection_for_default_always_uses_root() {
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai");
+        config.selection.model = ModelId::from("gpt-4o-mini");
+        config.agents.insert(
+            "default".to_owned(),
+            AgentDefinition {
+                system_prompt: None,
+                system_prompt_file: None,
+                selection: Some(ProviderSelection {
+                    provider: ProviderId::from("anthropic"),
+                    model: ModelId::from("claude-3-5-sonnet-latest"),
+                }),
+                tools: None,
+                max_turns: None,
+                max_cost: None,
+            },
+        );
+
+        let selection = config.top_level_selection_for_agent("default");
+        assert_eq!(selection.provider, ProviderId::from("openai"));
+        assert_eq!(selection.model, ModelId::from("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn delegation_selection_inherits_caller_when_agent_has_no_override() {
+        let mut config = AgentConfig::default();
+        config.selection.provider = ProviderId::from("openai");
+        config.selection.model = ModelId::from("gpt-4o-mini");
+        config.agents.insert(
+            "coder".to_owned(),
+            AgentDefinition {
+                system_prompt: None,
+                system_prompt_file: None,
+                selection: None,
+                tools: None,
+                max_turns: None,
+                max_cost: None,
+            },
+        );
+
+        let caller = ProviderSelection {
+            provider: ProviderId::from("anthropic"),
+            model: ModelId::from("claude-3-5-haiku-latest"),
+        };
+        let selection = config.delegation_selection_for_agent("coder", Some(&caller));
+        assert_eq!(selection, caller);
     }
 
     #[test]

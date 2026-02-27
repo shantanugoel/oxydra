@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -6,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     FunctionDecl, SafetyTier, Tool, ToolError, ToolExecutionContext, execution_failed, parse_args,
 };
-use types::DelegationRequest;
+use types::{AgentDefinition, DelegationRequest, ProviderSelection};
 
 pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
 
@@ -19,18 +21,47 @@ struct DelegateArgs {
     max_cost: Option<f64>,
 }
 
-pub struct DelegateToAgentTool;
-
-impl DelegateToAgentTool {
-    pub fn new() -> Self {
-        Self {}
-    }
+pub struct DelegateToAgentTool {
+    schema: FunctionDecl,
 }
 
-#[async_trait]
-impl Tool for DelegateToAgentTool {
-    fn schema(&self) -> FunctionDecl {
-        FunctionDecl::new(
+impl DelegateToAgentTool {
+    pub fn new(agents: &BTreeMap<String, AgentDefinition>) -> Self {
+        let mut supported_agents = Vec::new();
+        let mut agent_descriptions = Vec::new();
+        for (name, definition) in agents {
+            supported_agents.push(name.clone());
+            let description = definition
+                .system_prompt
+                .as_deref()
+                .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
+                .map(|line| line.trim().to_owned())
+                .or_else(|| {
+                    definition
+                        .system_prompt_file
+                        .as_ref()
+                        .map(|path| format!("uses prompt file `{path}`"))
+                })
+                .unwrap_or_else(|| "specialist agent".to_owned());
+            agent_descriptions.push(format!("{name}: {description}"));
+        }
+        let agent_name_schema = if supported_agents.is_empty() {
+            json!({
+                "type": "string",
+                "description": "Name of the specialist agent to delegate to"
+            })
+        } else {
+            json!({
+                "type": "string",
+                "enum": supported_agents,
+                "description": format!(
+                    "Name of the specialist agent to delegate to. Available: {}",
+                    agent_descriptions.join("; ")
+                )
+            })
+        };
+
+        let schema = FunctionDecl::new(
             DELEGATE_TO_AGENT_TOOL_NAME,
             Some(
                 "Delegate the given goal to a named specialist agent. Returns the agent's output."
@@ -40,14 +71,23 @@ impl Tool for DelegateToAgentTool {
                 "type": "object",
                 "required": ["agent_name", "goal"],
                 "properties": {
-                    "agent_name": { "type": "string", "description": "Name of the specialist agent to delegate to" },
+                    "agent_name": agent_name_schema,
                     "goal": { "type": "string", "description": "What the subagent should accomplish" },
                     "key_facts": { "type": "array", "items": { "type": "string" }, "description": "Optional key facts to prime the subagent" },
                     "max_turns": { "type": "integer", "minimum": 1, "description": "Optional max turns for the subagent" },
                     "max_cost": { "type": "number", "description": "Optional max cost for the subagent" }
                 }
             }),
-        )
+        );
+
+        Self { schema }
+    }
+}
+
+#[async_trait]
+impl Tool for DelegateToAgentTool {
+    fn schema(&self) -> FunctionDecl {
+        self.schema.clone()
     }
 
     async fn execute(
@@ -75,6 +115,13 @@ impl Tool for DelegateToAgentTool {
             parent_user_id: user_id,
             agent_name: request.agent_name,
             goal: request.goal,
+            caller_selection: match (&context.provider, &context.model) {
+                (Some(provider), Some(model)) => Some(ProviderSelection {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                }),
+                _ => None,
+            },
             key_facts: request.key_facts.unwrap_or_default(),
             max_turns: request.max_turns,
             max_cost: request.max_cost,
@@ -107,6 +154,12 @@ impl Tool for DelegateToAgentTool {
     }
 }
 
-pub fn register_delegation_tools(registry: &mut crate::ToolRegistry) {
-    registry.register(DELEGATE_TO_AGENT_TOOL_NAME, DelegateToAgentTool::new());
+pub fn register_delegation_tools(
+    registry: &mut crate::ToolRegistry,
+    agents: &BTreeMap<String, AgentDefinition>,
+) {
+    registry.register(
+        DELEGATE_TO_AGENT_TOOL_NAME,
+        DelegateToAgentTool::new(agents),
+    );
 }

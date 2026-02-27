@@ -382,7 +382,8 @@ impl AgentRuntime {
     }
 
     fn resolve_max_context_tokens(&self, context: &Context) -> Result<u64, RuntimeError> {
-        let caps = self.provider.capabilities(&context.model)?;
+        let provider = self.provider_for_context(context)?;
+        let caps = provider.capabilities(&context.model)?;
         let max_context = caps
             .max_context_tokens
             .unwrap_or(self.limits.context_budget.fallback_max_context_tokens);

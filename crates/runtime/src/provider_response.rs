@@ -7,10 +7,11 @@ impl AgentRuntime {
         cancellation: &CancellationToken,
         stream_events: Option<RuntimeStreamEventSender>,
     ) -> Result<Response, RuntimeError> {
-        let caps = self.provider.capabilities(&context.model)?;
+        let provider = self.provider_for_context(context)?;
+        let caps = provider.capabilities(&context.model)?;
         if caps.supports_streaming {
             match self
-                .stream_response(context, cancellation, stream_events.clone())
+                .stream_response(provider, context, cancellation, stream_events.clone())
                 .await
             {
                 Ok(response) => return Ok(response),
@@ -21,11 +22,13 @@ impl AgentRuntime {
                 }
             }
         }
-        self.complete_response(context, cancellation).await
+        self.complete_response(provider, context, cancellation)
+            .await
     }
 
     pub(crate) async fn stream_response(
         &self,
+        provider: &dyn Provider,
         context: &Context,
         cancellation: &CancellationToken,
         stream_events: Option<RuntimeStreamEventSender>,
@@ -38,7 +41,7 @@ impl AgentRuntime {
             _ = cancellation.cancelled() => return Err(StreamCollectError::Cancelled),
             timed = tokio::time::timeout(
                 self.limits.turn_timeout,
-                self.provider.stream(context, self.stream_buffer_size),
+                provider.stream(context, self.stream_buffer_size),
             ) => match timed {
                 Ok(stream) => stream.map_err(StreamCollectError::Provider)?,
                 Err(_) => return Err(StreamCollectError::TurnTimedOut),
@@ -132,6 +135,7 @@ impl AgentRuntime {
 
     pub(crate) async fn complete_response(
         &self,
+        provider: &dyn Provider,
         context: &Context,
         cancellation: &CancellationToken,
     ) -> Result<Response, RuntimeError> {
@@ -140,7 +144,7 @@ impl AgentRuntime {
         }
         tokio::select! {
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
-            timed = tokio::time::timeout(self.limits.turn_timeout, self.provider.complete(context)) => match timed {
+            timed = tokio::time::timeout(self.limits.turn_timeout, provider.complete(context)) => match timed {
                 Ok(response) => response.map_err(RuntimeError::from),
                 Err(_) => Err(RuntimeError::BudgetExceeded),
             }

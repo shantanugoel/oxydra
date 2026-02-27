@@ -8,7 +8,7 @@ This chapter describes the planned design for subagent spawning, delegation, sta
 
 ## Subagent Delegation Model
 
-Status (update): Partial implementation complete — Agent definitions and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap and the VM wires a `RuntimeDelegationExecutor` into the global executor at startup. This provides a working end-to-end delegation path (parent → subagent → result) as described below. Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
+Status (update): Partial implementation complete — Agent definitions, agent-specific model/provider routing, and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap with config-aware specialist schema, top-level sessions route by `agent_name`, and delegation resolves explicit vs inherited selection (`default` always root). Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
 
 
 

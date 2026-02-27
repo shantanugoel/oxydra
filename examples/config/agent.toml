@@ -17,6 +17,30 @@ config_version = "1.0.0"
 provider = "openai"
 model    = "gpt-4o-mini"
 
+# --- Specialist agents (optional) ---
+# Sessions created with agent_name route to that agent's effective selection:
+# - explicit [agents.<name>.selection] => use that provider/model
+# - no [agents.<name>.selection] => inherit root [selection]
+# - "default" always uses root [selection]
+#
+# Delegation (`delegate_to_agent`) uses the same override semantics, except
+# agents without a selection inherit the caller's current provider/model.
+
+# [agents.researcher]
+# system_prompt = "You are a research specialist focused on gathering and summarizing evidence."
+# tools = ["web_search", "web_fetch", "file_read"]
+# max_turns = 12
+# max_cost = 1.0
+#
+# [agents.researcher.selection]
+# provider = "anthropic"
+# model = "claude-3-5-haiku-latest"
+#
+# [agents.coder]
+# system_prompt = "You are a coding specialist focused on implementation and debugging."
+# tools = ["file_read", "file_edit", "file_write", "shell_exec"]
+# # No [agents.coder.selection] block: inherits caller/root selection.
+
 # --- Runtime limits ---
 [runtime]
 turn_timeout_secs = 60   # Max seconds per LLM call

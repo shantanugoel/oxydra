@@ -205,11 +205,12 @@ Each turn submission carries a `TurnOrigin` (defined in `gateway/src/turn_runner
 pub struct TurnOrigin {
     pub channel_id: Option<String>,
     pub channel_context_id: Option<String>,
+    pub agent_name: Option<String>,
     pub channel_capabilities: Option<ChannelCapabilities>,
 }
 ```
 
-This origin is threaded through `ToolExecutionContext` so that tools like `schedule_create` can capture which channel the user was in when they created the schedule. The gateway provides `submit_turn_from_channel()` for external channels to submit turns with their channel identity.
+This origin is threaded through `ToolExecutionContext` so that tools like `schedule_create` can capture which channel the user was in when they created the schedule. It also carries the session `agent_name` used to select the effective provider/model route for the turn. The gateway provides `submit_turn_from_channel()` for external channels to submit turns with their channel identity.
 
 ## Session Lifecycle UX
 
@@ -230,6 +231,7 @@ The gateway supports interactive session management through dedicated protocol f
 ### Gateway Handling
 
 When `CreateSession` arrives, the gateway creates a new UUID v7 session, persists it to the session store (with optional display name), and switches the connection's active broadcast subscription to the new session. The old session remains in memory for other connections.
+If `agent_name` is provided, turns in that session are executed using that agent's effective provider/model selection route (explicit agent override or inherited root/default behavior).
 
 When `ListSessions` arrives, the gateway reads from the session store, filters out subagent sessions (those with `parent_session_id`) unless `include_subagent_sessions` is true, and returns `GatewaySessionSummary` records.
 

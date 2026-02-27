@@ -6,7 +6,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
-use types::{InlineMedia, ProviderError, StreamItem};
+use types::{InlineMedia, ProviderError, ProviderId, StreamItem};
 use url::Url;
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -14,7 +14,7 @@ type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 #[derive(Clone)]
 struct ScriptedTurnRunner {
     scripted_turns: Arc<Mutex<VecDeque<ScriptedTurn>>>,
-    recorded_calls: Arc<Mutex<Vec<(String, String)>>>,
+    recorded_calls: Arc<Mutex<Vec<(String, String, String)>>>,
 }
 
 impl ScriptedTurnRunner {
@@ -25,7 +25,7 @@ impl ScriptedTurnRunner {
         }
     }
 
-    async fn recorded_calls(&self) -> Vec<(String, String)> {
+    async fn recorded_calls(&self) -> Vec<(String, String, String)> {
         self.recorded_calls.lock().await.clone()
     }
 }
@@ -39,12 +39,13 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
         input: turn_runner::UserTurnInput,
         cancellation: CancellationToken,
         delta_sender: mpsc::UnboundedSender<StreamItem>,
-        _origin: turn_runner::TurnOrigin,
+        origin: turn_runner::TurnOrigin,
     ) -> Result<Response, RuntimeError> {
-        self.recorded_calls
-            .lock()
-            .await
-            .push((session_id.to_owned(), input.prompt));
+        self.recorded_calls.lock().await.push((
+            session_id.to_owned(),
+            origin.agent_name.unwrap_or_else(|| "default".to_owned()),
+            input.prompt,
+        ));
 
         let scripted_turn = self
             .scripted_turns
@@ -1420,6 +1421,69 @@ async fn create_session_frame_creates_and_switches_to_new_session() {
         "expected at least 2 sessions, got {}",
         sessions.len()
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn create_session_with_agent_name_routes_turn_with_that_agent() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![ScriptedTurn::completed(
+        vec![(Duration::from_millis(0), "r")],
+        "done",
+    )]));
+    let runtime_recorder = Arc::clone(&runtime);
+    let (address, server_task, _store) =
+        spawn_gateway_with_session_store(runtime as Arc<dyn GatewayTurnRunner>).await;
+    let mut socket = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::CreateSession(types::GatewayCreateSession {
+            request_id: "req-new".to_owned(),
+            display_name: None,
+            agent_name: Some("researcher".to_owned()),
+        }),
+    )
+    .await;
+    let session_id = match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::SessionCreated(created) => {
+            assert_eq!(created.agent_name, "researcher");
+            created.session.session_id
+        }
+        other => panic!("expected session_created, got {other:?}"),
+    };
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn".to_owned(),
+            session_id,
+            turn_id: "turn-1".to_owned(),
+            prompt: "hello".to_owned(),
+            attachments: Vec::new(),
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket).await;
+    let _ = receive_server_frame(&mut socket).await;
+    let _ = receive_server_frame(&mut socket).await;
+
+    let calls = runtime_recorder.recorded_calls().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, "researcher");
 
     server_task.abort();
 }

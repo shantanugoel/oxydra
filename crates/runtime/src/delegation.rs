@@ -4,8 +4,11 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use types::DelegationProgressSender;
-use types::{AgentDefinition, DelegationRequest, DelegationResult, DelegationStatus, RuntimeError};
-use types::{Context, Message, MessageRole, ModelId, ProviderId};
+use types::{
+    AgentDefinition, DelegationRequest, DelegationResult, DelegationStatus, ProviderSelection,
+    RuntimeError, ToolExecutionContext,
+};
+use types::{Context, Message, MessageRole};
 
 use crate::AgentRuntime;
 
@@ -14,19 +17,46 @@ use crate::AgentRuntime;
 /// This implementation constructs a fresh context, injects the agent's
 /// system prompt (if provided) and the delegation goal, then executes a
 /// synchronous run of the parent's AgentRuntime for a dedicated subagent
-/// session id. It intentionally reuses the parent's provider, tool registry
-/// and limits. For now tool allowlists are not enforced (all tools are
+/// session id. It reuses the parent's runtime with provider/model routes
+/// selected per target agent (explicit override, caller inheritance, or root
+/// fallback). For now tool allowlists are not enforced (all tools are
 /// available to subagents). The implementation is intentionally simple but
 /// functional for the common case.
 pub struct RuntimeDelegationExecutor {
     runtime: Arc<AgentRuntime>,
     agents: BTreeMap<String, AgentDefinition>,
+    root_selection: ProviderSelection,
 }
 
 impl RuntimeDelegationExecutor {
-    pub fn new(runtime: Arc<AgentRuntime>, agents: BTreeMap<String, AgentDefinition>) -> Self {
-        Self { runtime, agents }
+    pub fn new(
+        runtime: Arc<AgentRuntime>,
+        agents: BTreeMap<String, AgentDefinition>,
+        root_selection: ProviderSelection,
+    ) -> Self {
+        Self {
+            runtime,
+            agents,
+            root_selection,
+        }
     }
+}
+
+fn resolve_delegation_selection(
+    root_selection: &ProviderSelection,
+    agent_name: &str,
+    agent_def: &AgentDefinition,
+    caller_selection: Option<&ProviderSelection>,
+) -> ProviderSelection {
+    if agent_name == "default" {
+        return root_selection.clone();
+    }
+    if let Some(selection) = &agent_def.selection {
+        return selection.clone();
+    }
+    caller_selection
+        .cloned()
+        .unwrap_or_else(|| root_selection.clone())
 }
 
 #[async_trait]
@@ -49,11 +79,16 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
         };
 
         // Build a fresh context for the subagent run. Use a conservative
-        // default provider/model so provider-specific behaviour has reasonable
-        // fallbacks; the runtime's provider will be used for actual calls.
+        // provider/model route based on agent-specific selection semantics.
+        let effective_selection = resolve_delegation_selection(
+            &self.root_selection,
+            &request.agent_name,
+            agent_def,
+            request.caller_selection.as_ref(),
+        );
         let mut ctx = Context {
-            provider: ProviderId::from("openai"),
-            model: ModelId::from("gpt-4o-mini"),
+            provider: effective_selection.provider,
+            model: effective_selection.model,
             tools: Vec::new(),
             messages: Vec::new(),
         };
@@ -108,9 +143,24 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
         // parent's runtime rather than constructing a new AgentRuntime so we
         // preserve provider/tool wiring. The cancellation token passed is the
         // parent's token so cancellation cascades.
+        let tool_context = ToolExecutionContext {
+            user_id: Some(request.parent_user_id.clone()),
+            session_id: Some(subagent_session_id.clone()),
+            provider: Some(ctx.provider.clone()),
+            model: Some(ctx.model.clone()),
+            channel_capabilities: None,
+            event_sender: None,
+            channel_id: None,
+            channel_context_id: None,
+        };
         let response = self
             .runtime
-            .run_session_for_session(&subagent_session_id, &mut ctx, parent_cancellation)
+            .run_session_for_session_with_tool_context(
+                &subagent_session_id,
+                &mut ctx,
+                parent_cancellation,
+                &tool_context,
+            )
             .await;
 
         match response {
@@ -122,5 +172,69 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
             }),
             Err(err) => Err(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::{ModelId, ProviderId};
+
+    fn selection(provider: &str, model: &str) -> ProviderSelection {
+        ProviderSelection {
+            provider: ProviderId::from(provider),
+            model: ModelId::from(model),
+        }
+    }
+
+    #[test]
+    fn delegation_selection_uses_agent_override_when_present() {
+        let root = selection("openai", "gpt-4o-mini");
+        let caller = selection("anthropic", "claude-3-5-haiku-latest");
+        let agent = AgentDefinition {
+            system_prompt: None,
+            system_prompt_file: None,
+            selection: Some(selection("gemini", "gemini-2.5-pro")),
+            tools: None,
+            max_turns: None,
+            max_cost: None,
+        };
+
+        let effective = resolve_delegation_selection(&root, "researcher", &agent, Some(&caller));
+        assert_eq!(effective, selection("gemini", "gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn delegation_selection_inherits_caller_when_agent_has_no_override() {
+        let root = selection("openai", "gpt-4o-mini");
+        let caller = selection("anthropic", "claude-3-5-haiku-latest");
+        let agent = AgentDefinition {
+            system_prompt: None,
+            system_prompt_file: None,
+            selection: None,
+            tools: None,
+            max_turns: None,
+            max_cost: None,
+        };
+
+        let effective = resolve_delegation_selection(&root, "coder", &agent, Some(&caller));
+        assert_eq!(effective, caller);
+    }
+
+    #[test]
+    fn delegation_selection_for_default_agent_always_uses_root() {
+        let root = selection("openai", "gpt-4o-mini");
+        let caller = selection("anthropic", "claude-3-5-haiku-latest");
+        let agent = AgentDefinition {
+            system_prompt: None,
+            system_prompt_file: None,
+            selection: Some(selection("gemini", "gemini-2.5-pro")),
+            tools: None,
+            max_turns: None,
+            max_cost: None,
+        };
+
+        let effective = resolve_delegation_selection(&root, "default", &agent, Some(&caller));
+        assert_eq!(effective, root);
     }
 }

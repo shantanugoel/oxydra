@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-use crate::{RuntimeError, StreamItem};
+use crate::{ProviderSelection, RuntimeError, StreamItem};
 
 /// Progress reporter used by delegation implementations. Implementations can
 /// provide a closure that accepts StreamItem values and forwards them to the
@@ -18,6 +18,8 @@ pub struct DelegationRequest {
     pub parent_user_id: String,
     pub agent_name: String,
     pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_selection: Option<ProviderSelection>,
     #[serde(default)]
     pub key_facts: Vec<String>,
     #[serde(default)]

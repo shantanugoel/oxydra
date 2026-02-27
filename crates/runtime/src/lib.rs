@@ -7,9 +7,9 @@ use tools::ToolRegistry;
 use types::{
     Context, Memory, MemoryError, MemoryHybridQueryRequest, MemoryRecallRequest, MemoryRetrieval,
     MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
-    Message, MessageRole, Provider, ProviderError, ProviderId, Response, RuntimeError,
-    RuntimeProgressEvent, RuntimeProgressKind, SafetyTier, StreamItem, ToolCall, ToolCallDelta,
-    ToolError, ToolExecutionContext, UsageUpdate,
+    Message, MessageRole, Provider, ProviderError, ProviderId, ProviderSelection, Response,
+    RuntimeError, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier, StreamItem, ToolCall,
+    ToolCallDelta, ToolError, ToolExecutionContext, UsageUpdate,
 };
 
 const DEFAULT_STREAM_BUFFER_SIZE: usize = 64;
@@ -132,7 +132,9 @@ impl Default for RuntimeLimits {
 }
 
 pub struct AgentRuntime {
-    provider: Box<dyn Provider>,
+    provider: Arc<dyn Provider>,
+    primary_selection: Option<ProviderSelection>,
+    selection_providers: BTreeMap<String, Arc<dyn Provider>>,
     tool_registry: ToolRegistry,
     limits: RuntimeLimits,
     stream_buffer_size: usize,
@@ -148,8 +150,11 @@ impl AgentRuntime {
         tool_registry: ToolRegistry,
         limits: RuntimeLimits,
     ) -> Self {
+        let provider: Arc<dyn Provider> = Arc::from(provider);
         Self {
             provider,
+            primary_selection: None,
+            selection_providers: BTreeMap::new(),
             tool_registry,
             limits,
             stream_buffer_size: DEFAULT_STREAM_BUFFER_SIZE,
@@ -199,6 +204,56 @@ impl AgentRuntime {
         self
     }
 
+    /// Set the primary provider/model selection for this runtime.
+    ///
+    /// When set, turns targeting a provider/model route that has not been
+    /// explicitly registered are rejected instead of silently falling back.
+    pub fn with_primary_selection(mut self, selection: ProviderSelection) -> Self {
+        self.primary_selection = Some(selection);
+        self
+    }
+
+    /// Register an additional provider route for a specific provider/model.
+    pub fn with_selection_provider(
+        mut self,
+        selection: ProviderSelection,
+        provider: Box<dyn Provider>,
+    ) -> Self {
+        self.selection_providers.insert(
+            Self::selection_route_key(&selection.provider, &selection.model),
+            Arc::from(provider),
+        );
+        self
+    }
+
+    fn selection_route_key(provider: &ProviderId, model: &types::ModelId) -> String {
+        format!("{provider}::{model}")
+    }
+
+    fn provider_for_context(&self, context: &Context) -> Result<&dyn Provider, RuntimeError> {
+        if let Some(provider) = self.selection_providers.get(&Self::selection_route_key(
+            &context.provider,
+            &context.model,
+        )) {
+            return Ok(provider.as_ref());
+        }
+
+        if let Some(primary_selection) = &self.primary_selection
+            && (primary_selection.provider != context.provider
+                || primary_selection.model != context.model)
+        {
+            return Err(RuntimeError::Provider(ProviderError::RequestFailed {
+                provider: context.provider.clone(),
+                message: format!(
+                    "provider/model route `{}`/`{}` is not configured",
+                    context.provider, context.model
+                ),
+            }));
+        }
+
+        Ok(self.provider.as_ref())
+    }
+
     pub fn limits(&self) -> &RuntimeLimits {
         &self.limits
     }
@@ -227,12 +282,30 @@ impl AgentRuntime {
         let tool_context = ToolExecutionContext {
             user_id: None,
             session_id: Some(session_id.to_owned()),
+            provider: None,
+            model: None,
             channel_capabilities: None,
             event_sender: None,
             channel_id: None,
             channel_context_id: None,
         };
-        self.run_session_internal(Some(session_id), context, cancellation, None, &tool_context)
+        self.run_session_for_session_with_tool_context(
+            session_id,
+            context,
+            cancellation,
+            &tool_context,
+        )
+        .await
+    }
+
+    pub async fn run_session_for_session_with_tool_context(
+        &self,
+        session_id: &str,
+        context: &mut Context,
+        cancellation: &CancellationToken,
+        tool_context: &ToolExecutionContext,
+    ) -> Result<Response, RuntimeError> {
+        self.run_session_internal(Some(session_id), context, cancellation, None, tool_context)
             .await
     }
 
@@ -332,6 +405,8 @@ impl AgentRuntime {
         // `send_media` can emit stream items (e.g. media attachments).
         let tool_context = {
             let mut ctx = tool_context.clone();
+            ctx.provider = Some(context.provider.clone());
+            ctx.model = Some(context.model.clone());
             if ctx.event_sender.is_none()
                 && let Some(ref sender) = stream_events
             {

@@ -735,6 +735,8 @@ mod memory_tool_tests {
         ToolExecutionContext {
             user_id: Some(user_id.to_owned()),
             session_id: Some(session_id.to_owned()),
+            provider: None,
+            model: None,
             channel_capabilities: None,
             event_sender: None,
             channel_id: None,

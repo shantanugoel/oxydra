@@ -21,9 +21,9 @@ use types::{
     MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
     MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
     ModelDescriptor, ModelId, ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId,
-    Response, RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent, RuntimeProgressKind,
-    SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall,
-    ToolCallDelta, ToolError, ToolExecutionContext, UsageUpdate,
+    ProviderSelection, Response, RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent,
+    RuntimeProgressKind, SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem,
+    Tool, ToolCall, ToolCallDelta, ToolError, ToolExecutionContext, UsageUpdate,
 };
 
 use super::{AgentRuntime, PathScrubMapping, RuntimeLimits};
@@ -310,6 +310,43 @@ impl Tool for MediaEventTool {
             file_name: Some("artifact.bin".to_owned()),
         }));
         Ok("media emitted".to_owned())
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContextEchoTool;
+
+#[async_trait]
+impl Tool for ContextEchoTool {
+    fn schema(&self) -> FunctionDecl {
+        FunctionDecl::new(
+            "context_echo",
+            None,
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        _args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
+        Ok(json!({
+            "user_id": context.user_id.clone(),
+            "session_id": context.session_id.clone(),
+        })
+        .to_string())
     }
 
     fn timeout(&self) -> Duration {
@@ -691,6 +728,72 @@ async fn run_session_for_session_with_stream_events_forwards_provider_deltas() {
             StreamItem::FinishReason("stop".to_owned()),
         ]
     );
+}
+
+#[tokio::test]
+async fn run_session_for_session_with_tool_context_propagates_user_context_to_tools() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("ctx-call".to_owned()),
+                    name: Some("context_echo".to_owned()),
+                    arguments: Some("{}".to_owned()),
+                    metadata: None,
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("done".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+    let mut registry = ToolRegistry::default();
+    registry.register("context_echo", ContextEchoTool);
+    let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default());
+    let mut context = test_context(provider_id, model_id);
+    let tool_context = ToolExecutionContext {
+        user_id: Some("alice".to_owned()),
+        session_id: Some("subagent-session".to_owned()),
+        provider: None,
+        model: None,
+        channel_capabilities: None,
+        event_sender: None,
+        channel_id: None,
+        channel_context_id: None,
+    };
+
+    let response = runtime
+        .run_session_for_session_with_tool_context(
+            "subagent-session",
+            &mut context,
+            &CancellationToken::new(),
+            &tool_context,
+        )
+        .await
+        .expect("runtime turn should complete with delegated tool context");
+    assert_eq!(response.message.content.as_deref(), Some("done"));
+
+    let tool_result = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("tool result should be appended");
+    let payload: Value = serde_json::from_str(
+        tool_result
+            .content
+            .as_deref()
+            .expect("tool result should include content"),
+    )
+    .expect("context_echo should return valid JSON");
+    assert_eq!(payload["user_id"], "alice");
+    assert_eq!(payload["session_id"], "subagent-session");
 }
 
 #[tokio::test]
@@ -2563,6 +2666,106 @@ async fn run_session_for_session_discards_stale_rolling_summary_writes() {
         .await
         .expect("summary read should succeed");
     assert!(summary_state.is_none());
+}
+
+#[tokio::test]
+async fn run_session_uses_registered_selection_provider_route() {
+    let default_provider_id = ProviderId::from("openai");
+    let default_model_id = ModelId::from("gpt-4o-mini");
+    let specialist_provider_id = ProviderId::from("anthropic");
+    let specialist_model_id = ModelId::from("claude-3-5-haiku-latest");
+
+    let default_provider = FakeProvider::new(
+        default_provider_id.clone(),
+        test_catalog(default_provider_id.clone(), default_model_id.clone(), false),
+        vec![ProviderStep::Complete(assistant_response(
+            "default",
+            vec![],
+        ))],
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        ..ProviderCaps::default()
+    });
+    let specialist_provider = FakeProvider::new(
+        specialist_provider_id.clone(),
+        test_catalog(
+            specialist_provider_id.clone(),
+            specialist_model_id.clone(),
+            false,
+        ),
+        vec![ProviderStep::Complete(assistant_response(
+            "specialist",
+            vec![],
+        ))],
+    )
+    .with_caps(ProviderCaps {
+        supports_streaming: false,
+        ..ProviderCaps::default()
+    });
+
+    let runtime = AgentRuntime::new(
+        Box::new(default_provider),
+        ToolRegistry::default(),
+        RuntimeLimits::default(),
+    )
+    .with_primary_selection(ProviderSelection {
+        provider: default_provider_id.clone(),
+        model: default_model_id.clone(),
+    })
+    .with_selection_provider(
+        ProviderSelection {
+            provider: specialist_provider_id.clone(),
+            model: specialist_model_id.clone(),
+        },
+        Box::new(specialist_provider),
+    );
+
+    let mut context = test_context(specialist_provider_id, specialist_model_id);
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("registered selection route should run");
+    assert_eq!(response.message.content.as_deref(), Some("specialist"));
+}
+
+#[tokio::test]
+async fn run_session_rejects_unconfigured_selection_route() {
+    let default_provider_id = ProviderId::from("openai");
+    let default_model_id = ModelId::from("gpt-4o-mini");
+    let default_provider = FakeProvider::new(
+        default_provider_id.clone(),
+        test_catalog(default_provider_id.clone(), default_model_id.clone(), false),
+        vec![ProviderStep::Complete(assistant_response(
+            "default",
+            vec![],
+        ))],
+    );
+    let runtime = AgentRuntime::new(
+        Box::new(default_provider),
+        ToolRegistry::default(),
+        RuntimeLimits::default(),
+    )
+    .with_primary_selection(ProviderSelection {
+        provider: default_provider_id,
+        model: default_model_id,
+    });
+
+    let mut context = test_context(
+        ProviderId::from("anthropic"),
+        ModelId::from("claude-3-5-haiku-latest"),
+    );
+    let error = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect_err("unconfigured route should fail fast");
+    match error {
+        RuntimeError::Provider(ProviderError::RequestFailed { provider, message }) => {
+            assert_eq!(provider, ProviderId::from("anthropic"));
+            assert!(message.contains("not configured"));
+        }
+        other => panic!("expected provider route error, got {other:?}"),
+    }
 }
 
 fn test_catalog(

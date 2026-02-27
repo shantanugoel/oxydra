@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::ToolError;
 use crate::channel::ChannelCapabilities;
-use crate::model::StreamItem;
+use crate::model::{ModelId, ProviderId, StreamItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +74,10 @@ pub struct ToolExecutionContext {
     pub user_id: Option<String>,
     /// The active conversation session ID for the current turn, if known.
     pub session_id: Option<String>,
+    /// Effective provider selection for the current turn, if known.
+    pub provider: Option<ProviderId>,
+    /// Effective model selection for the current turn, if known.
+    pub model: Option<ModelId>,
     /// Capabilities of the channel the user is connected through.
     /// `None` when channel info is not available (e.g., tests).
     pub channel_capabilities: Option<ChannelCapabilities>,
@@ -94,6 +98,8 @@ impl std::fmt::Debug for ToolExecutionContext {
         f.debug_struct("ToolExecutionContext")
             .field("user_id", &self.user_id)
             .field("session_id", &self.session_id)
+            .field("provider", &self.provider)
+            .field("model", &self.model)
             .field("channel_capabilities", &self.channel_capabilities)
             .field(
                 "event_sender",

@@ -26,9 +26,8 @@ use types::{
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
     GatewaySessionCreated, GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched,
     GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
-    GatewayTurnState, GatewayTurnStatus, InlineMedia, Message, MessageRole, ModelId,
-    ProactiveSender, ProviderId, Response, RuntimeError, SessionRecord, SessionStore,
-    StartupStatusReport, StreamItem,
+    GatewayTurnState, GatewayTurnStatus, InlineMedia, Message, MessageRole, ProactiveSender,
+    Response, RuntimeError, SessionRecord, SessionStore, StartupStatusReport, StreamItem,
 };
 
 mod session;
@@ -153,6 +152,7 @@ impl GatewayServer {
             TurnOrigin {
                 channel_id: Some(origin_channel_id.to_owned()),
                 channel_context_id: origin_channel_context_id.map(|s| s.to_owned()),
+                agent_name: Some(session.agent_name.clone()),
                 channel_capabilities: None,
             },
         )
@@ -346,6 +346,7 @@ impl GatewayServer {
             TurnOrigin {
                 channel_id: Some(GATEWAY_CHANNEL_ID.to_owned()),
                 channel_context_id: Some(session.session_id.clone()),
+                agent_name: Some(session.agent_name.clone()),
                 channel_capabilities: None,
             },
         )
@@ -853,6 +854,7 @@ impl GatewayServer {
             TurnOrigin {
                 channel_id: Some(GATEWAY_CHANNEL_ID.to_owned()),
                 channel_context_id: Some(session.session_id.clone()),
+                agent_name: Some(session.agent_name.clone()),
                 channel_capabilities: None,
             },
         )

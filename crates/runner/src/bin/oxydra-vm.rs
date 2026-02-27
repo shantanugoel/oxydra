@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::{self, Read},
     net::SocketAddr,
@@ -9,13 +10,13 @@ use std::{
 
 use clap::Parser;
 use gateway::{GatewayServer, RuntimeGatewayTurnRunner};
-use runner::{BootstrapError, CliOverrides, bootstrap_vm_runtime};
+use runner::{BootstrapError, CliOverrides, bootstrap_vm_runtime, build_provider_for_selection};
 use runtime::{AgentRuntime, SchedulerExecutor};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use types::init_tracing;
+use types::{ProviderSelection, init_tracing};
 
 const DEFAULT_GATEWAY_BIND_ADDRESS: &str = "127.0.0.1:0";
 const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
@@ -103,12 +104,11 @@ async fn run() -> Result<(), VmError> {
         },
     )
     .await?;
-    let provider_id = bootstrap.config.selection.provider.clone();
-    let model_id = bootstrap.config.selection.model.clone();
+    let default_selection = bootstrap.config.selection.clone();
     let startup_status = bootstrap.startup_status.clone();
     info!(
-        provider = %provider_id,
-        model = %model_id,
+        provider = %default_selection.provider,
+        model = %default_selection.model,
         "agent config loaded"
     );
     if startup_status.is_degraded() {
@@ -137,12 +137,33 @@ async fn run() -> Result<(), VmError> {
         bootstrap.tool_registry,
         bootstrap.runtime_limits,
     )
+    .with_primary_selection(default_selection.clone())
     .with_path_scrub_mappings(bootstrap.path_scrub_mappings);
     if let Some(prompt) = bootstrap.system_prompt {
         runtime = runtime.with_system_prompt(prompt);
     }
     if let Some(memory) = bootstrap.memory {
         runtime = runtime.with_memory_retrieval(memory);
+    }
+    let mut additional_routes = BTreeSet::new();
+    for (agent_name, definition) in &bootstrap.config.agents {
+        if agent_name == "default" {
+            continue;
+        }
+        if let Some(selection) = &definition.selection
+            && (selection.provider != default_selection.provider
+                || selection.model != default_selection.model)
+        {
+            additional_routes.insert((selection.provider.0.clone(), selection.model.0.clone()));
+        }
+    }
+    for (provider, model) in additional_routes {
+        let selection = ProviderSelection {
+            provider: types::ProviderId::from(provider.as_str()),
+            model: types::ModelId::from(model.as_str()),
+        };
+        let provider = build_provider_for_selection(&bootstrap.config, &selection)?;
+        runtime = runtime.with_selection_provider(selection, provider);
     }
 
     // Wrap runtime in Arc so it can be shared with the turn runner and
@@ -156,6 +177,7 @@ async fn run() -> Result<(), VmError> {
         let exec = runtime::RuntimeDelegationExecutor::new(
             runtime_arc.clone(),
             bootstrap.config.agents.clone(),
+            default_selection.clone(),
         );
         let boxed: Arc<dyn types::DelegationExecutor> = Arc::new(exec);
         match types::set_global_delegation_executor(boxed) {
@@ -166,8 +188,8 @@ async fn run() -> Result<(), VmError> {
 
     let turn_runner = Arc::new(RuntimeGatewayTurnRunner::new(
         runtime_arc,
-        provider_id,
-        model_id,
+        default_selection,
+        bootstrap.config.agents.clone(),
     ));
 
     // Build the gateway with optional session store for persistence.

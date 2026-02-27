@@ -1239,7 +1239,7 @@ Each step is self-contained, testable, and does not require rewriting any prior 
 
 ---
 
-### Step 11: Agent-Specific Model Selection Wiring
+### Step 11: Agent-Specific Model Selection Wiring ✅ DONE
 
 **Goal:** Ensure every named agent actually runs with its configured provider/model (instead of inheriting a hardcoded/default runtime path).
 

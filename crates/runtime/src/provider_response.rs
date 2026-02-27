@@ -9,9 +9,26 @@ impl AgentRuntime {
     ) -> Result<Response, RuntimeError> {
         let provider = self.provider_for_context(context)?;
         let caps = provider.capabilities(&context.model)?;
+        let request_context = if caps.supports_tools || context.tools.is_empty() {
+            context.clone()
+        } else {
+            tracing::debug!(
+                provider = %context.provider,
+                model = %context.model,
+                "provider/model does not support tool calling; omitting tool schemas from request context"
+            );
+            let mut request_context = context.clone();
+            request_context.tools.clear();
+            request_context
+        };
         if caps.supports_streaming {
             match self
-                .stream_response(provider, context, cancellation, stream_events.clone())
+                .stream_response(
+                    provider,
+                    &request_context,
+                    cancellation,
+                    stream_events.clone(),
+                )
                 .await
             {
                 Ok(response) => return Ok(response),
@@ -22,7 +39,7 @@ impl AgentRuntime {
                 }
             }
         }
-        self.complete_response(provider, context, cancellation)
+        self.complete_response(provider, &request_context, cancellation)
             .await
     }
 

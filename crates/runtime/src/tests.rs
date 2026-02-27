@@ -568,6 +568,7 @@ fn mock_provider(
     provider_id: ProviderId,
     model_id: ModelId,
     supports_streaming: bool,
+    supports_tools: bool,
 ) -> MockProviderContract {
     let mut provider = MockProviderContract::new();
     provider
@@ -580,7 +581,7 @@ fn mock_provider(
     ));
     let caps = ProviderCaps {
         supports_streaming,
-        supports_tools: true,
+        supports_tools,
         ..ProviderCaps::default()
     };
     provider
@@ -1229,7 +1230,7 @@ async fn run_session_rejects_invalid_guard_preconditions() {
 async fn run_session_supports_mockall_provider_single_turn_without_tools() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
-    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false);
+    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false, true);
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -1259,7 +1260,7 @@ async fn run_session_supports_mockall_provider_single_turn_without_tools() {
 async fn run_session_exposes_registered_tools_to_provider_context() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
-    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false);
+    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false, true);
     provider.expect_stream().never();
     provider
         .expect_complete()
@@ -1281,6 +1282,32 @@ async fn run_session_exposes_registered_tools_to_provider_context() {
         response.message.content.as_deref(),
         Some("tool schema seen")
     );
+    assert!(context.tools.iter().any(|tool| tool.name == "file_read"));
+}
+
+#[tokio::test]
+async fn run_session_omits_tool_schemas_when_model_does_not_support_tools() {
+    let provider_id = ProviderId::from("gemini");
+    let model_id = ModelId::from("gemini-2.5-flash-image");
+    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false, false);
+    provider.expect_stream().never();
+    provider
+        .expect_complete()
+        .times(1)
+        .withf(|context| context.tools.is_empty())
+        .returning(|_| Ok(assistant_response("image generated", vec![])));
+
+    let mut tools = ToolRegistry::default();
+    tools.register("file_read", MockReadTool);
+    let runtime = AgentRuntime::new(Box::new(provider), tools, RuntimeLimits::default());
+    let mut context = test_context(provider_id, model_id);
+
+    let response = runtime
+        .run_session(&mut context, &CancellationToken::new())
+        .await
+        .expect("runtime should omit tool schemas for non-tool-capable models");
+
+    assert_eq!(response.message.content.as_deref(), Some("image generated"));
     assert!(context.tools.iter().any(|tool| tool.name == "file_read"));
 }
 
@@ -1787,7 +1814,7 @@ async fn run_session_supports_mockall_tool_execution() {
 async fn run_session_cancels_before_provider_call() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
-    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false);
+    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false, true);
     provider.expect_stream().never();
     provider.expect_complete().never();
     let runtime = AgentRuntime::new(

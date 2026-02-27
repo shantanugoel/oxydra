@@ -8,7 +8,7 @@ This chapter describes the planned design for subagent spawning, delegation, sta
 
 ## Subagent Delegation Model
 
-Status (update): Partial implementation complete — Agent definitions, agent-specific model/provider routing, and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap with config-aware specialist schema, top-level sessions route by `agent_name`, and delegation resolves explicit vs inherited selection (`default` always root). Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
+Status (update): Partial implementation complete — Agent definitions, agent-specific model/provider routing, and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap with config-aware specialist schema, top-level sessions route by `agent_name`, and delegation resolves explicit vs inherited selection (`default` always root). Runtime requests also honor model capabilities from catalog/provider caps: when `supports_tools` is false, tool schemas are omitted from provider requests for that turn. Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
 
 
 

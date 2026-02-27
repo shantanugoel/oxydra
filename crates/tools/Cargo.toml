@@ -9,6 +9,7 @@ wasm-isolation = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = "0.4"
 memory = { path = "../memory" }
 bytes = "1"

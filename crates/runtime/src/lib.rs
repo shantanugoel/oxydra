@@ -18,6 +18,29 @@ const INVALID_TOOL_ARGS_ERROR_KEY: &str = "__oxydra_invalid_tool_args_error";
 
 pub type RuntimeStreamEventSender = mpsc::UnboundedSender<StreamItem>;
 
+fn scrubbing_event_sender(
+    inner: RuntimeStreamEventSender,
+    mappings: Vec<PathScrubMapping>,
+) -> RuntimeStreamEventSender {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(item) = receiver.recv().await {
+            let scrubbed_item = match item {
+                StreamItem::Media(mut attachment) => {
+                    attachment.file_path =
+                        scrubbing::scrub_host_paths(&attachment.file_path, &mappings);
+                    StreamItem::Media(attachment)
+                }
+                other => other,
+            };
+            if inner.send(scrubbed_item).is_err() {
+                break;
+            }
+        }
+    });
+    sender
+}
+
 mod budget;
 mod delegation;
 mod memory;
@@ -312,7 +335,12 @@ impl AgentRuntime {
             if ctx.event_sender.is_none()
                 && let Some(ref sender) = stream_events
             {
-                ctx.event_sender = Some(sender.clone());
+                let sender = if self.path_scrub_mappings.is_empty() {
+                    sender.clone()
+                } else {
+                    scrubbing_event_sender(sender.clone(), self.path_scrub_mappings.clone())
+                };
+                ctx.event_sender = Some(sender);
             }
             ctx
         };

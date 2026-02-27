@@ -15,18 +15,18 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use types::{
-    CatalogProvider, Context, FunctionDecl, InlineMedia, Memory, MemoryChunkUpsertRequest,
-    MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
-    MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord, MemoryRetrieval,
-    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
-    MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
-    ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId, Response,
-    RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier,
-    SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall, ToolCallDelta,
-    ToolError, ToolExecutionContext, UsageUpdate,
+    CatalogProvider, Context, FunctionDecl, InlineMedia, MediaAttachment, MediaType, Memory,
+    MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest,
+    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord,
+    MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
+    MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
+    ModelDescriptor, ModelId, ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId,
+    Response, RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent, RuntimeProgressKind,
+    SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall,
+    ToolCallDelta, ToolError, ToolExecutionContext, UsageUpdate,
 };
 
-use super::{AgentRuntime, RuntimeLimits};
+use super::{AgentRuntime, PathScrubMapping, RuntimeLimits};
 use tools::{ToolRegistry, bootstrap_runtime_tools};
 
 mock! {
@@ -253,6 +253,63 @@ impl Tool for SensitiveOutputTool {
             "api_key=sk_live_ABC123DEF456GHI789JKL012MNO345PQR678\nartifact_id=A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2\nstatus=ok"
                 .to_owned(),
         )
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+
+    fn safety_tier(&self) -> SafetyTier {
+        SafetyTier::ReadOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MediaEventTool;
+
+#[async_trait]
+impl Tool for MediaEventTool {
+    fn schema(&self) -> FunctionDecl {
+        FunctionDecl::new(
+            "mock_media",
+            None,
+            serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<String, ToolError> {
+        let parsed: Value = serde_json::from_str(args)?;
+        let path = parsed.get("path").and_then(Value::as_str).ok_or_else(|| {
+            ToolError::InvalidArguments {
+                tool: "mock_media".to_owned(),
+                message: "missing `path`".to_owned(),
+            }
+        })?;
+        let sender = context
+            .event_sender
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool: "mock_media".to_owned(),
+                message: "event sender is required".to_owned(),
+            })?;
+        let _ = sender.send(StreamItem::Media(MediaAttachment {
+            file_path: path.to_owned(),
+            media_type: MediaType::Document,
+            caption: None,
+            data: vec![1, 2, 3],
+            file_name: Some("artifact.bin".to_owned()),
+        }));
+        Ok("media emitted".to_owned())
     }
 
     fn timeout(&self) -> Duration {
@@ -634,6 +691,61 @@ async fn run_session_for_session_with_stream_events_forwards_provider_deltas() {
             StreamItem::FinishReason("stop".to_owned()),
         ]
     );
+}
+
+#[tokio::test]
+async fn run_session_for_session_scrubs_media_event_paths_before_forwarding() {
+    let provider_id = ProviderId::from("openai");
+    let model_id = ModelId::from("gpt-4o-mini");
+    let provider = FakeProvider::new(
+        provider_id.clone(),
+        test_catalog(provider_id.clone(), model_id.clone(), true),
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("media_call".to_owned()),
+                    name: Some("mock_media".to_owned()),
+                    arguments: Some(r#"{"path":"/host/ws/shared/output.bin"}"#.to_owned()),
+                    metadata: None,
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("done".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
+    );
+    let mut registry = ToolRegistry::default();
+    registry.register("mock_media", MediaEventTool);
+    let runtime = AgentRuntime::new(Box::new(provider), registry, RuntimeLimits::default())
+        .with_path_scrub_mappings(vec![PathScrubMapping {
+            host_prefix: "/host/ws/shared".to_owned(),
+            virtual_path: "/shared".to_owned(),
+        }]);
+    let mut context = test_context(provider_id, model_id);
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+
+    runtime
+        .run_session_for_session_with_stream_events(
+            "stream-media-session",
+            &mut context,
+            &CancellationToken::new(),
+            events_tx,
+            &ToolExecutionContext::default(),
+        )
+        .await
+        .expect("runtime should complete media turn");
+
+    let mut media_paths = Vec::new();
+    while let Some(item) = events_rx.recv().await {
+        if let StreamItem::Media(attachment) = item {
+            media_paths.push(attachment.file_path);
+        }
+    }
+
+    assert_eq!(media_paths, vec!["/shared/output.bin".to_owned()]);
 }
 
 #[cfg(unix)]

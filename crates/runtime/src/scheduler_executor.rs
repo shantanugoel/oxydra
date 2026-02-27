@@ -252,10 +252,7 @@ impl SchedulerExecutor {
         }
 
         let new_consecutive_failures = schedule.consecutive_failures + 1;
-        let name = schedule
-            .name
-            .as_deref()
-            .unwrap_or(&schedule.schedule_id);
+        let name = schedule.name.as_deref().unwrap_or(&schedule.schedule_id);
         let error_summary = if clean_text.len() > 200 {
             format!("{}...", &clean_text[..197])
         } else {

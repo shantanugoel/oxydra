@@ -565,6 +565,7 @@ async fn bootstrap_registry_exposes_runtime_tool_surface_only() {
         WEB_FETCH_TOOL_NAME.to_owned(),
         WEB_SEARCH_TOOL_NAME.to_owned(),
         VAULT_COPYTO_TOOL_NAME.to_owned(),
+        SEND_MEDIA_TOOL_NAME.to_owned(),
         SHELL_EXEC_TOOL_NAME.to_owned(),
     ]);
     assert_eq!(exposed, expected);
@@ -766,6 +767,9 @@ mod memory_tool_tests {
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_SAVE_TOOL_NAME);
         assert!(schema.description.is_some());
+        let description = schema.description.as_deref().unwrap_or_default();
+        assert!(description.contains("corrected procedures"));
+        assert!(description.contains("Do NOT save ephemeral"));
         assert!(
             schema.parameters["required"]
                 .as_array()
@@ -782,6 +786,8 @@ mod memory_tool_tests {
         let tool = MemoryUpdateTool::new(memory);
         let schema = tool.schema();
         assert_eq!(schema.name, MEMORY_UPDATE_TOOL_NAME);
+        let description = schema.description.as_deref().unwrap_or_default();
+        assert!(description.contains("superseded by a better approach"));
         let required = schema.parameters["required"]
             .as_array()
             .expect("required should be array");

@@ -13,8 +13,7 @@ use types::{
 use crate::{
     ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_VERSION,
     DEFAULT_ANTHROPIC_MAX_TOKENS, DEFAULT_STREAM_BUFFER_SIZE, extract_http_error_message,
-    non_empty, normalize_base_url_or_default, openai::SseDataParser,
-    validate_context_attachments,
+    non_empty, normalize_base_url_or_default, openai::SseDataParser, validate_context_attachments,
 };
 
 #[derive(Debug, Clone)]

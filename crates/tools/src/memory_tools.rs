@@ -294,10 +294,12 @@ impl Tool for MemorySaveTool {
             MEMORY_SAVE_TOOL_NAME,
             Some(
                 "Save an important piece of information to your persistent memory as a natural \
-                 language note. Use this proactively whenever the user shares preferences, makes \
+                 language note. Use this proactively when the user shares preferences, makes \
                  decisions, states facts, or tells you something worth remembering across \
-                 conversations. Saved notes persist across all sessions and channels. Returns a \
-                 note_id for future reference."
+                 conversations. Also save corrected procedures — when you discover the right \
+                 approach after initial failed attempts via any tools or other methods, save the working method for next time. \
+                 Do NOT save ephemeral details, secrets, or one-off outputs. Saved notes persist \
+                 across all sessions and channels. Returns a note_id for future reference."
                     .to_owned(),
             ),
             json!({
@@ -386,8 +388,9 @@ impl Tool for MemoryUpdateTool {
             Some(
                 "Update a previously saved note with new content. Use this when the user corrects \
                  or changes previously stored information (e.g., a new preferred name, an updated \
-                 preference). First use memory_search to find the note and its note_id, then call \
-                 this with the note_id and the new content."
+                 preference), or when a saved procedure is superseded by a better approach. First \
+                 use memory_search to find the note and its note_id, then call this with the \
+                 note_id and the new content."
                     .to_owned(),
             ),
             json!({

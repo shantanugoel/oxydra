@@ -4,6 +4,7 @@ use std::{
 };
 
 use regex::{Captures, Regex, RegexSet};
+use tools::path_spec::tool_path_fields;
 
 const REDACTION_MARKER: &str = "[REDACTED]";
 const MIN_ENTROPY_TOKEN_LENGTH: usize = 24;
@@ -61,18 +62,25 @@ pub(crate) fn translate_tool_arg_paths(
 
     let mut translated = args.clone();
 
-    match tool_name {
-        "file_read" | "file_search" | "file_list" | "file_write" | "file_edit" | "file_delete" => {
-            translate_field(&mut translated, "path", mappings);
+    // For file_list, default missing path arguments to `/shared` before
+    // translation so policy/tool execution both see a concrete path.
+    if tool_name == "file_list"
+        && translated.get("path").is_none()
+        && let Some(object) = translated.as_object_mut()
+    {
+        object.insert(
+            "path".to_owned(),
+            serde_json::Value::String("/shared".to_owned()),
+        );
+    }
+
+    // shell_exec: no path translation needed — the ShellVm container
+    // mounts directories at virtual paths (/shared, /tmp) so commands
+    // already use the correct container-local paths.
+    if tool_name != "shell_exec" {
+        for field in tool_path_fields(tool_name) {
+            translate_field(&mut translated, field.field_name, mappings);
         }
-        "vault_copyto" => {
-            translate_field(&mut translated, "source_path", mappings);
-            translate_field(&mut translated, "destination_path", mappings);
-        }
-        // shell_exec: no path translation needed — the ShellVm container
-        // mounts directories at virtual paths (/shared, /tmp) so commands
-        // already use the correct container-local paths.
-        _ => {}
     }
 
     translated
@@ -474,6 +482,30 @@ Authorization: Bearer very-secret-token
         let translated = translate_tool_arg_paths("vault_copyto", &args, &mappings);
         assert_eq!(translated["source_path"], "/host/ws/vault/data.csv");
         assert_eq!(translated["destination_path"], "/host/ws/shared/data.csv");
+    }
+
+    #[test]
+    fn translate_send_media_virtual_path_to_host_path() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host/ws/shared".to_owned(),
+            virtual_path: "/shared".to_owned(),
+        }];
+
+        let args = serde_json::json!({ "path": "/shared/image.png", "media_type": "photo" });
+        let translated = translate_tool_arg_paths("send_media", &args, &mappings);
+        assert_eq!(translated["path"], "/host/ws/shared/image.png");
+        assert_eq!(translated["media_type"], "photo");
+    }
+
+    #[test]
+    fn translate_file_list_defaults_missing_path_to_shared() {
+        let mappings = vec![PathScrubMapping {
+            host_prefix: "/host/ws/shared".to_owned(),
+            virtual_path: "/shared".to_owned(),
+        }];
+        let args = serde_json::json!({});
+        let translated = translate_tool_arg_paths("file_list", &args, &mappings);
+        assert_eq!(translated["path"], "/host/ws/shared");
     }
 
     #[test]

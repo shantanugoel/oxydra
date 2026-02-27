@@ -222,9 +222,10 @@ Sessions are lazily created on first message storage. The runtime can restore a 
 
 ## Credential Scrubbing
 
-**File:** `runtime/src/scrubbing.rs`
+**File:** `runtime/src/scrubbing.rs`, `runtime/src/lib.rs`, `runtime/src/tool_execution.rs`
 
-Before tool output is returned to the LLM or stored in memory, it passes through `scrub_tool_output`:
+Before tool output is returned to the LLM or stored in memory, it is host-path scrubbed and then passed through `scrub_tool_output`.
+Media attachments emitted through runtime stream events are also wrapped with a scrubbing sender so `StreamItem::Media.file_path` is rewritten to virtual paths before forwarding.
 
 ### Keyword-Based Redaction
 
@@ -241,7 +242,7 @@ For strings that lack keyword labels but look like secrets:
 2. Must contain a mix of character types (not pure hex, which could be a hash)
 3. Shannon entropy must be ≥ 3.8
 
-Detected high-entropy strings are redacted as `[REDACTED:high-entropy]`.
+Detected high-entropy strings are redacted as `[REDACTED]`.
 
 ## Tracing and Instrumentation
 

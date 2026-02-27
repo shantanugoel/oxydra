@@ -6268,6 +6268,7 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures-util",
@@ -6921,6 +6922,7 @@ dependencies = [
 name = "wasm-guest"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
 ]

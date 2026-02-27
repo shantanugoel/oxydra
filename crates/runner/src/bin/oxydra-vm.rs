@@ -218,12 +218,10 @@ async fn run() -> Result<(), VmError> {
         if let Some(bot_token_env) = telegram_config.bot_token_env.as_deref()
             && let Ok(bot_token) = std::env::var(bot_token_env)
         {
-            let proactive_sender = Arc::new(
-                channels::telegram::TelegramProactiveSender::new(
-                    &bot_token,
-                    telegram_config.max_message_length,
-                ),
-            );
+            let proactive_sender = Arc::new(channels::telegram::TelegramProactiveSender::new(
+                &bot_token,
+                telegram_config.max_message_length,
+            ));
             gateway
                 .register_proactive_sender("telegram", proactive_sender)
                 .await;

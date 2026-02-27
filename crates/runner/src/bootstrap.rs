@@ -19,8 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tools::{
     RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
-    register_delegation_tools, register_media_tools, register_memory_tools,
-    register_scheduler_tools,
+    register_delegation_tools, register_memory_tools, register_scheduler_tools,
 };
 use types::{
     AgentConfig, BootstrapEnvelopeError, CatalogProvider, ConfigError, MemoryError,
@@ -597,14 +596,14 @@ pub async fn bootstrap_vm_runtime_with_paths(
     register_delegation_tools(&mut registry);
     tracing::info!("delegation tools registered");
 
-    // Register send_media tool — the tool validates channel capabilities at
-    // runtime and returns a clear error when the channel doesn't support media.
-    register_media_tools(&mut registry);
-    tracing::info!("media tools registered");
-
     let startup_status = availability.startup_status(bootstrap.as_ref());
     let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());
-    let system_prompt = build_system_prompt(paths, bootstrap.as_ref(), scheduler_store.is_some());
+    let system_prompt = build_system_prompt(
+        paths,
+        bootstrap.as_ref(),
+        scheduler_store.is_some(),
+        memory.is_some(),
+    );
 
     // Build session store for gateway session persistence.
     let session_store: Option<Arc<dyn types::SessionStore>> = if let Some(ref backend) =
@@ -807,6 +806,7 @@ fn build_system_prompt(
     paths: &ConfigSearchPaths,
     bootstrap: Option<&RunnerBootstrapEnvelope>,
     scheduler_enabled: bool,
+    memory_enabled: bool,
 ) -> Option<String> {
     let sandbox_tier = bootstrap.map_or(types::SandboxTier::Process, |b| b.sandbox_tier);
     let shell_note = if sandbox_tier == types::SandboxTier::Process {
@@ -829,6 +829,19 @@ fn build_system_prompt(
         ""
     };
 
+    let memory_note = if memory_enabled {
+        "\n\n## Memory\n\n\
+         You have persistent memory that can carry important context across conversations.\n\
+         Use memory tools thoughtfully:\n\
+         - Save durable user preferences, stable project conventions, and important decisions.\n\
+         - Save corrected procedures after trial-and-error happening from any tool usage or with user interactions or other methods, so the working method is remembered.\n\
+         - Do not save secrets, one-off outputs, or transient status details.\n\
+         - Use `memory_update` when previously saved information or procedures are corrected.\n\
+         Keep memory writes lightweight and focused on high-value long-term context."
+    } else {
+        ""
+    };
+
     let default_prompt = format!(
         "You are Oxydra - an AI assistant with access to a sandboxed workspace.\n\n\
          ## File System\n\n\
@@ -838,7 +851,7 @@ fn build_system_prompt(
          - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
          When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
          always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
-         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}{scheduler_note}"
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}{scheduler_note}{memory_note}"
     );
 
     // Look for a SYSTEM.md override/append file in the config search paths.
@@ -1224,6 +1237,29 @@ remote_url = "libsql://example-org.turso.io"
         assert_eq!(limits.retrieval.fts_weight, 0.4);
         assert_eq!(limits.summarization.target_ratio, 0.45);
         assert_eq!(limits.summarization.min_turns, 9);
+    }
+
+    #[test]
+    fn build_system_prompt_includes_memory_guidance_when_memory_is_enabled() {
+        let root = temp_dir("system-prompt-memory-enabled");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true)
+            .expect("system prompt should be generated");
+        assert!(prompt.contains("## Memory"));
+        assert!(prompt.contains("corrected procedures"));
+        assert!(prompt.contains("Do not save secrets"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_omits_memory_guidance_when_memory_is_disabled() {
+        let root = temp_dir("system-prompt-memory-disabled");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, false)
+            .expect("system prompt should be generated");
+        assert!(!prompt.contains("## Memory"));
+        assert!(!prompt.contains("corrected procedures"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

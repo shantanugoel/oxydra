@@ -33,6 +33,7 @@ pub mod sandbox;
 mod delegation_tools;
 pub mod media_tools;
 pub mod memory_tools;
+pub mod path_spec;
 pub mod scheduler_tools;
 
 #[cfg(test)]
@@ -55,7 +56,7 @@ pub use sandbox::{
 };
 pub use scheduler_tools::{
     SCHEDULE_CREATE_TOOL_NAME, SCHEDULE_DELETE_TOOL_NAME, SCHEDULE_EDIT_TOOL_NAME,
-    SCHEDULE_RUNS_TOOL_NAME, SCHEDULE_RUN_OUTPUT_TOOL_NAME, SCHEDULE_SEARCH_TOOL_NAME,
+    SCHEDULE_RUN_OUTPUT_TOOL_NAME, SCHEDULE_RUNS_TOOL_NAME, SCHEDULE_SEARCH_TOOL_NAME,
     register_scheduler_tools,
 };
 
@@ -431,11 +432,8 @@ impl Tool for ListTool {
         _context: &ToolExecutionContext,
     ) -> Result<String, ToolError> {
         let request: ListArgs = parse_args(FILE_LIST_TOOL_NAME, args)?;
-        let payload = if let Some(path) = request.path {
-            json!({ "path": path })
-        } else {
-            json!({})
-        };
+        let path = request.path.unwrap_or_else(|| "/shared".to_owned());
+        let payload = json!({ "path": path });
         invoke_wasm_tool(
             &self.runner,
             FILE_LIST_TOOL_NAME,

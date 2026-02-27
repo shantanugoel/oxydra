@@ -18,6 +18,7 @@ use std::{
     path::Path,
 };
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -81,6 +82,7 @@ fn main() {
 fn dispatch(op: &str, args: &Value) -> GuestResult {
     match op {
         "file_read" => file_read(args),
+        "file_read_bytes" => file_read_bytes(args),
         "file_write" => file_write(args),
         "file_edit" => file_edit(args),
         "file_delete" => file_delete(args),
@@ -111,6 +113,20 @@ fn file_read(args: &Value) -> GuestResult {
     };
     match fs::read_to_string(path) {
         Ok(content) => GuestResult::ok(content),
+        Err(e) => GuestResult::err(format!("failed to read `{path}`: {e}")),
+    }
+}
+
+fn file_read_bytes(args: &Value) -> GuestResult {
+    let path = match required_string(args, "path", "file_read_bytes") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match fs::read(path) {
+        Ok(bytes) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            GuestResult::ok(encoded)
+        }
         Err(e) => GuestResult::err(format!("failed to read `{path}`: {e}")),
     }
 }
@@ -200,7 +216,7 @@ fn file_delete(args: &Value) -> GuestResult {
 }
 
 fn file_list(args: &Value) -> GuestResult {
-    let path = optional_string(args, "path").unwrap_or(".");
+    let path = optional_string(args, "path").unwrap_or("/shared");
     let dir = match fs::read_dir(path) {
         Ok(d) => d,
         Err(e) => return GuestResult::err(format!("failed to list `{path}`: {e}")),

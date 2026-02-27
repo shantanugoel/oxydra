@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::path_spec::{PathAccessMode, tool_path_fields};
 use serde_json::Value;
 use types::{SafetyTier, ShellConfig};
 
@@ -234,17 +235,20 @@ impl SecurityPolicy for WorkspaceSecurityPolicy {
         _safety_tier: SafetyTier,
         arguments: &Value,
     ) -> Result<(), SecurityPolicyViolation> {
-        if let Some(access_mode) = file_access_mode(tool_name) {
-            let path = arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    SecurityPolicyViolation::new(
-                        SecurityPolicyViolationReason::InvalidArguments,
-                        format!("tool `{tool_name}` requires string argument `path`"),
-                    )
-                })?;
-            self.enforce_file_path(path, access_mode)?;
+        for field in tool_path_fields(tool_name) {
+            let Some(path_arg) = arguments.get(field.field_name) else {
+                continue;
+            };
+            let path = path_arg.as_str().ok_or_else(|| {
+                SecurityPolicyViolation::new(
+                    SecurityPolicyViolationReason::InvalidArguments,
+                    format!(
+                        "tool `{tool_name}` requires string argument `{}`",
+                        field.field_name
+                    ),
+                )
+            })?;
+            self.enforce_file_path(path, file_access_mode_from_path_spec(field.access_mode))?;
         }
 
         if is_shell_tool(tool_name) {
@@ -264,11 +268,10 @@ impl SecurityPolicy for WorkspaceSecurityPolicy {
     }
 }
 
-fn file_access_mode(tool_name: &str) -> Option<FileAccessMode> {
-    match tool_name {
-        "file_read" | "file_search" | "file_list" => Some(FileAccessMode::ReadOnly),
-        "file_write" | "file_edit" | "file_delete" => Some(FileAccessMode::ReadWrite),
-        _ => None,
+fn file_access_mode_from_path_spec(access_mode: PathAccessMode) -> FileAccessMode {
+    match access_mode {
+        PathAccessMode::ReadOnly => FileAccessMode::ReadOnly,
+        PathAccessMode::ReadWrite => FileAccessMode::ReadWrite,
     }
 }
 
@@ -649,6 +652,79 @@ mod tests {
             result.is_ok(),
             "workspace policy should allow reads of normal files inside shared/"
         );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn policy_enforces_send_media_paths_with_workspace_bounds() {
+        let workspace = unique_temp_workspace("policy-send-media");
+        let allowed_file = workspace.join(SHARED_DIR_NAME).join("photo.png");
+        fs::write(&allowed_file, "image-bytes").expect("allowed file should be writable");
+        let outside_file = unique_temp_workspace("policy-send-media-outside").join("outside.png");
+        fs::write(&outside_file, "outside-bytes").expect("outside file should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+        let allowed = policy.enforce(
+            "send_media",
+            SafetyTier::ReadOnly,
+            &json!({ "path": allowed_file.to_string_lossy(), "media_type": "photo" }),
+        );
+        assert!(allowed.is_ok(), "send_media should allow in-root files");
+
+        let denied = policy.enforce(
+            "send_media",
+            SafetyTier::ReadOnly,
+            &json!({ "path": outside_file.to_string_lossy(), "media_type": "photo" }),
+        );
+        assert!(matches!(
+            denied,
+            Err(SecurityPolicyViolation {
+                reason: SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                ..
+            })
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+        if let Some(parent) = outside_file.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn policy_enforces_vault_copyto_source_and_destination_modes() {
+        let workspace = unique_temp_workspace("policy-vault-copyto");
+        let source = workspace.join(VAULT_DIR_NAME).join("secrets.txt");
+        let destination_ok = workspace.join(SHARED_DIR_NAME).join("copied.txt");
+        let destination_denied = workspace.join(VAULT_DIR_NAME).join("should-deny.txt");
+        fs::write(&source, "vault-data").expect("vault source should be writable");
+
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace);
+        let allowed = policy.enforce(
+            "vault_copyto",
+            SafetyTier::SideEffecting,
+            &json!({
+                "source_path": source.to_string_lossy(),
+                "destination_path": destination_ok.to_string_lossy()
+            }),
+        );
+        assert!(allowed.is_ok(), "vault->shared copy should be allowed");
+
+        let denied = policy.enforce(
+            "vault_copyto",
+            SafetyTier::SideEffecting,
+            &json!({
+                "source_path": source.to_string_lossy(),
+                "destination_path": destination_denied.to_string_lossy()
+            }),
+        );
+        assert!(matches!(
+            denied,
+            Err(SecurityPolicyViolation {
+                reason: SecurityPolicyViolationReason::PathOutsideAllowedRoots,
+                ..
+            })
+        ));
 
         let _ = fs::remove_dir_all(workspace);
     }

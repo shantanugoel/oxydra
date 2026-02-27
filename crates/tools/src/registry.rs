@@ -262,6 +262,10 @@ fn register_runtime_tools(
         WEB_SEARCH_TOOL_NAME,
         WebSearchTool::new(wasm_runner.clone()),
     );
-    registry.register(VAULT_COPYTO_TOOL_NAME, VaultCopyToTool::new(wasm_runner));
+    registry.register(
+        VAULT_COPYTO_TOOL_NAME,
+        VaultCopyToTool::new(wasm_runner.clone()),
+    );
+    register_media_tools(registry, wasm_runner);
     registry.register(SHELL_EXEC_TOOL_NAME, shell_tool);
 }

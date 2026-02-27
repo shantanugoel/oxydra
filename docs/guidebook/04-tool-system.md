@@ -105,6 +105,7 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `web_fetch` | `SideEffecting` | Fetches URL content (converts to Markdown/Text) |
 | `web_search` | `SideEffecting` | Performs web searches via configured providers |
 | `vault_copyto` | `SideEffecting` | Securely copies data from vault to shared/tmp workspace |
+| `send_media` | `ReadOnly` | Sends a workspace file as a channel media attachment |
 | `shell_exec` | `Privileged` | Executes shell commands (via sidecar or host) |
 | `memory_search` | `ReadOnly` | Searches the user's personal memory store |
 | `memory_save` | `SideEffecting` | Saves a new note to the user's memory |
@@ -117,7 +118,7 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `schedule_runs` | `ReadOnly` | Lists recent run history metadata for a scheduled task |
 | `schedule_run_output` | `ReadOnly` | Retrieves full output of a specific run with chunked pagination |
 
-Most tools (except `BashTool`) execute through the `HostWasmToolRunner` (in the `sandbox` sub-module of `tools`), which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
+Most tools (except `BashTool`) execute through the `WasmToolRunner` backend (`WasmWasiToolRunner` when available, otherwise `HostWasmToolRunner`), which enforces capability-based mount policies per tool class (see Chapter 7: Security Model).
 
 ### BashTool Backends
 
@@ -154,8 +155,8 @@ All four tools receive a `ToolExecutionContext` on each invocation, which carrie
 | `memory_delete` | `note_id` (required) | `{message}` confirming deletion |
 
 - `memory_search` uses the existing hybrid retrieval pipeline (vector + FTS5) with configurable `vector_weight` and `fts_weight` parameters.
-- `memory_save` generates a UUID-based `note_id` (format: `note-{uuid}`) and stores the content through `MemoryRetrieval::store_note`.
-- `memory_update` performs a delete-then-save under the same `note_id`, preserving the identifier while replacing content.
+- `memory_save` generates a UUID-based `note_id` (format: `note-{uuid}`) and stores the content through `MemoryRetrieval::store_note`; it is intended for durable facts/preferences/decisions and corrected working procedures.
+- `memory_update` performs a delete-then-save under the same `note_id`, preserving the identifier while replacing content when previously saved information or procedures are corrected.
 - `memory_delete` removes all chunks and events associated with the `note_id`.
 
 #### Registration

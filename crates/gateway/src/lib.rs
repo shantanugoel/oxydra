@@ -936,9 +936,10 @@ impl GatewayServer {
         let session_store = self.session_store.clone();
         tokio::spawn(async move {
             let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
-            let channel_capabilities = origin.channel_id.as_deref().map(
-                types::ChannelCapabilities::from_channel_origin,
-            );
+            let channel_capabilities = origin
+                .channel_id
+                .as_deref()
+                .map(types::ChannelCapabilities::from_channel_origin);
             let input = turn_runner::UserTurnInput {
                 prompt: send_turn.prompt,
                 attachments: send_turn.attachments,
@@ -1180,11 +1181,7 @@ impl GatewayServer {
 
 #[async_trait]
 impl SchedulerNotifier for GatewayServer {
-    async fn notify_user(
-        &self,
-        schedule: &types::ScheduleDefinition,
-        frame: GatewayServerFrame,
-    ) {
+    async fn notify_user(&self, schedule: &types::ScheduleDefinition, frame: GatewayServerFrame) {
         if let Some(ref channel_id) = schedule.channel_id {
             // Origin-only routing.
             if channel_id == GATEWAY_CHANNEL_ID {

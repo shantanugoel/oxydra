@@ -1056,7 +1056,10 @@ pub fn register_scheduler_tools(
             config.default_timezone.clone(),
         ),
     );
-    registry.register(SCHEDULE_DELETE_TOOL_NAME, ScheduleDeleteTool::new(store.clone()));
+    registry.register(
+        SCHEDULE_DELETE_TOOL_NAME,
+        ScheduleDeleteTool::new(store.clone()),
+    );
     registry.register(
         SCHEDULE_RUNS_TOOL_NAME,
         ScheduleRunsTool::new(store.clone()),

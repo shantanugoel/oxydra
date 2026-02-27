@@ -178,10 +178,7 @@ pub(crate) fn validate_context_attachments(
     if !model_caps.supports_attachments {
         return Err(ProviderError::RequestFailed {
             provider: provider_id.clone(),
-            message: format!(
-                "model `{}` does not support attachments",
-                context.model
-            ),
+            message: format!("model `{}` does not support attachments", context.model),
         });
     }
 

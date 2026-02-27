@@ -161,7 +161,8 @@ impl WasmWasiToolRunner {
         let mut args = arguments.clone();
 
         match tool_name {
-            "file_read" | "file_write" | "file_edit" | "file_delete" | "file_search" => {
+            "file_read" | "file_read_bytes" | "file_write" | "file_edit" | "file_delete"
+            | "file_search" => {
                 if let Some(path) = arguments.get("path").and_then(Value::as_str) {
                     let guest_path = Self::translate_path_for_guest(path, mounts)?;
                     args["path"] = Value::String(guest_path);
@@ -172,7 +173,7 @@ impl WasmWasiToolRunner {
                     let guest_path = Self::translate_path_for_guest(path, mounts)?;
                     args["path"] = Value::String(guest_path);
                 }
-                // No path defaults to "." in the guest, which is fine.
+                // No path defaults to "/shared" in the guest.
             }
             "vault_copyto_read" => {
                 if let Some(path) = arguments.get("source_path").and_then(Value::as_str) {
@@ -345,7 +346,9 @@ fn execute_guest_sync(
 
 fn expected_capability_profile(tool_name: &str) -> Option<WasmCapabilityProfile> {
     match tool_name {
-        "file_read" | "file_search" | "file_list" => Some(WasmCapabilityProfile::FileReadOnly),
+        "file_read" | "file_read_bytes" | "file_search" | "file_list" => {
+            Some(WasmCapabilityProfile::FileReadOnly)
+        }
         "file_write" | "file_edit" | "file_delete" => Some(WasmCapabilityProfile::FileReadWrite),
         "web_fetch" | "web_search" => Some(WasmCapabilityProfile::Web),
         "vault_copyto_read" => Some(WasmCapabilityProfile::VaultReadStep),
@@ -456,6 +459,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use base64::Engine;
     use serde_json::json;
 
     use super::super::wasm_runner::{SHARED_DIR_NAME, TMP_DIR_NAME, VAULT_DIR_NAME};
@@ -499,6 +503,58 @@ mod tests {
         assert!(result.metadata.request_id.starts_with("file_read-"));
         assert_eq!(result.metadata.operation_id.as_deref(), Some("op-read"));
         assert_eq!(result.metadata.profile, WasmCapabilityProfile::FileReadOnly);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn wasm_runner_reads_binary_file_bytes_via_file_read_bytes() {
+        let workspace_root = unique_workspace("wasi-read-bytes");
+        let shared_file = workspace_root.join(SHARED_DIR_NAME).join("photo.bin");
+        let expected = vec![0_u8, 1, 2, 3, 254, 255];
+        fs::write(&shared_file, &expected).expect("test file should be writable");
+
+        let runner = make_runner(&workspace_root);
+        let result = runner
+            .invoke(
+                "file_read_bytes",
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({ "path": shared_file.to_string_lossy() }),
+                Some("op-read-bytes"),
+            )
+            .await
+            .expect("file_read_bytes should succeed");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(result.output.as_bytes())
+            .expect("base64 output should decode");
+        assert_eq!(decoded, expected);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn wasm_runner_file_list_without_path_defaults_to_shared_mount() {
+        let workspace_root = unique_workspace("wasi-list-default-shared");
+        let shared_file = workspace_root.join(SHARED_DIR_NAME).join("listed.txt");
+        let tmp_file = workspace_root.join(TMP_DIR_NAME).join("tmp-only.txt");
+        fs::write(&shared_file, "in-shared").expect("shared file should be writable");
+        fs::write(&tmp_file, "in-tmp").expect("tmp file should be writable");
+
+        let runner = make_runner(&workspace_root);
+        let result = runner
+            .invoke(
+                "file_list",
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({}),
+                None,
+            )
+            .await
+            .expect("file_list should succeed");
+        assert!(result.output.contains("listed.txt"));
+        assert!(
+            !result.output.contains("tmp-only.txt"),
+            "default listing should target shared/"
+        );
 
         let _ = fs::remove_dir_all(workspace_root);
     }

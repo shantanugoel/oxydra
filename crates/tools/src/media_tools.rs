@@ -7,9 +7,10 @@
 //! [`GatewayServerFrame::MediaAttachment`] to the channel adapter, which
 //! delivers it to the user.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use types::{
@@ -17,7 +18,10 @@ use types::{
     ToolExecutionContext,
 };
 
+use crate::{WasmCapabilityProfile, WasmToolRunner, default_wasm_runner};
+
 pub const SEND_MEDIA_TOOL_NAME: &str = "send_media";
+const FILE_READ_BYTES_OPERATION: &str = "file_read_bytes";
 
 #[derive(Debug, Deserialize)]
 struct SendMediaArgs {
@@ -29,12 +33,20 @@ struct SendMediaArgs {
 
 /// Tool that reads a file from the workspace and sends it as a media
 /// attachment through the connected channel.
-#[derive(Clone, Default)]
-pub struct SendMediaTool;
+#[derive(Clone)]
+pub struct SendMediaTool {
+    runner: Arc<dyn WasmToolRunner>,
+}
 
 impl SendMediaTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for SendMediaTool {
+    fn default() -> Self {
+        Self::new(default_wasm_runner())
     }
 }
 
@@ -123,24 +135,33 @@ impl Tool for SendMediaTool {
                     message: "send_media is not available: no event sender configured".to_owned(),
                 })?;
 
-        // Read the file contents using the WASM file-read tool. This ensures
-        // path validation and sandboxing go through the same security policy
-        // as other file tools.
-        //
-        // However, file_read returns text (UTF-8). For binary files we need
-        // raw bytes. We'll use the WASM runner to invoke a raw-read that
-        // returns bytes. For now, read the file at the workspace-resolved path.
-        //
-        // Since the `path` argument has already been translated from virtual to
-        // host paths by the runtime's tool execution layer (translate_tool_arg_paths),
-        // we can read directly.
-        let file_data =
-            tokio::fs::read(&request.path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: SEND_MEDIA_TOOL_NAME.to_owned(),
-                    message: format!("failed to read file `{}`: {}", request.path, e),
-                })?;
+        // Path translation and boundary checks are handled by the runtime's
+        // centralized path/security pipeline. Read bytes through the WASM
+        // runner so media file access uses the same capability sandbox as
+        // other file tools.
+        let encoded = self
+            .runner
+            .invoke(
+                FILE_READ_BYTES_OPERATION,
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({ "path": request.path }),
+                None,
+            )
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: SEND_MEDIA_TOOL_NAME.to_owned(),
+                message: format!("failed to read file `{}`: {}", request.path, error),
+            })?
+            .output;
+        let file_data = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: SEND_MEDIA_TOOL_NAME.to_owned(),
+                message: format!(
+                    "failed to decode file bytes for `{}` from sandbox: {}",
+                    request.path, error
+                ),
+            })?;
 
         if file_data.is_empty() {
             return Err(ToolError::ExecutionFailed {
@@ -205,8 +226,8 @@ fn parse_media_type(s: &str) -> Result<MediaType, ToolError> {
 }
 
 /// Register the `send_media` tool in the given registry.
-pub fn register_media_tools(registry: &mut crate::ToolRegistry) {
-    registry.register(SEND_MEDIA_TOOL_NAME, SendMediaTool::new());
+pub fn register_media_tools(registry: &mut crate::ToolRegistry, runner: Arc<dyn WasmToolRunner>) {
+    registry.register(SEND_MEDIA_TOOL_NAME, SendMediaTool::new(runner));
 }
 
 #[cfg(test)]
@@ -230,7 +251,7 @@ mod tests {
 
     #[test]
     fn send_media_tool_schema_has_required_fields() {
-        let tool = SendMediaTool::new();
+        let tool = SendMediaTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, SEND_MEDIA_TOOL_NAME);
         let params = schema.parameters.as_object().unwrap();
@@ -241,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_media_rejects_without_channel_capabilities() {
-        let tool = SendMediaTool::new();
+        let tool = SendMediaTool::default();
         let result = tool
             .execute(
                 r#"{"path": "/shared/test.jpg", "media_type": "photo"}"#,
@@ -260,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_media_rejects_unsupported_media_type() {
-        let tool = SendMediaTool::new();
+        let tool = SendMediaTool::default();
         // Channel with no media capabilities.
         let ctx = ToolExecutionContext {
             channel_capabilities: Some(types::ChannelCapabilities::tui()),

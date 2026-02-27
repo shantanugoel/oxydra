@@ -450,9 +450,10 @@ send_media(path: "/shared/chart.png", media_type: "photo", caption: "Monthly sal
 
 **How it works:**
 1. Validates channel supports the requested media type
-2. Reads file bytes from the workspace path
+2. Reads file bytes from the workspace path through the sandbox runner (`file_read_bytes` under the `FileReadOnly` capability profile)
 3. Emits a `StreamItem::Media(MediaAttachment)` through the `ToolExecutionContext.event_sender`
-4. Returns a confirmation message to the agent
+4. Runtime scrubs `MediaAttachment.file_path` to virtual paths before forwarding to gateway/channel adapters
+5. Returns a confirmation message to the agent
 
 The tool is registered globally but validates channel capabilities at runtime — calling it from a text-only channel (TUI) returns a clear error.
 
@@ -465,6 +466,9 @@ Agent calls send_media tool
 Tool reads file, emits StreamItem::Media(MediaAttachment)
     │
     ▼ via ToolExecutionContext.event_sender
+Runtime scrubs MediaAttachment.file_path
+    │
+    ▼
 RuntimeGatewayTurnRunner forwards StreamItem::Media to gateway
     │
     ▼

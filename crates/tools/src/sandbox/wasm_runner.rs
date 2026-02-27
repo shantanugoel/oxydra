@@ -11,6 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::Engine;
 use reqwest::{
     Client, RequestBuilder,
     header::{ACCEPT, ACCEPT_LANGUAGE, USER_AGENT},
@@ -252,6 +253,7 @@ impl HostWasmToolRunner {
     ) -> Result<String, String> {
         match tool_name {
             "file_read" => self.file_read(arguments),
+            "file_read_bytes" => self.file_read_bytes(arguments),
             "file_write" => self.file_write(arguments),
             "file_edit" => self.file_edit(arguments),
             "file_delete" => self.file_delete(arguments),
@@ -281,12 +283,13 @@ impl HostWasmToolRunner {
         }
 
         match tool_name {
-            "file_read" | "file_search" => {
+            "file_read" | "file_read_bytes" | "file_search" => {
                 let path = required_string(arguments, "path", tool_name)?;
                 self.enforce_mounted_path(profile, &path, false)
             }
             "file_list" => {
-                let path = optional_string(arguments, "path").unwrap_or_else(|| ".".to_owned());
+                let path = optional_string(arguments, "path")
+                    .unwrap_or_else(|| self.mounts.shared.to_string_lossy().into_owned());
                 self.enforce_mounted_path(profile, &path, false)
             }
             "file_write" | "file_edit" | "file_delete" => {
@@ -338,6 +341,12 @@ impl HostWasmToolRunner {
         fs::read_to_string(&path).map_err(|error| format!("failed to read `{path}`: {error}"))
     }
 
+    fn file_read_bytes(&self, arguments: &Value) -> Result<String, String> {
+        let path = required_string(arguments, "path", "file_read_bytes")?;
+        let bytes = fs::read(&path).map_err(|error| format!("failed to read `{path}`: {error}"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
     fn file_write(&self, arguments: &Value) -> Result<String, String> {
         let path = required_string(arguments, "path", "file_write")?;
         let content = required_string(arguments, "content", "file_write")?;
@@ -386,7 +395,8 @@ impl HostWasmToolRunner {
     }
 
     fn file_list(&self, arguments: &Value) -> Result<String, String> {
-        let path = optional_string(arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let path = optional_string(arguments, "path")
+            .unwrap_or_else(|| self.mounts.shared.to_string_lossy().into_owned());
         let mut entries = Vec::new();
         let directory =
             fs::read_dir(&path).map_err(|error| format!("failed to list `{path}`: {error}"))?;
@@ -504,7 +514,9 @@ fn required_string(arguments: &Value, field: &str, tool_name: &str) -> Result<St
 
 fn expected_capability_profile(tool_name: &str) -> Option<WasmCapabilityProfile> {
     match tool_name {
-        "file_read" | "file_search" | "file_list" => Some(WasmCapabilityProfile::FileReadOnly),
+        "file_read" | "file_read_bytes" | "file_search" | "file_list" => {
+            Some(WasmCapabilityProfile::FileReadOnly)
+        }
         "file_write" | "file_edit" | "file_delete" => Some(WasmCapabilityProfile::FileReadWrite),
         "web_fetch" | "web_search" => Some(WasmCapabilityProfile::Web),
         "vault_copyto_read" => Some(WasmCapabilityProfile::VaultReadStep),
@@ -834,6 +846,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use base64::Engine;
     use serde_json::json;
 
     use super::*;
@@ -919,6 +932,60 @@ mod tests {
         assert_eq!(result.metadata.operation_id.as_deref(), Some("operation-1"));
         assert_eq!(result.metadata.profile, WasmCapabilityProfile::FileReadOnly);
         assert_eq!(runner.audit_log().len(), 1);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn host_runner_file_read_bytes_returns_base64_encoded_data() {
+        let workspace_root = unique_workspace("wasm-read-bytes");
+        let shared_file = workspace_root.join(SHARED_DIR_NAME).join("photo.bin");
+        let expected = vec![0_u8, 1, 2, 3, 254, 255];
+        fs::write(&shared_file, &expected).expect("shared file should be writable");
+
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace_root);
+        let result = runner
+            .invoke(
+                "file_read_bytes",
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({ "path": shared_file.to_string_lossy() }),
+                None,
+            )
+            .await
+            .expect("file_read_bytes invocation should succeed");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(result.output.as_bytes())
+            .expect("base64 output should decode");
+        assert_eq!(decoded, expected);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn host_runner_file_list_without_path_defaults_to_shared_mount() {
+        let workspace_root = unique_workspace("wasm-list-default-shared");
+        let shared_file = workspace_root.join(SHARED_DIR_NAME).join("listed.txt");
+        let tmp_file = workspace_root
+            .join(TMP_DIR_NAME)
+            .join("hidden-from-default.txt");
+        fs::write(&shared_file, "in-shared").expect("shared file should be writable");
+        fs::write(&tmp_file, "in-tmp").expect("tmp file should be writable");
+
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace_root);
+        let result = runner
+            .invoke(
+                "file_list",
+                WasmCapabilityProfile::FileReadOnly,
+                &json!({}),
+                None,
+            )
+            .await
+            .expect("file_list invocation should succeed");
+        assert!(result.output.contains("listed.txt"));
+        assert!(
+            !result.output.contains("hidden-from-default.txt"),
+            "default listing should be rooted at shared/"
+        );
 
         let _ = fs::remove_dir_all(workspace_root);
     }

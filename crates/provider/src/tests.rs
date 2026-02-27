@@ -2957,7 +2957,10 @@ fn gemini_validate_rejects_audio_when_model_only_supports_image() {
     )
     .expect_err("audio should be rejected for image-only model");
     let message = format!("{error}");
-    assert!(message.contains("audio"), "error should mention audio: {message}");
+    assert!(
+        message.contains("audio"),
+        "error should mention audio: {message}"
+    );
 }
 
 // -- OpenAI Chat multimodal tests ------------------------------------------
@@ -2983,7 +2986,10 @@ fn openai_request_includes_image_url_content_for_image_attachment() {
 
     let user_msg = &json["messages"][0];
     let content = &user_msg["content"];
-    assert!(content.is_array(), "content should be an array for multimodal");
+    assert!(
+        content.is_array(),
+        "content should be an array for multimodal"
+    );
 
     let parts = content.as_array().unwrap();
     assert_eq!(parts.len(), 2);

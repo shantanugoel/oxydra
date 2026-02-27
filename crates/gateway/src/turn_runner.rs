@@ -180,7 +180,14 @@ impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
             attachments: Vec::new(),
         };
         let response = self
-            .run_turn(user_id, session_id, input, cancellation, delta_tx, TurnOrigin::default())
+            .run_turn(
+                user_id,
+                session_id,
+                input,
+                cancellation,
+                delta_tx,
+                TurnOrigin::default(),
+            )
             .await?;
         Ok(response.message.content.unwrap_or_default())
     }

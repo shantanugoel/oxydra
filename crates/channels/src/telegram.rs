@@ -229,12 +229,7 @@ impl TelegramAdapter {
 
         if let Some(error_frame) = self
             .gateway
-            .submit_turn_from_channel(
-                &session,
-                send_turn,
-                CHANNEL_ID,
-                Some(&channel_context_id),
-            )
+            .submit_turn_from_channel(&session, send_turn, CHANNEL_ID, Some(&channel_context_id))
             .await
         {
             if let GatewayServerFrame::Error(ref err) = error_frame {

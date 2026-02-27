@@ -52,19 +52,17 @@ The active tier is surfaced in startup logs and health/status endpoints. In `Mic
 
 ## WASM Tool Isolation
 
-**File:** `tools/src/sandbox/wasm_runner.rs`
+**File:** `tools/src/sandbox/wasm_wasi_runner.rs`, `tools/src/sandbox/wasm_runner.rs`
 
-**Current state: simulated isolation.** The `HostWasmToolRunner` enforces capability-scoped mount policies and path boundary checks, but executes operations directly on the host using `std::fs` rather than within a `wasmtime` WASM sandbox. The `wasmtime` crate is not currently a dependency. Policy enforcement (path canonicalization, mount boundary checks, capability profiles) is real and functional — but the isolation boundary is logical, not hardware-enforced.
-
-This means that while the security policy correctly rejects out-of-bounds paths and enforces read-only vs. read-write access, a sufficiently creative exploit (e.g., TOCTOU race between canonicalization and access) could bypass these checks. True WASM sandboxing would provide a hard isolation boundary where the guest code physically cannot access unmounted paths.
+The runtime prefers `WasmWasiToolRunner` (wasmtime + WASI preopens) for hard filesystem boundaries. If WASI initialization fails, it falls back to `HostWasmToolRunner`, which applies the same capability profiles and mount-policy checks in-process.
 
 ### Mount Profiles
 
-The policy profiles are defined and enforced, even though execution is host-based:
+The policy profiles are shared across both WASI and host fallback runners:
 
 | Profile | Tools | Mounts | Access |
 |---------|-------|--------|--------|
-| `FileReadOnly` | `file_read`, `file_search`, `file_list` | `shared`, `tmp`, `vault` | Read-only |
+| `FileReadOnly` | `file_read`, `file_read_bytes`, `file_search`, `file_list` | `shared`, `tmp`, `vault` | Read-only |
 | `FileReadWrite` | `file_write`, `file_edit`, `file_delete` | `shared`, `tmp` | Read-write (no vault) |
 | `Web` | `web_fetch`, `web_search` | None | No filesystem access |
 | `VaultReadStep` | `vault_copyto` (step 1) | `vault` | Read-only |
@@ -72,12 +70,12 @@ The policy profiles are defined and enforced, even though execution is host-base
 
 ### Execution Path
 
-When a tool is invoked through `HostWasmToolRunner`:
+When a tool is invoked through a `WasmToolRunner` backend:
 
-1. `enforce_capability_profile` selects the mount profile for the tool class
-2. `enforce_mounted_path` canonicalizes the target path via `fs::canonicalize` and verifies it falls within an allowed mount root
-3. Access mode (read-only vs. read-write) is checked against the profile
-4. If all checks pass, the operation executes via `std::fs` (e.g., `fs::read_to_string`, `fs::write`)
+1. `enforce_capability_profile` validates the requested capability profile for the operation
+2. Mount policy and path checks are applied for path-bearing arguments
+3. `WasmWasiToolRunner` executes the wasm guest with only the profile's preopened mounts; host fallback executes with equivalent policy checks
+4. Output is decoded from the guest/runner response and returned to the caller
 
 ### Vault Copy Two-Step Semantics
 
@@ -86,16 +84,7 @@ Moving data from the vault to the workspace requires two distinct, auditable inv
 1. **Read step** — uses `VaultReadStep` profile (vault read-only), reads the source file, returns content to host
 2. **Write step** — uses `VaultWriteStep` profile (shared/tmp read-write, no vault access), writes content to destination
 
-No single invocation has concurrent access to both `vault` and `shared`/`tmp`. Both steps are linked by a unique `operation_id` for audit logging. This two-step semantic is enforced at the policy level today; true WASM isolation would make it physically impossible for a single guest to access both.
-
-### Path to Real WASM Isolation
-
-The planned upgrade:
-- The `wasmtime` dependency is already in `crates/tools` behind the `wasm-isolation` feature flag
-- Compile tool operations as WASM modules with explicit WASI capability grants
-- Mount directories via WASI `preopens` so the guest physically cannot access unmounted paths
-- Web tools use host-function imports for HTTP access (already designed as a host-function HTTP proxy pattern)
-- The `WasmToolRunner` trait and capability profiles remain unchanged — only the execution backend changes
+No single invocation has concurrent access to both `vault` and `shared`/`tmp`. Both steps are linked by a unique `operation_id` for audit logging, and this split applies in both WASI and host fallback execution paths.
 
 ## Security Policy
 
@@ -107,7 +96,7 @@ The `WorkspaceSecurityPolicy` trait and implementation enforce boundaries before
 
 1. **Canonicalization** — `fs::canonicalize` resolves all symlinks, `..` components, and relative paths
 2. **Root boundary check** — the canonical path must start with one of the allowed roots (`shared`, `tmp`, `vault`)
-3. **Access mode check** — `file_write` cannot target `ReadOnly` roots
+3. **Access mode check** — access mode is driven by centralized tool path specs (`tool_path_fields`), including `send_media.path` (read-only) and `vault_copyto` source/destination mode split
 
 If a path fails any check, the tool call is blocked with `SecurityPolicyViolationReason::PathOutsideAllowedRoots`.
 
@@ -256,3 +245,4 @@ The complete security pipeline for a single tool call:
 ```
 
 Every step is logged via `tracing` spans for auditability.
+For `send_media`, attachment events are additionally wrapped so emitted media `file_path` values are scrubbed to virtual paths before channel delivery.

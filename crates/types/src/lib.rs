@@ -49,6 +49,7 @@ pub use model::{
     RuntimeProgressKind, StreamItem, ToolCall, ToolCallDelta, UsageUpdate, derive_caps,
     derive_input_caps,
 };
+pub use proactive::ProactiveSender;
 pub use provider::{Provider, ProviderStream};
 pub use runner::{
     BootstrapEnvelopeError, ChannelsConfig, ExecCommand, ExecCommandAck, KillSession,
@@ -67,5 +68,4 @@ pub use scheduler::{
 };
 pub use session::{SessionRecord, SessionStore};
 pub use tool::{FunctionDecl, SafetyTier, Tool, ToolExecutionContext, ToolParameterSchema};
-pub use proactive::ProactiveSender;
 pub use tracing::init_tracing;

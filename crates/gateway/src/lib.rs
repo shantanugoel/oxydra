@@ -362,6 +362,32 @@ impl GatewayServer {
         self.cancel_turn(session, cancel_turn).await
     }
 
+    /// Cancel all active turns for a user across all sessions.
+    ///
+    /// Returns the number of sessions for which a cancellation signal was sent.
+    pub async fn cancel_all_user_turns(&self, user_id: &str) -> usize {
+        let user = {
+            let users = self.users.read().await;
+            users.get(user_id).cloned()
+        };
+        let Some(user) = user else {
+            return 0;
+        };
+
+        let sessions: Vec<Arc<SessionState>> = {
+            let sessions = user.sessions.read().await;
+            sessions.values().cloned().collect()
+        };
+
+        let mut cancelled = 0usize;
+        for session in sessions {
+            if Self::cancel_session_active_turn(&session).await {
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
     /// Subscribe to server-sent events for a session.
     pub fn subscribe_events(
         &self,
@@ -621,6 +647,20 @@ impl GatewayServer {
                 } else {
                     Ok(())
                 }
+            }
+            GatewayClientFrame::CancelAllActiveTurns(cancel_all) => {
+                let cancelled = self.cancel_all_user_turns(&active_session.user_id).await;
+                if cancelled == 0 {
+                    return send_error_frame(
+                        sender,
+                        Some(cancel_all.request_id),
+                        Some(gateway_session),
+                        None,
+                        "no active turns to cancel",
+                    )
+                    .await;
+                }
+                Ok(())
             }
             GatewayClientFrame::HealthCheck(health_check) => {
                 let frame = self
@@ -1099,27 +1139,25 @@ impl GatewayServer {
         session: &Arc<SessionState>,
         cancel_turn: GatewayCancelActiveTurn,
     ) -> Option<GatewayServerFrame> {
-        let active_turn = session.active_turn.lock().await.clone();
-        match active_turn {
-            Some(active_turn) if active_turn.turn_id == cancel_turn.turn_id => {
-                active_turn.cancellation.cancel();
-                None
-            }
-            Some(active_turn) => Some(GatewayServerFrame::Error(GatewayErrorFrame {
-                request_id: Some(cancel_turn.request_id),
-                session: Some(session.gateway_session()),
-                turn: Some(GatewayTurnStatus {
-                    turn_id: active_turn.turn_id,
-                    state: GatewayTurnState::Running,
-                }),
-                message: "cancel request does not match active turn".to_owned(),
-            })),
-            None => Some(GatewayServerFrame::Error(GatewayErrorFrame {
+        if Self::cancel_session_active_turn(session).await {
+            None
+        } else {
+            Some(GatewayServerFrame::Error(GatewayErrorFrame {
                 request_id: Some(cancel_turn.request_id),
                 session: Some(session.gateway_session()),
                 turn: None,
                 message: "no active turn to cancel".to_owned(),
-            })),
+            }))
+        }
+    }
+
+    async fn cancel_session_active_turn(session: &Arc<SessionState>) -> bool {
+        let active_turn = session.active_turn.lock().await.clone();
+        if let Some(active_turn) = active_turn {
+            active_turn.cancellation.cancel();
+            true
+        } else {
+            false
         }
     }
 

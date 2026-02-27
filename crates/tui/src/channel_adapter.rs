@@ -11,10 +11,10 @@ use tokio_tungstenite::{
 };
 use types::{
     Channel, ChannelError, ChannelHealthStatus, ChannelInboundEvent, ChannelListenStream,
-    ChannelOutboundEvent, GATEWAY_PROTOCOL_VERSION, GatewayCancelActiveTurn, GatewayClientFrame,
-    GatewayClientHello, GatewayCreateSession, GatewayHealthCheck, GatewayListSessions,
-    GatewayServerFrame, GatewaySwitchSession, GatewayTurnProgress, GatewayTurnState,
-    GatewayTurnStatus,
+    ChannelOutboundEvent, GATEWAY_PROTOCOL_VERSION, GatewayCancelActiveTurn,
+    GatewayCancelAllActiveTurns, GatewayClientFrame, GatewayClientHello, GatewayCreateSession,
+    GatewayHealthCheck, GatewayListSessions, GatewayServerFrame, GatewaySwitchSession,
+    GatewayTurnProgress, GatewayTurnState, GatewayTurnStatus,
 };
 
 const TUI_CHANNEL_ID: &str = "tui";
@@ -193,6 +193,50 @@ impl TuiChannelAdapter {
             },
         ))?;
         Ok(TuiCtrlCOutcome::CancelActiveTurn)
+    }
+
+    pub async fn cancel_active_turn(
+        &self,
+        request_id: impl Into<String>,
+    ) -> Result<(), ChannelError> {
+        let request_id = request_id.into();
+        let (session_id, turn_id) = {
+            let state = self.state.lock().await;
+            let session_id = state
+                .session_id
+                .clone()
+                .ok_or_else(|| ChannelError::Unavailable {
+                    channel: TUI_CHANNEL_ID.to_owned(),
+                })?;
+            let turn_id = state.active_turn_id.clone().unwrap_or_default();
+            (session_id, turn_id)
+        };
+
+        self.enqueue_client_frame(GatewayClientFrame::CancelActiveTurn(
+            GatewayCancelActiveTurn {
+                request_id,
+                session_id,
+                turn_id,
+            },
+        ))
+    }
+
+    pub async fn cancel_all_active_turns(
+        &self,
+        request_id: impl Into<String>,
+    ) -> Result<(), ChannelError> {
+        let request_id = request_id.into();
+        {
+            let state = self.state.lock().await;
+            if state.session_id.is_none() {
+                return Err(ChannelError::Unavailable {
+                    channel: TUI_CHANNEL_ID.to_owned(),
+                });
+            }
+        }
+        self.enqueue_client_frame(GatewayClientFrame::CancelAllActiveTurns(
+            GatewayCancelAllActiveTurns { request_id },
+        ))
     }
 
     fn enqueue_client_frame(&self, frame: GatewayClientFrame) -> Result<(), ChannelError> {
@@ -762,6 +806,53 @@ mod tests {
             .await
             .expect("idle ctrl+c should request exit");
         assert_eq!(idle_outcome, TuiCtrlCOutcome::Exit);
+    }
+
+    #[tokio::test]
+    async fn slash_cancel_methods_enqueue_expected_frames() {
+        let adapter = TuiChannelAdapter::new("alice", "conn-1");
+        adapter
+            .apply_gateway_frame(&hello_ack("runtime-alice", None))
+            .await;
+
+        let mut inbound = adapter
+            .listen(8)
+            .await
+            .expect("listen should return stream");
+
+        adapter
+            .cancel_active_turn("req-cancel")
+            .await
+            .expect("cancel should enqueue a frame");
+        let cancel_event = inbound
+            .recv()
+            .await
+            .expect("cancel event should be available")
+            .expect("cancel event should be valid");
+        match cancel_event.frame {
+            GatewayClientFrame::CancelActiveTurn(cancel) => {
+                assert_eq!(cancel.request_id, "req-cancel");
+                assert_eq!(cancel.session_id, "runtime-alice");
+                assert_eq!(cancel.turn_id, "");
+            }
+            other => panic!("expected cancel frame, got {other:?}"),
+        }
+
+        adapter
+            .cancel_all_active_turns("req-cancel-all")
+            .await
+            .expect("cancel-all should enqueue a frame");
+        let cancel_all_event = inbound
+            .recv()
+            .await
+            .expect("cancel-all event should be available")
+            .expect("cancel-all event should be valid");
+        match cancel_all_event.frame {
+            GatewayClientFrame::CancelAllActiveTurns(cancel_all) => {
+                assert_eq!(cancel_all.request_id, "req-cancel-all");
+            }
+            other => panic!("expected cancel-all frame, got {other:?}"),
+        }
     }
 
     #[tokio::test]

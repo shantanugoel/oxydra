@@ -1,11 +1,11 @@
 use serde_json::json;
 use types::{
-    GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn, GatewayClientFrame,
-    GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck, GatewayHealthStatus,
-    GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession, GatewayTurnCancelled,
-    GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted, GatewayTurnState,
-    GatewayTurnStatus, Message, MessageRole, Response, RuntimeProgressEvent, RuntimeProgressKind,
-    SandboxTier, StartupStatusReport,
+    GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn,
+    GatewayCancelAllActiveTurns, GatewayClientFrame, GatewayClientHello, GatewayErrorFrame,
+    GatewayHealthCheck, GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame,
+    GatewaySession, GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress,
+    GatewayTurnStarted, GatewayTurnState, GatewayTurnStatus, Message, MessageRole, Response,
+    RuntimeProgressEvent, RuntimeProgressKind, SandboxTier, StartupStatusReport,
 };
 
 fn sample_session() -> GatewaySession {
@@ -58,6 +58,9 @@ fn gateway_client_frames_round_trip_through_serde() {
             request_id: "req-cancel".to_owned(),
             session_id: "session-1".to_owned(),
             turn_id: "turn-1".to_owned(),
+        }),
+        GatewayClientFrame::CancelAllActiveTurns(GatewayCancelAllActiveTurns {
+            request_id: "req-cancel-all".to_owned(),
         }),
         GatewayClientFrame::HealthCheck(GatewayHealthCheck {
             request_id: "req-health".to_owned(),

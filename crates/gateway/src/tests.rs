@@ -537,6 +537,213 @@ async fn cancel_active_turn_cancels_only_current_turn() {
 }
 
 #[tokio::test]
+async fn cancel_active_turn_ignores_turn_id_mismatch() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![
+        ScriptedTurn::cancellation_aware(vec![(Duration::from_millis(5), "working")]),
+    ]));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+    let mut socket = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: false,
+        }),
+    )
+    .await;
+
+    let session_id = match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn".to_owned(),
+            session_id: session_id.clone(),
+            turn_id: "turn-1".to_owned(),
+            prompt: "long task".to_owned(),
+            attachments: Vec::new(),
+        }),
+    )
+    .await;
+
+    let _ = receive_server_frame(&mut socket).await;
+    let _ = receive_server_frame(&mut socket).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::CancelActiveTurn(GatewayCancelActiveTurn {
+            request_id: "req-cancel".to_owned(),
+            session_id,
+            turn_id: "wrong-turn-id".to_owned(),
+        }),
+    )
+    .await;
+
+    let mut cancelled = false;
+    for _ in 0..4 {
+        if let GatewayServerFrame::TurnCancelled(cancelled_frame) =
+            receive_server_frame(&mut socket).await
+        {
+            assert_eq!(cancelled_frame.turn.turn_id, "turn-1");
+            cancelled = true;
+            break;
+        }
+    }
+    assert!(cancelled, "expected turn_cancelled frame");
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn cancel_all_active_turns_cancels_all_user_sessions() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![
+        ScriptedTurn::cancellation_aware(vec![(Duration::from_millis(5), "working-1")]),
+        ScriptedTurn::cancellation_aware(vec![(Duration::from_millis(5), "working-2")]),
+    ]));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+    let mut socket_one = connect_gateway(address).await;
+    let mut socket_two = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket_one,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-1".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let session_one = match receive_server_frame(&mut socket_one).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    send_client_frame(
+        &mut socket_two,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello-2".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: true,
+        }),
+    )
+    .await;
+    let session_two = match receive_server_frame(&mut socket_two).await {
+        GatewayServerFrame::HelloAck(ack) => ack.session.session_id,
+        other => panic!("expected hello_ack, got {other:?}"),
+    };
+
+    assert_ne!(session_one, session_two);
+
+    send_client_frame(
+        &mut socket_one,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-1".to_owned(),
+            session_id: session_one.clone(),
+            turn_id: "turn-1".to_owned(),
+            prompt: "long task one".to_owned(),
+            attachments: Vec::new(),
+        }),
+    )
+    .await;
+    send_client_frame(
+        &mut socket_two,
+        GatewayClientFrame::SendTurn(GatewaySendTurn {
+            request_id: "req-turn-2".to_owned(),
+            session_id: session_two.clone(),
+            turn_id: "turn-2".to_owned(),
+            prompt: "long task two".to_owned(),
+            attachments: Vec::new(),
+        }),
+    )
+    .await;
+
+    let _ = receive_server_frame(&mut socket_one).await;
+    let _ = receive_server_frame(&mut socket_two).await;
+
+    send_client_frame(
+        &mut socket_one,
+        GatewayClientFrame::CancelAllActiveTurns(types::GatewayCancelAllActiveTurns {
+            request_id: "req-cancel-all".to_owned(),
+        }),
+    )
+    .await;
+
+    let mut cancelled_one = false;
+    let mut cancelled_two = false;
+    for _ in 0..6 {
+        if let GatewayServerFrame::TurnCancelled(cancelled) =
+            receive_server_frame(&mut socket_one).await
+        {
+            assert_eq!(cancelled.session.session_id, session_one);
+            cancelled_one = true;
+            break;
+        }
+    }
+    for _ in 0..6 {
+        if let GatewayServerFrame::TurnCancelled(cancelled) =
+            receive_server_frame(&mut socket_two).await
+        {
+            assert_eq!(cancelled.session.session_id, session_two);
+            cancelled_two = true;
+            break;
+        }
+    }
+    assert!(cancelled_one, "expected turn_cancelled on first session");
+    assert!(cancelled_two, "expected turn_cancelled on second session");
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn cancel_all_active_turns_returns_error_when_idle() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let (address, server_task) = spawn_gateway_server(runtime).await;
+    let mut socket = connect_gateway(address).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::Hello(GatewayClientHello {
+            request_id: "req-hello".to_owned(),
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            user_id: "alice".to_owned(),
+            session_id: None,
+            create_new_session: false,
+        }),
+    )
+    .await;
+    let _ = receive_server_frame(&mut socket).await;
+
+    send_client_frame(
+        &mut socket,
+        GatewayClientFrame::CancelAllActiveTurns(types::GatewayCancelAllActiveTurns {
+            request_id: "req-cancel-all".to_owned(),
+        }),
+    )
+    .await;
+
+    match receive_server_frame(&mut socket).await {
+        GatewayServerFrame::Error(error) => {
+            assert_eq!(error.request_id.as_deref(), Some("req-cancel-all"));
+            assert_eq!(error.message, "no active turns to cancel");
+        }
+        other => panic!("expected error frame, got {other:?}"),
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn reconnect_during_active_turn_reports_running_and_continues_streaming() {
     let runtime = Arc::new(ScriptedTurnRunner::new(vec![
         ScriptedTurn::completed_with_delay(

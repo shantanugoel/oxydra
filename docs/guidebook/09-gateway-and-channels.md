@@ -29,7 +29,8 @@ Communication between channels and the gateway uses typed JSON frames over WebSo
 pub enum GatewayClientFrame {
     Hello(GatewayClientHello),      // { user_id, session_id?, create_new_session }
     SendTurn(GatewaySendTurn),      // { session_id, turn_id, prompt, attachments? }
-    CancelActiveTurn(GatewayCancelActiveTurn),  // { session_id, turn_id }
+    CancelActiveTurn(GatewayCancelActiveTurn),  // { session_id, turn_id } (turn_id is advisory)
+    CancelAllActiveTurns(GatewayCancelAllActiveTurns), // { request_id } user-wide cancel
     HealthCheck(GatewayHealthCheck),
     CreateSession(GatewayCreateSession),        // { display_name?, agent_name? }
     ListSessions(GatewayListSessions),          // { include_archived, include_subagent_sessions }
@@ -157,12 +158,14 @@ The gateway maintains a `latest_terminal_frame` buffer per session. When a TUI c
 ### Cancellation
 
 When a `CancelActiveTurn` frame arrives:
-1. The gateway fires the `CancellationToken` for the active turn
-2. The runtime's `tokio::select!` catches the cancellation
-3. The turn is aborted cleanly
-4. A `TurnCancelled` frame is sent to the client
+1. The gateway looks up the session's active turn
+2. If one exists, it fires that turn's `CancellationToken` (without requiring exact turn-id match)
+3. The runtime's `tokio::select!` catches the cancellation
+4. The turn is aborted cleanly and a `TurnCancelled` frame is sent
 
 This ensures Ctrl+C in the TUI cancels only the active turn without killing the guest process.
+
+When a `CancelAllActiveTurns` frame arrives, the gateway iterates all sessions for that user and fires cancellation tokens for every currently active turn.
 
 ### Scheduler Notification
 
@@ -245,8 +248,10 @@ The TUI intercepts slash commands before sending them as turns:
 - `/new [name]` → `CreateSession` with optional display name
 - `/sessions` → `ListSessions` (shows formatted listing in chat)
 - `/switch <session_id>` → `SwitchSession` (prefix matching supported)
+- `/cancel` → `CancelActiveTurn` (session-scoped)
+- `/cancelall` → `CancelAllActiveTurns` (user-scoped across sessions)
 
-The status bar shows the current session ID (shortened to 8 chars) and idle hints for available commands: `[Ctrl+C to exit | /new /sessions /switch]`.
+The status bar shows the current session ID (shortened to 8 chars) and idle hints for available commands: `[Ctrl+C to exit | /new /sessions /switch /cancel /cancelall]`.
 
 The `--session <id>` CLI flag on `oxydra-tui` joins an existing session instead of creating a new one. Without the flag, a new session is created automatically on first connect.
 

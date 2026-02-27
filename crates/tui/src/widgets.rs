@@ -413,7 +413,7 @@ impl Widget for StatusBar<'_> {
         let hint = if self.active_turn_id.is_some() {
             " [Ctrl+C to cancel]"
         } else {
-            " [Ctrl+C to exit | /new /sessions /switch]"
+            " [Ctrl+C to exit | /new /sessions /switch /cancel /cancelall]"
         };
         spans.push(Span::styled(hint, Style::new().fg(Color::DarkGray)));
 

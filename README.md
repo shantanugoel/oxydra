@@ -233,7 +233,7 @@ In Telegram groups with forum mode enabled, each topic maps to an independent se
 
 **Session commands via Telegram:**
 
-The same `/new`, `/sessions`, `/switch`, `/cancel`, and `/status` commands work in Telegram as in the TUI.
+The same `/new`, `/sessions`, `/switch`, `/cancel`, `/cancelall`, and `/status` commands work in Telegram as in the TUI.
 
 See [`examples/config/runner-user.toml`](examples/config/runner-user.toml) for the full annotated channel configuration reference.
 

@@ -232,6 +232,11 @@ pub struct GatewayCancelActiveTurn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayCancelAllActiveTurns {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayHealthCheck {
     pub request_id: String,
 }
@@ -272,6 +277,7 @@ pub enum GatewayClientFrame {
     Hello(GatewayClientHello),
     SendTurn(GatewaySendTurn),
     CancelActiveTurn(GatewayCancelActiveTurn),
+    CancelAllActiveTurns(GatewayCancelAllActiveTurns),
     HealthCheck(GatewayHealthCheck),
     CreateSession(GatewayCreateSession),
     ListSessions(GatewayListSessions),

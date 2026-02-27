@@ -715,6 +715,18 @@ impl TuiApp {
                     Err(e) => Some(Err(format!("failed to switch session: {e}"))),
                 }
             }
+            "/cancel" => match self.adapter.cancel_active_turn(next_request_id()).await {
+                Ok(()) => Some(Ok(())),
+                Err(e) => Some(Err(format!("failed to cancel turn: {e}"))),
+            },
+            "/cancelall" => match self
+                .adapter
+                .cancel_all_active_turns(next_request_id())
+                .await
+            {
+                Ok(()) => Some(Ok(())),
+                Err(e) => Some(Err(format!("failed to cancel all turns: {e}"))),
+            },
             _ => {
                 // Unknown slash command — treat as a regular prompt.
                 None

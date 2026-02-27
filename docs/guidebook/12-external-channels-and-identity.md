@@ -275,7 +275,7 @@ Dynamic onboarding can be added later as an enhancement on top of the static bin
 | Telegram adapter (`TelegramAdapter`) | ✅ Implemented | `channels/src/telegram.rs` |
 | Edit-message streaming (`ResponseStreamer`) | ✅ Implemented | `channels/src/telegram.rs` |
 | Markdown → Telegram HTML conversion | ✅ Implemented | `channels/src/telegram.rs` |
-| Telegram command interception (`/new`, `/sessions`, `/switch`, `/cancel`, `/status`) | ✅ Implemented | `channels/src/telegram.rs` |
+| Telegram command interception (`/new`, `/sessions`, `/switch`, `/cancel`, `/cancelall`, `/status`) | ✅ Implemented | `channels/src/telegram.rs` |
 | Adapter spawning in oxydra-vm | ✅ Implemented | `runner/src/bin/oxydra-vm.rs` |
 | Feature-flagged `telegram` in channels + runner | ✅ Implemented | `channels/Cargo.toml`, `runner/Cargo.toml` |
 | Discord/Slack/WhatsApp adapters | Deferred | — |
@@ -299,7 +299,7 @@ TelegramAdapter::run() loop
     ├── Extract sender ID (message.from.id)
     ├── SenderAuthPolicy.is_authorized() → reject + audit, or continue
     ├── derive_channel_context_id(chat_id, thread_id)
-    ├── Command interception (/new, /sessions, /switch, /cancel, /status, /help)
+    ├── Command interception (/new, /sessions, /switch, /cancel, /cancelall, /status, /help)
     │    └── Call gateway internal API directly
     ├── ChannelSessionMap.get_session_id() → resolve or create session
     ├── gateway.subscribe_events() (before submit, to not miss frames)
@@ -350,6 +350,7 @@ HTML conversion is used only in the final edit. Interim edits use plain text for
 | `/sessions` | List active sessions |
 | `/switch <id>` | Switch to a different session |
 | `/cancel` | Cancel the active turn |
+| `/cancelall` | Cancel active turns across all sessions for the user |
 | `/status` | Show current session info |
 | `/start`, `/help` | Show help text |
 

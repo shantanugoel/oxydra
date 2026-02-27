@@ -556,6 +556,22 @@ impl TelegramAdapter {
                 }
                 true
             }
+            "cancelall" => {
+                let cancelled = self.gateway.cancel_all_user_turns(&self.user_id).await;
+                if cancelled == 0 {
+                    self.send_reply(chat_id, thread_id, "ℹ️ No active turns to cancel.")
+                        .await;
+                } else {
+                    let suffix = if cancelled == 1 { "" } else { "s" };
+                    self.send_reply(
+                        chat_id,
+                        thread_id,
+                        &format!("🛑 Cancelled {cancelled} active turn{suffix}."),
+                    )
+                    .await;
+                }
+                true
+            }
             "status" => {
                 let session_id = self
                     .session_map
@@ -583,6 +599,7 @@ impl TelegramAdapter {
                     /sessions — list sessions\n\
                     /switch <id> — switch to a session\n\
                     /cancel — cancel active turn\n\
+                    /cancelall — cancel active turns in all sessions\n\
                     /status — show current session info";
                 self.send_reply(chat_id, thread_id, help).await;
                 true

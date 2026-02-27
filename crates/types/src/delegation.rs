@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ProviderSelection, RuntimeError, StreamItem};
+use crate::{InlineMedia, ProviderSelection, RuntimeError, StreamItem};
 
 /// Progress reporter used by delegation implementations. Implementations can
 /// provide a closure that accepts StreamItem values and forwards them to the
@@ -31,6 +31,8 @@ pub struct DelegationRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DelegationResult {
     pub output: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<InlineMedia>,
     pub turns_used: usize,
     pub cost_used: f64,
     pub status: DelegationStatus,

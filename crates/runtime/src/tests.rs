@@ -1289,7 +1289,7 @@ async fn run_session_exposes_registered_tools_to_provider_context() {
 async fn run_session_omits_tool_schemas_when_model_does_not_support_tools() {
     let provider_id = ProviderId::from("gemini");
     let model_id = ModelId::from("gemini-2.5-flash-image");
-    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), false, false);
+    let mut provider = mock_provider(provider_id.clone(), model_id.clone(), true, false);
     provider.expect_stream().never();
     provider
         .expect_complete()

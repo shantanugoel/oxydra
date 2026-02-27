@@ -8,7 +8,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     FunctionDecl, SafetyTier, Tool, ToolError, ToolExecutionContext, execution_failed, parse_args,
 };
-use types::{AgentDefinition, DelegationRequest, ProviderSelection};
+use types::{
+    AgentDefinition, DelegationRequest, MediaAttachment, MediaType, ProviderSelection, StreamItem,
+};
 
 pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
 
@@ -84,6 +86,31 @@ impl DelegateToAgentTool {
     }
 }
 
+fn media_type_from_mime(mime_type: &str) -> MediaType {
+    if mime_type.starts_with("image/") {
+        MediaType::Photo
+    } else if mime_type.starts_with("audio/") {
+        MediaType::Audio
+    } else if mime_type.starts_with("video/") {
+        MediaType::Video
+    } else {
+        MediaType::Document
+    }
+}
+
+fn extension_from_mime(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "video/mp4" => "mp4",
+        _ => "bin",
+    }
+}
+
 #[async_trait]
 impl Tool for DelegateToAgentTool {
     fn schema(&self) -> FunctionDecl {
@@ -140,8 +167,32 @@ impl Tool for DelegateToAgentTool {
                 )
             })?;
 
-        // Return the subagent output as plain text. Caller can parse the JSON
-        // if they require metadata; otherwise plain string is most convenient.
+        if let Some(sender) = context.event_sender.as_ref() {
+            for (index, attachment) in result.attachments.iter().enumerate() {
+                let extension = extension_from_mime(&attachment.mime_type);
+                let file_name = format!("delegated-output-{}.{}", index + 1, extension);
+                let file_path = format!("/tmp/{file_name}");
+                let _ = sender.send(StreamItem::Media(MediaAttachment {
+                    file_path,
+                    media_type: media_type_from_mime(&attachment.mime_type),
+                    caption: None,
+                    data: attachment.data.clone(),
+                    file_name: Some(file_name),
+                }));
+            }
+        }
+
+        if !result.attachments.is_empty() {
+            let notice = format!(
+                "Delegated agent completed with {} attachment(s), and they have already been delivered to the user. Do not call send_media for these delegated outputs, and do not re-delegate the same goal unless the user asks for more variants.",
+                result.attachments.len()
+            );
+            if result.output.trim().is_empty() {
+                return Ok(notice);
+            }
+            return Ok(format!("{notice}\n\nSubagent summary:\n{}", result.output));
+        }
+
         Ok(result.output)
     }
 

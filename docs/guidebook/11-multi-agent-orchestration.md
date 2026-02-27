@@ -8,7 +8,7 @@ This chapter describes the planned design for subagent spawning, delegation, sta
 
 ## Subagent Delegation Model
 
-Status (update): Partial implementation complete — Agent definitions, agent-specific model/provider routing, and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap with config-aware specialist schema, top-level sessions route by `agent_name`, and delegation resolves explicit vs inherited selection (`default` always root). Runtime requests also honor model capabilities from catalog/provider caps: when `supports_tools` is false, tool schemas are omitted from provider requests for that turn. Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
+Status (update): Partial implementation complete — Agent definitions, agent-specific model/provider routing, and a runtime-backed delegation executor are implemented. The `delegate_to_agent` tool is registered at bootstrap with config-aware specialist schema, top-level sessions route by `agent_name`, and delegation resolves explicit vs inherited selection (`default` always root). Runtime requests also honor model capabilities from catalog/provider caps: when `supports_tools` is false, tool schemas are omitted from provider requests for that turn. Delegated runs now propagate output attachments (for example generated images) back to the parent turn via media stream events. Remaining work: state graph engine, lane-based queueing, and more conservative tool allowlisting per-agent.
 
 
 
@@ -50,11 +50,11 @@ Subagent execution uses `tokio::select!` over completion, timeout, cancellation,
 ### Result Handoff
 
 When a subagent completes, its output is returned to the parent as a structured result:
-- Success: the output formatted per the `expected_output_format`
+- Success: text output plus optional media attachments produced by the subagent model
 - Failure: an error description plus partial results if any were produced
 - Budget exhaustion: partial results with an explicit "budget exceeded" signal
 
-The parent agent receives this as a tool result message and can decide whether to retry with a new subagent, adjust the brief, or present the result to the user.
+The parent agent receives this as a tool result message and can decide whether to retry with a new subagent, adjust the brief, or present the result to the user. When attachments are present, `delegate_to_agent` forwards them through `StreamItem::Media` so channels can deliver them directly to the user.
 
 ## State Graph Routing
 

@@ -166,6 +166,7 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
         match response {
             Ok(resp) => Ok(DelegationResult {
                 output: resp.message.content.unwrap_or_default(),
+                attachments: resp.message.attachments,
                 turns_used: 1, // best-effort
                 cost_used: 0.0,
                 status: DelegationStatus::Completed,

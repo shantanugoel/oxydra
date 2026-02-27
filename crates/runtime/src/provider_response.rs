@@ -21,7 +21,9 @@ impl AgentRuntime {
             request_context.tools.clear();
             request_context
         };
-        if caps.supports_streaming {
+        // Non-tool-capable models (for example image-generation models) may
+        // return non-text payloads that are only available on complete responses.
+        if caps.supports_streaming && caps.supports_tools {
             match self
                 .stream_response(
                     provider,

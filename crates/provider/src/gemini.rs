@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use types::{
-    Context, FunctionDecl, Message, MessageRole, ModelCatalog, Provider, ProviderError, ProviderId,
-    ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta, UsageUpdate,
+    Context, FunctionDecl, InlineMedia, Message, MessageRole, ModelCatalog, Provider,
+    ProviderError, ProviderId, ProviderStream, Response, StreamItem, ToolCall, ToolCallDelta,
+    UsageUpdate,
 };
 
 use crate::{
@@ -666,6 +668,7 @@ pub(crate) fn normalize_gemini_response(
 
     let mut text_chunks = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut attachments = Vec::new();
 
     if let Some(content) = &candidate.content {
         for part in &content.parts {
@@ -686,6 +689,18 @@ pub(crate) fn normalize_gemini_response(
                     metadata,
                 });
             }
+            if let Some(inline_data) = &part.inline_data {
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(&inline_data.data)
+                    .map_err(|error| ProviderError::ResponseParse {
+                        provider: provider.clone(),
+                        message: format!("failed to decode Gemini inlineData attachment: {error}"),
+                    })?;
+                attachments.push(InlineMedia {
+                    mime_type: inline_data.mime_type.clone(),
+                    data,
+                });
+            }
         }
     }
 
@@ -704,7 +719,7 @@ pub(crate) fn normalize_gemini_response(
         },
         tool_calls: tool_calls.clone(),
         tool_call_id: None,
-        attachments: Vec::new(),
+        attachments,
     };
 
     Ok(Response {

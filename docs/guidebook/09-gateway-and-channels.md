@@ -141,13 +141,14 @@ When a `SendTurn` frame arrives:
 3. If an active turn exists, the request is rejected with an error
 4. A `RuntimeGatewayTurnRunner` is created to bridge gateway and runtime
 5. The runner constructs a `Context` and a per-turn `ToolExecutionContext` (with user_id and session_id), then calls `AgentRuntime::run_session_for_session_with_stream_events`, passing the tool context as a parameter (not stored as shared state)
-5. Stream items from the runtime are forwarded according to type:
+6. Stream items from the runtime are forwarded according to type:
    - `StreamItem::Text(delta)` → published as an `AssistantDelta` frame
    - `StreamItem::Progress(event)` → published as a `TurnProgress` frame (channels display it however fits their UX; the TUI shows it in the input bar title)
+   - `StreamItem::Media(attachment)` → published as a `MediaAttachment` frame for channel delivery
    - All other `StreamItem` variants (tool call assembly, reasoning traces, usage updates) are not forwarded to channels
-6. On completion, a `TurnCompleted` frame is sent with the final message and usage data
+7. On completion, a `TurnCompleted` frame is sent with the final message and usage data
 
-The internal `delta_sender` channel between `RuntimeGatewayTurnRunner` and the gateway's spawn loop carries `StreamItem` values (not raw strings), allowing the gateway to distinguish text deltas from progress events.
+The internal `delta_sender` channel between `RuntimeGatewayTurnRunner` and the gateway's spawn loop carries `StreamItem` values (not raw strings), allowing the gateway to distinguish text deltas from progress and media events.
 
 ### Reconnection Support
 

@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine;
 use insta::assert_json_snapshot;
 use serde_json::json;
 use types::{
@@ -18,6 +19,7 @@ use types::{
 };
 
 use super::*;
+use crate::gemini::GeminiInlineData;
 
 #[test]
 fn api_key_resolution_uses_expected_precedence() {
@@ -1782,6 +1784,37 @@ fn gemini_response_normalization() {
         })
     );
     assert!(normalized.tool_calls.is_empty());
+}
+
+#[test]
+fn gemini_response_normalization_includes_inline_data_attachments() {
+    let image_bytes = vec![0x89, 0x50, 0x4E, 0x47];
+    let response = GeminiGenerateContentResponse {
+        candidates: vec![GeminiCandidate {
+            content: Some(GeminiContent {
+                role: "model".to_owned(),
+                parts: vec![GeminiPart {
+                    text: None,
+                    function_call: None,
+                    function_response: None,
+                    thought_signature: None,
+                    inline_data: Some(GeminiInlineData {
+                        mime_type: "image/png".to_owned(),
+                        data: base64::engine::general_purpose::STANDARD.encode(&image_bytes),
+                    }),
+                }],
+            }),
+            finish_reason: Some("STOP".to_owned()),
+        }],
+        usage_metadata: None,
+    };
+
+    let normalized =
+        normalize_gemini_response(response, &ProviderId::from("gemini")).expect("should parse");
+    assert_eq!(normalized.message.content, None);
+    assert_eq!(normalized.message.attachments.len(), 1);
+    assert_eq!(normalized.message.attachments[0].mime_type, "image/png");
+    assert_eq!(normalized.message.attachments[0].data, image_bytes);
 }
 
 #[test]

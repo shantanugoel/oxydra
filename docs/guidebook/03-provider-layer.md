@@ -466,3 +466,9 @@ Each provider encodes attachments in its native wire format:
 - **OpenAI Chat:** Content array with `image_url` data URIs (`data:{mime};base64,{data}`)
 - **OpenAI Responses:** Content array with `input_image` and data URI `image_url`
 - **Anthropic:** `image` content blocks with base64 source for images; `document` content blocks for PDFs
+
+### Model-Generated Media Output
+
+Some multimodal models return generated media as inline binary parts instead of plain text. For Gemini, Oxydra normalizes candidate `inlineData` output parts into `Response.message.attachments` (`Vec<InlineMedia>`) by base64-decoding each part.
+
+This preserves generated media across runtime/delegation boundaries so higher layers can deliver it through the existing media event pipeline (`StreamItem::Media` → gateway `MediaAttachment` frame → channel adapter).

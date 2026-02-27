@@ -106,6 +106,7 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `web_search` | `SideEffecting` | Performs web searches via configured providers |
 | `vault_copyto` | `SideEffecting` | Securely copies data from vault to shared/tmp workspace |
 | `send_media` | `ReadOnly` | Sends a workspace file as a channel media attachment |
+| `delegate_to_agent` | `SideEffecting` | Delegates a goal to a named specialist agent; forwards delegated media outputs when available |
 | `shell_exec` | `Privileged` | Executes shell commands (via sidecar or host) |
 | `memory_search` | `ReadOnly` | Searches the user's personal memory store |
 | `memory_save` | `SideEffecting` | Saves a new note to the user's memory |

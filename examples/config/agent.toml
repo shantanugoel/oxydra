@@ -58,6 +58,14 @@ fallback_max_context_tokens = 128000 # Used when the model catalog has no entry
 target_ratio = 0.5  # Target context usage after summarization (fraction of max)
 min_turns    = 6    # Minimum turns before summarization is eligible
 
+# --- Gateway (session + top-level turn controls) ---
+# Top-level user turns queue fairly (FIFO) once concurrent capacity is reached.
+# Subagent turns run under the parent turn and do not consume extra top-level permits.
+[gateway]
+max_sessions_per_user = 50
+max_concurrent_turns_per_user = 10
+session_idle_ttl_hours = 48
+
 # --- Memory (libSQL-backed persistence) ---
 [memory]
 enabled = false

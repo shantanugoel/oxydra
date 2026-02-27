@@ -13,7 +13,7 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 - **Persistent memory** — Hybrid retrieval (vector + FTS5) over libSQL with conversation summarization and LLM-callable memory tools (search, save, update, delete)
 - **Scheduler** — Durable one-off and periodic task scheduling with cron/interval cadences, origin-aware notification routing (back to the creating channel), full run output storage, run history tools, failure notifications, and automatic execution through the same agent runtime policy envelope
 - **Isolation tiers** — MicroVM, container, and process-level sandboxing via the runner/guest model
-- **Multi-session gateway** — Protocol v2 WebSocket gateway with per-user multi-session support, session persistence, concurrent turn management, and pluggable channel adapters
+- **Multi-session gateway** — Protocol v2 WebSocket gateway with per-user multi-session support, session persistence, bounded FIFO top-level turn queueing (default 10 concurrent turns/user), session caps (default 50), idle TTL cleanup (default 48h), and pluggable channel adapters
 - **Session lifecycle** — Create, list, and switch between named sessions from the TUI (`/new`, `/sessions`, `/switch`) or via the `--session` CLI flag
 - **External channels (Telegram)** — In-process Telegram bot adapter with pre-configured sender authorization, forum topic threading, and live edit-message streaming responses
 - **Configuration** — Layered config (files, env vars, CLI overrides) with deterministic precedence and validation
@@ -162,6 +162,7 @@ Once connected, you can manage multiple sessions from within the TUI:
 | `/switch <id>` | Switch the TUI to an existing session by ID (prefix match) |
 
 Each TUI window manages one session at a time. You can open multiple TUI windows connected to the same gateway to work in multiple sessions simultaneously.
+When the per-user concurrent turn limit is reached, new top-level turns queue fairly (FIFO) instead of being dropped, up to the configured per-user queue bound.
 
 ## Configuration
 
@@ -198,7 +199,7 @@ The runner requires two config files:
 
 See `examples/config/` for complete annotated configuration files:
 
-- [`agent.toml`](examples/config/agent.toml) — Agent runtime, provider, memory, and reliability settings
+- [`agent.toml`](examples/config/agent.toml) — Agent runtime, provider, memory, reliability, and gateway session/turn limits
 - [`runner.toml`](examples/config/runner.toml) — Runner global settings (workspace root, sandbox tier, guest images, users)
 - [`runner-user.toml`](examples/config/runner-user.toml) — Per-user overrides (mounts, resources, credentials, behavior, external channels)
 

@@ -17,7 +17,7 @@ pub trait Channel: Send + Sync {
 }
 ```
 
-The `Channel` trait is the same abstraction used by both the TUI and future external channel adapters (Telegram, Slack, etc.). This ensures all ingress follows the same routing semantics.
+The `Channel` trait is intentionally scoped to **WebSocket-based clients** (today: TUI). In-process external adapters (Telegram, Discord, Slack, etc.) call the gateway internal API directly instead of implementing this trait.
 
 ## Gateway Protocol
 
@@ -99,7 +99,9 @@ The gateway uses a two-level session model: users contain sessions, and each ses
 **User State** (`UserState`):
 - Keyed by `user_id`
 - Contains a `RwLock<HashMap<String, Arc<SessionState>>>` of all sessions for that user
-- Tracks per-user concurrent turn count via `AtomicU32` for concurrency limiting
+- Uses a per-user `Semaphore` for bounded top-level turn concurrency (`max_concurrent_turns_per_user`, default 10)
+- Uses FIFO permit acquisition (Tokio semaphore fairness) so queued top-level turns are handled fairly
+- Queueing is bounded per user (paired with `max_sessions_per_user`, default 50)
 
 **Session State** (`SessionState`):
 - Keyed by `session_id` (UUID v7 for new sessions, deterministic `runtime-{user_id}` for backward compatibility)
@@ -116,6 +118,7 @@ The gateway uses a two-level session model: users contain sessions, and each ses
 - Sessions are persisted on creation and touched (`last_active_at` updated) on turn completion
 - Sessions can be resumed from the store when not found in memory (e.g., after gateway restart)
 - The store supports listing, archiving, and parent-child relationships
+- A background cleanup task archives stale in-memory sessions (`session_idle_ttl_hours`, default 48) when they have no subscribers, then evicts their runtime context to cap memory growth
 
 ### Internal API for Channel Adapters
 
@@ -150,6 +153,8 @@ When a `SendTurn` frame arrives:
 7. On completion, a `TurnCompleted` frame is sent with the final message and usage data
 
 The internal `delta_sender` channel between `RuntimeGatewayTurnRunner` and the gateway's spawn loop carries `StreamItem` values (not raw strings), allowing the gateway to distinguish text deltas from progress and media events.
+
+Concurrency permits apply to top-level user turns only. Subagent turns execute under their parent turn's permit because delegation is synchronous from the parent tool call.
 
 ### Reconnection Support
 

@@ -44,26 +44,20 @@ pub struct ModelDescriptor {
 
 ## Explicit Session Lifecycle
 
-### Current State
+### Current State (Implemented)
 
-Sessions are currently created lazily on first message storage and identified by `session_id`. There is no explicit "new session" control — sessions continue indefinitely until the process restarts.
+Session lifecycle is now explicit and multi-session aware across TUI and external adapters:
 
-### New Session Control
+1. **Protocol controls:** `CreateSession`, `ListSessions`, and `SwitchSession` frame flows are implemented end-to-end.
+2. **Handshake semantics:** `Hello { create_new_session, session_id }` supports deterministic reconnect/join and explicit new-session creation.
+3. **Bounded session/concurrency policy:** Gateway config enforces per-user limits (`max_sessions_per_user` default 50, `max_concurrent_turns_per_user` default 10) with bounded FIFO queueing for top-level turns.
+4. **Idle lifecycle management:** sessions with no subscribers and idle beyond `session_idle_ttl_hours` (default 48) are archived and evicted from in-memory runtime context.
 
-Users get an explicit "new session" command that:
+### Behavioral Constraints
 
-1. Generates a new canonical `session_id`
-2. Preserves the user's workspace, identity, and channel bindings
-3. Starts a clean conversational slate — no prior messages in the context
-4. Keeps previous sessions intact for recall and audit
-
-The command is available through all channels (TUI, external adapters) and produces a deterministic, auditable session boundary.
-
-### Design Constraints
-
-- No implicit session rollover heuristics (e.g., "new session after 30 minutes of inactivity") — rollover is always explicit
-- Previous sessions remain queryable through memory retrieval
-- Session identity is canonical across channels: the `(user_id, channel_id, channel_session_id) → session_id` mapping (Chapter 12) generates the new session ID
+- New session boundaries are explicit (`/new`, `CreateSession`) rather than heuristic rollovers
+- Previous sessions remain durable in the session store for listing/audit and resumption
+- Session identity remains canonical per channel context mapping (`(channel_id, channel_context_id) → session_id`)
 
 ## Scheduler System
 

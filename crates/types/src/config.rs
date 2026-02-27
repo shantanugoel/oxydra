@@ -28,6 +28,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub scheduler: SchedulerConfig,
     #[serde(default)]
+    pub gateway: GatewayConfig,
+    #[serde(default)]
     pub agents: BTreeMap<String, AgentDefinition>,
 }
 
@@ -43,6 +45,7 @@ impl Default for AgentConfig {
             catalog: CatalogConfig::default(),
             tools: ToolsConfig::default(),
             scheduler: SchedulerConfig::default(),
+            gateway: GatewayConfig::default(),
             agents: BTreeMap::new(),
         }
     }
@@ -62,6 +65,7 @@ impl AgentConfig {
         }
 
         self.runtime.validate()?;
+        self.gateway.validate()?;
 
         if self.reliability.max_attempts == 0 {
             return Err(ConfigError::InvalidReliabilityAttempts { attempts: 0 });
@@ -187,6 +191,50 @@ impl RuntimeConfig {
 
         self.context_budget.validate()?;
         self.summarization.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    #[serde(default = "default_gateway_max_sessions_per_user")]
+    pub max_sessions_per_user: usize,
+    #[serde(default = "default_gateway_max_concurrent_turns_per_user")]
+    pub max_concurrent_turns_per_user: usize,
+    #[serde(default = "default_gateway_session_idle_ttl_hours")]
+    pub session_idle_ttl_hours: u64,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions_per_user: default_gateway_max_sessions_per_user(),
+            max_concurrent_turns_per_user: default_gateway_max_concurrent_turns_per_user(),
+            session_idle_ttl_hours: default_gateway_session_idle_ttl_hours(),
+        }
+    }
+}
+
+impl GatewayConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_sessions_per_user == 0 {
+            return Err(ConfigError::InvalidGatewayLimit {
+                field: "max_sessions_per_user",
+                value: 0,
+            });
+        }
+        if self.max_concurrent_turns_per_user == 0 {
+            return Err(ConfigError::InvalidGatewayLimit {
+                field: "max_concurrent_turns_per_user",
+                value: 0,
+            });
+        }
+        if self.session_idle_ttl_hours == 0 {
+            return Err(ConfigError::InvalidGatewayLimit {
+                field: "session_idle_ttl_hours",
+                value: 0,
+            });
+        }
         Ok(())
     }
 }
@@ -756,6 +804,8 @@ pub enum ConfigError {
     InvalidReliabilityBackoff { base_ms: u64, max_ms: u64 },
     #[error("memory remote mode requires an auth token for `{remote_url}`")]
     MissingMemoryAuthToken { remote_url: String },
+    #[error("gateway limit `{field}` must be greater than zero; got {value}")]
+    InvalidGatewayLimit { field: &'static str, value: u64 },
     #[error("agent `{agent}` references unknown tool `{tool}`")]
     UnknownAgentTool { agent: String, tool: String },
     #[error("agent `{agent}` references system_prompt_file `{file}` which does not exist")]
@@ -951,6 +1001,18 @@ fn default_scheduler_notify_after_failures() -> u32 {
     3
 }
 
+fn default_gateway_max_sessions_per_user() -> usize {
+    50
+}
+
+fn default_gateway_max_concurrent_turns_per_user() -> usize {
+    10
+}
+
+fn default_gateway_session_idle_ttl_hours() -> u64 {
+    48
+}
+
 fn is_ratio(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
@@ -1091,6 +1153,28 @@ mod tests {
         AgentConfig::default()
             .validate()
             .expect("default config should validate");
+    }
+
+    #[test]
+    fn default_gateway_config_uses_power_user_limits() {
+        let config = AgentConfig::default();
+        assert_eq!(config.gateway.max_sessions_per_user, 50);
+        assert_eq!(config.gateway.max_concurrent_turns_per_user, 10);
+        assert_eq!(config.gateway.session_idle_ttl_hours, 48);
+    }
+
+    #[test]
+    fn validation_rejects_zero_gateway_limit() {
+        let mut config = AgentConfig::default();
+        config.gateway.max_concurrent_turns_per_user = 0;
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidGatewayLimit {
+                field,
+                value
+            }) if field == "max_concurrent_turns_per_user" && value == 0
+        ));
     }
 
     #[test]

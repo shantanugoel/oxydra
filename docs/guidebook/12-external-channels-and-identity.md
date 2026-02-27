@@ -246,6 +246,8 @@ impl ChannelSessionMap {
 }
 ```
 
+When a mapped session is evicted from gateway memory due idle TTL, the mapping remains durable. The next inbound message resolves the same `session_id` from `channel_session_mappings`, and the gateway resumes that session from the store before handling the turn.
+
 ### Cross-Channel Continuity
 
 Different channels for the same user share the same workspace and memory namespace (keyed by `user_id`). Conversation threads are independent per channel — a user can start a task in the TUI and check on workspace state from Telegram, but the conversation histories are separate.

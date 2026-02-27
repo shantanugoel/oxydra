@@ -6,7 +6,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
-use types::{InlineMedia, ProviderError, ProviderId, StreamItem};
+use types::{GatewayConfig, InlineMedia, ProviderError, ProviderId, StreamItem};
 use url::Url;
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -15,6 +15,7 @@ type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 struct ScriptedTurnRunner {
     scripted_turns: Arc<Mutex<VecDeque<ScriptedTurn>>>,
     recorded_calls: Arc<Mutex<Vec<(String, String, String)>>>,
+    dropped_contexts: Arc<Mutex<Vec<String>>>,
 }
 
 impl ScriptedTurnRunner {
@@ -22,11 +23,16 @@ impl ScriptedTurnRunner {
         Self {
             scripted_turns: Arc::new(Mutex::new(scripted_turns.into())),
             recorded_calls: Arc::new(Mutex::new(Vec::new())),
+            dropped_contexts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     async fn recorded_calls(&self) -> Vec<(String, String, String)> {
         self.recorded_calls.lock().await.clone()
+    }
+
+    async fn dropped_contexts(&self) -> Vec<String> {
+        self.dropped_contexts.lock().await.clone()
     }
 }
 
@@ -94,6 +100,13 @@ impl GatewayTurnRunner for ScriptedTurnRunner {
                 }))
             }
         }
+    }
+
+    async fn drop_session_context(&self, session_id: &str) {
+        self.dropped_contexts
+            .lock()
+            .await
+            .push(session_id.to_owned());
     }
 }
 
@@ -1267,15 +1280,22 @@ async fn session_id_in_hello_joins_existing_session() {
 }
 
 #[tokio::test]
-async fn concurrent_turn_limit_enforced() {
+async fn queued_turn_waits_for_available_permit() {
     let runtime = Arc::new(ScriptedTurnRunner::new(vec![
         ScriptedTurn::cancellation_aware(vec![(Duration::from_millis(5), "working")]),
+        ScriptedTurn::completed(vec![(Duration::from_millis(0), "queued")], "done"),
     ]));
-    let gateway = Arc::new(GatewayServer::with_options(
+    let runtime_recorder = Arc::clone(&runtime);
+    let gateway_config = GatewayConfig {
+        max_sessions_per_user: 10,
+        max_concurrent_turns_per_user: 1,
+        session_idle_ttl_hours: 48,
+    };
+    let gateway = Arc::new(GatewayServer::with_gateway_config(
         runtime as Arc<dyn GatewayTurnRunner>,
         None,
         None,
-        1,
+        gateway_config,
     ));
     let app = Arc::clone(&gateway).router();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -1304,7 +1324,7 @@ async fn concurrent_turn_limit_enforced() {
         &mut socket1,
         GatewayClientFrame::SendTurn(GatewaySendTurn {
             request_id: "req-turn-1".to_owned(),
-            session_id: sid1,
+            session_id: sid1.clone(),
             turn_id: "turn-1".to_owned(),
             prompt: "long".to_owned(),
             attachments: Vec::new(),
@@ -1341,16 +1361,39 @@ async fn concurrent_turn_limit_enforced() {
     )
     .await;
 
-    match receive_server_frame(&mut socket2).await {
-        GatewayServerFrame::Error(e) => {
-            assert!(
-                e.message.contains("too many concurrent turns"),
-                "got: {}",
-                e.message
-            );
+    // Free the running permit by cancelling turn 1.
+    send_client_frame(
+        &mut socket1,
+        GatewayClientFrame::CancelActiveTurn(GatewayCancelActiveTurn {
+            request_id: "req-cancel-1".to_owned(),
+            session_id: sid1,
+            turn_id: "turn-1".to_owned(),
+        }),
+    )
+    .await;
+
+    loop {
+        match receive_server_frame(&mut socket1).await {
+            GatewayServerFrame::TurnCancelled(_) => break,
+            GatewayServerFrame::AssistantDelta(_) | GatewayServerFrame::TurnProgress(_) => {}
+            other => panic!("expected cancellation-related frames, got {other:?}"),
         }
-        other => panic!("expected error frame, got {other:?}"),
     }
+
+    match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::TurnStarted(_) => {}
+        other => panic!("expected queued turn to start, got {other:?}"),
+    }
+    let _ = receive_server_frame(&mut socket2).await;
+    match receive_server_frame(&mut socket2).await {
+        GatewayServerFrame::TurnCompleted(_) => {}
+        other => panic!("expected queued turn completion, got {other:?}"),
+    }
+
+    let calls = runtime_recorder.recorded_calls().await;
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].2, "long");
+    assert_eq!(calls[1].2, "blocked");
 
     server_task.abort();
 }
@@ -1361,6 +1404,19 @@ async fn concurrent_turn_limit_enforced() {
 
 async fn build_gateway_with_session_store(
     runtime: Arc<dyn GatewayTurnRunner>,
+) -> (Arc<GatewayServer>, Arc<dyn types::SessionStore>) {
+    build_gateway_with_session_store_with_config(
+        runtime,
+        GatewayConfig::default(),
+        Duration::from_secs(5 * 60),
+    )
+    .await
+}
+
+async fn build_gateway_with_session_store_with_config(
+    runtime: Arc<dyn GatewayTurnRunner>,
+    gateway_config: GatewayConfig,
+    cleanup_interval: Duration,
 ) -> (Arc<GatewayServer>, Arc<dyn types::SessionStore>) {
     let db = libsql::Builder::new_local(":memory:")
         .build()
@@ -1373,10 +1429,12 @@ async fn build_gateway_with_session_store(
     .await
     .expect("migration");
     let store: Arc<dyn types::SessionStore> = Arc::new(memory::LibsqlSessionStore::new(conn));
-    let gateway = Arc::new(GatewayServer::with_session_store(
+    let gateway = Arc::new(GatewayServer::with_gateway_config_and_cleanup_interval(
         runtime,
         None,
-        store.clone(),
+        Some(store.clone()),
+        gateway_config,
+        cleanup_interval,
     ));
     (gateway, store)
 }
@@ -1486,6 +1544,166 @@ async fn touch_session_called_on_turn_completion() {
 }
 
 #[tokio::test]
+async fn session_cleanup_archives_stale_sessions_and_drops_context() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let runtime_recorder = Arc::clone(&runtime);
+    let (gateway, store) = build_gateway_with_session_store_with_config(
+        runtime as Arc<dyn GatewayTurnRunner>,
+        GatewayConfig {
+            max_sessions_per_user: 10,
+            max_concurrent_turns_per_user: 2,
+            session_idle_ttl_hours: 1,
+        },
+        Duration::from_millis(10),
+    )
+    .await;
+
+    let session = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .expect("session should be created");
+    session.rewind_last_activity_for_tests((60 * 60) + 5);
+
+    gateway.run_session_cleanup_once_for_tests().await;
+
+    let record = store
+        .get_session(&session.session_id)
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should still exist in store");
+    assert!(record.archived, "stale session should be archived");
+
+    let dropped = runtime_recorder.dropped_contexts().await;
+    assert!(
+        dropped.iter().any(|sid| sid == &session.session_id),
+        "evicted session context should be dropped"
+    );
+}
+
+#[tokio::test]
+async fn session_cleanup_skips_sessions_with_active_subscribers() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let runtime_recorder = Arc::clone(&runtime);
+    let (gateway, store) = build_gateway_with_session_store_with_config(
+        runtime as Arc<dyn GatewayTurnRunner>,
+        GatewayConfig {
+            max_sessions_per_user: 10,
+            max_concurrent_turns_per_user: 2,
+            session_idle_ttl_hours: 1,
+        },
+        Duration::from_millis(10),
+    )
+    .await;
+
+    let session = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .expect("session should be created");
+    session.rewind_last_activity_for_tests((60 * 60) + 5);
+    let subscriber = gateway.subscribe_events(&session);
+
+    gateway.run_session_cleanup_once_for_tests().await;
+    let record = store
+        .get_session(&session.session_id)
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should still exist in store");
+    assert!(
+        !record.archived,
+        "session with subscribers must not be archived"
+    );
+
+    drop(subscriber);
+    gateway.run_session_cleanup_once_for_tests().await;
+    let archived = store
+        .get_session(&session.session_id)
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should still exist in store");
+    assert!(
+        archived.archived,
+        "session should archive once unsubscribed"
+    );
+
+    let dropped = runtime_recorder.dropped_contexts().await;
+    assert!(
+        dropped.iter().any(|sid| sid == &session.session_id),
+        "context should be dropped after eviction"
+    );
+}
+
+#[tokio::test]
+async fn evicted_session_can_be_resumed_and_used_again() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(vec![ScriptedTurn::completed(
+        vec![(Duration::from_millis(0), "resumed")],
+        "done",
+    )]));
+    let (gateway, store) = build_gateway_with_session_store_with_config(
+        runtime as Arc<dyn GatewayTurnRunner>,
+        GatewayConfig {
+            max_sessions_per_user: 10,
+            max_concurrent_turns_per_user: 2,
+            session_idle_ttl_hours: 1,
+        },
+        Duration::from_millis(10),
+    )
+    .await;
+
+    let session = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .expect("session should be created");
+    let session_id = session.session_id.clone();
+    session.rewind_last_activity_for_tests((60 * 60) + 5);
+    gateway.run_session_cleanup_once_for_tests().await;
+
+    let archived = store
+        .get_session(&session_id)
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should still exist in store");
+    assert!(archived.archived, "evicted session should be archived");
+
+    let resumed = gateway
+        .create_or_get_session("alice", Some(&session_id), "default", "tui")
+        .await
+        .expect("archived session should be resumable");
+    assert_eq!(resumed.session_id, session_id);
+
+    let mut updates = gateway.subscribe_events(&resumed);
+    let start_result = gateway
+        .submit_turn(
+            &resumed,
+            GatewaySendTurn {
+                request_id: "req-resume-turn".to_owned(),
+                session_id: resumed.session_id.clone(),
+                turn_id: "turn-resume-1".to_owned(),
+                prompt: "continue".to_owned(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert!(
+        start_result.is_none(),
+        "resumed session should accept turns"
+    );
+
+    loop {
+        let frame = timeout(Duration::from_secs(2), updates.recv())
+            .await
+            .expect("timed out waiting for resumed turn frame")
+            .expect("session event channel should stay open");
+        match frame {
+            GatewayServerFrame::TurnCompleted(_) => break,
+            GatewayServerFrame::TurnStarted(_)
+            | GatewayServerFrame::AssistantDelta(_)
+            | GatewayServerFrame::TurnProgress(_) => {}
+            other => panic!("unexpected resumed session frame: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn internal_api_create_and_list_sessions() {
     let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
     let (gateway, store) =
@@ -1524,6 +1742,40 @@ async fn internal_api_get_existing_session_by_id() {
         .await
         .unwrap();
     assert_eq!(same.session_id, sid);
+}
+
+#[tokio::test]
+async fn internal_api_enforces_max_sessions_per_user() {
+    let runtime = Arc::new(ScriptedTurnRunner::new(Vec::new()));
+    let gateway = Arc::new(GatewayServer::with_gateway_config(
+        runtime as Arc<dyn GatewayTurnRunner>,
+        None,
+        None,
+        GatewayConfig {
+            max_sessions_per_user: 1,
+            max_concurrent_turns_per_user: 1,
+            session_idle_ttl_hours: 48,
+        },
+    ));
+
+    let first = gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+        .expect("first session should be created");
+    let error = match gateway
+        .create_or_get_session("alice", None, "default", "tui")
+        .await
+    {
+        Ok(_) => panic!("second session should hit max session limit"),
+        Err(error) => error,
+    };
+    assert!(error.contains("maximum sessions reached"), "got: {error}");
+
+    let existing = gateway
+        .create_or_get_session("alice", Some(&first.session_id), "default", "tui")
+        .await
+        .expect("existing session lookup should still work");
+    assert_eq!(existing.session_id, first.session_id);
 }
 
 #[tokio::test]

@@ -196,18 +196,12 @@ async fn run() -> Result<(), VmError> {
     // Clone the session store reference before moving into gateway so the
     // Telegram adapter (which also needs it) can receive a copy.
     let session_store_for_channels = bootstrap.session_store.clone();
-    let gateway = if let Some(session_store) = bootstrap.session_store {
-        Arc::new(GatewayServer::with_session_store(
-            turn_runner.clone(),
-            Some(startup_status),
-            session_store,
-        ))
-    } else {
-        Arc::new(GatewayServer::with_startup_status(
-            turn_runner.clone(),
-            startup_status,
-        ))
-    };
+    let gateway = Arc::new(GatewayServer::with_gateway_config(
+        turn_runner.clone(),
+        Some(startup_status),
+        bootstrap.session_store,
+        bootstrap.config.gateway.clone(),
+    ));
 
     // Spawn the scheduler executor as a background task when enabled.
     let scheduler_cancellation = CancellationToken::new();

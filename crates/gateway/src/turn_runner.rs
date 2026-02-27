@@ -34,6 +34,8 @@ pub trait GatewayTurnRunner: Send + Sync {
         delta_sender: mpsc::UnboundedSender<StreamItem>,
         origin: TurnOrigin,
     ) -> Result<Response, RuntimeError>;
+
+    async fn drop_session_context(&self, session_id: &str);
 }
 
 pub struct RuntimeGatewayTurnRunner {
@@ -199,6 +201,10 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
         let mut contexts = self.contexts.lock().await;
         contexts.insert(session_id.to_owned(), context);
         result
+    }
+
+    async fn drop_session_context(&self, session_id: &str) {
+        self.contexts.lock().await.remove(session_id);
     }
 }
 

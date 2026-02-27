@@ -2,12 +2,12 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use types::{GatewayServerFrame, GatewaySession, GatewayTurnState, GatewayTurnStatus};
 
@@ -21,26 +21,57 @@ pub(crate) struct UserState {
     #[allow(dead_code)]
     pub(crate) user_id: String,
     pub(crate) sessions: RwLock<HashMap<String, Arc<SessionState>>>,
-    /// Number of top-level turns currently executing for this user.
-    /// Subagent turns do NOT count toward this limit (D11).
-    pub(crate) concurrent_turns: AtomicU32,
+    /// Bounded top-level turn concurrency for this user.
+    /// Subagent turns do NOT acquire permits (D11).
+    pub(crate) turn_semaphore: Arc<Semaphore>,
+    /// Number of top-level turns currently queued for a permit.
+    queued_turns: AtomicUsize,
+    max_queued_turns: usize,
 }
 
 impl UserState {
-    pub(crate) fn new(user_id: String) -> Self {
+    pub(crate) fn new(
+        user_id: String,
+        max_concurrent_turns: usize,
+        max_queued_turns: usize,
+    ) -> Self {
         Self {
             user_id,
             sessions: RwLock::new(HashMap::new()),
-            concurrent_turns: AtomicU32::new(0),
+            turn_semaphore: Arc::new(Semaphore::new(max_concurrent_turns)),
+            queued_turns: AtomicUsize::new(0),
+            max_queued_turns,
         }
     }
 
-    pub(crate) fn increment_concurrent_turns(&self) -> u32 {
-        self.concurrent_turns.fetch_add(1, Ordering::Relaxed) + 1
+    pub(crate) fn try_enqueue_turn(&self) -> bool {
+        loop {
+            let current = self.queued_turns.load(Ordering::Relaxed);
+            if current >= self.max_queued_turns {
+                return false;
+            }
+            if self
+                .queued_turns
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 
-    pub(crate) fn decrement_concurrent_turns(&self) {
-        self.concurrent_turns.fetch_sub(1, Ordering::Relaxed);
+    pub(crate) async fn acquire_turn_permit(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Option<OwnedSemaphorePermit> {
+        let acquire = Arc::clone(&self.turn_semaphore).acquire_owned();
+        tokio::pin!(acquire);
+        let permit = tokio::select! {
+            _ = cancellation.cancelled() => None,
+            result = &mut acquire => result.ok(),
+        };
+        self.queued_turns.fetch_sub(1, Ordering::AcqRel);
+        permit
     }
 }
 
@@ -65,6 +96,7 @@ pub struct SessionState {
     pub(crate) events: broadcast::Sender<GatewayServerFrame>,
     pub(crate) active_turn: Mutex<Option<ActiveTurnState>>,
     pub(crate) latest_terminal_frame: Mutex<Option<GatewayServerFrame>>,
+    last_activity_epoch_secs: AtomicU64,
 }
 
 impl SessionState {
@@ -86,6 +118,7 @@ impl SessionState {
             events,
             active_turn: Mutex::new(None),
             latest_terminal_frame: Mutex::new(None),
+            last_activity_epoch_secs: AtomicU64::new(epoch_now_secs()),
         }
     }
 
@@ -111,7 +144,32 @@ impl SessionState {
         self.latest_terminal_frame.lock().await.clone()
     }
 
+    pub(crate) fn mark_active(&self) {
+        self.last_activity_epoch_secs
+            .store(epoch_now_secs(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn idle_for_at_least(&self, ttl: Duration) -> bool {
+        let last = self.last_activity_epoch_secs.load(Ordering::Relaxed);
+        epoch_now_secs().saturating_sub(last) >= ttl.as_secs()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rewind_last_activity_for_tests(&self, idle_secs: u64) {
+        self.last_activity_epoch_secs.store(
+            epoch_now_secs().saturating_sub(idle_secs),
+            Ordering::Relaxed,
+        );
+    }
+
     pub(crate) fn publish(&self, frame: GatewayServerFrame) {
         let _ = self.events.send(frame);
     }
+}
+
+fn epoch_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

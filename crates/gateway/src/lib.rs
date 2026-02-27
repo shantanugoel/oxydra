@@ -2,8 +2,9 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -19,10 +20,11 @@ use axum::{
 use futures_util::{FutureExt, SinkExt, StreamExt, stream::SplitSink};
 use runtime::{AgentRuntime, RuntimeStreamEventSender};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use types::{
     Context, GATEWAY_PROTOCOL_VERSION, GatewayAssistantDelta, GatewayCancelActiveTurn,
-    GatewayClientFrame, GatewayClientHello, GatewayErrorFrame, GatewayHealthCheck,
+    GatewayClientFrame, GatewayClientHello, GatewayConfig, GatewayErrorFrame, GatewayHealthCheck,
     GatewayHealthStatus, GatewayHelloAck, GatewaySendTurn, GatewayServerFrame, GatewaySession,
     GatewaySessionCreated, GatewaySessionList, GatewaySessionSummary, GatewaySessionSwitched,
     GatewayTurnCancelled, GatewayTurnCompleted, GatewayTurnProgress, GatewayTurnStarted,
@@ -48,9 +50,7 @@ const MAX_INLINE_ATTACHMENTS_PER_TURN: usize = 4;
 const MAX_INLINE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_INLINE_ATTACHMENT_TOTAL_BYTES: usize =
     MAX_INLINE_ATTACHMENTS_PER_TURN * MAX_INLINE_ATTACHMENT_BYTES;
-
-/// Default maximum number of concurrent top-level turns per user.
-const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 3;
+const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct GatewayServer {
     turn_runner: Arc<dyn GatewayTurnRunner>,
@@ -59,25 +59,31 @@ pub struct GatewayServer {
     users: RwLock<HashMap<String, Arc<UserState>>>,
     next_connection_id: AtomicU64,
     session_store: Option<Arc<dyn SessionStore>>,
-    max_concurrent_turns: u32,
+    max_sessions_per_user: usize,
+    max_concurrent_turns: usize,
+    max_queued_turns: usize,
+    session_idle_ttl: Duration,
+    session_cleanup_interval: Duration,
+    session_cleanup_started: AtomicBool,
+    cancellation: CancellationToken,
     /// Registry of proactive senders keyed by channel_id (e.g. "telegram").
     proactive_senders: RwLock<HashMap<String, Arc<dyn ProactiveSender>>>,
 }
 
 impl GatewayServer {
     pub fn new(turn_runner: Arc<dyn GatewayTurnRunner>) -> Self {
-        Self::with_options(turn_runner, None, None, DEFAULT_MAX_CONCURRENT_TURNS)
+        Self::with_gateway_config(turn_runner, None, None, GatewayConfig::default())
     }
 
     pub fn with_startup_status(
         turn_runner: Arc<dyn GatewayTurnRunner>,
         startup_status: StartupStatusReport,
     ) -> Self {
-        Self::with_options(
+        Self::with_gateway_config(
             turn_runner,
             Some(startup_status),
             None,
-            DEFAULT_MAX_CONCURRENT_TURNS,
+            GatewayConfig::default(),
         )
     }
 
@@ -86,11 +92,11 @@ impl GatewayServer {
         startup_status: Option<StartupStatusReport>,
         session_store: Arc<dyn SessionStore>,
     ) -> Self {
-        Self::with_options(
+        Self::with_gateway_config(
             turn_runner,
             startup_status,
             Some(session_store),
-            DEFAULT_MAX_CONCURRENT_TURNS,
+            GatewayConfig::default(),
         )
     }
 
@@ -100,18 +106,58 @@ impl GatewayServer {
         session_store: Option<Arc<dyn SessionStore>>,
         max_concurrent_turns: u32,
     ) -> Self {
+        let gateway_config = GatewayConfig {
+            max_concurrent_turns_per_user: max_concurrent_turns as usize,
+            ..GatewayConfig::default()
+        };
+        Self::with_gateway_config(turn_runner, startup_status, session_store, gateway_config)
+    }
+
+    pub fn with_gateway_config(
+        turn_runner: Arc<dyn GatewayTurnRunner>,
+        startup_status: Option<StartupStatusReport>,
+        session_store: Option<Arc<dyn SessionStore>>,
+        gateway_config: GatewayConfig,
+    ) -> Self {
+        Self::with_gateway_config_and_cleanup_interval(
+            turn_runner,
+            startup_status,
+            session_store,
+            gateway_config,
+            SESSION_CLEANUP_INTERVAL,
+        )
+    }
+
+    pub(crate) fn with_gateway_config_and_cleanup_interval(
+        turn_runner: Arc<dyn GatewayTurnRunner>,
+        startup_status: Option<StartupStatusReport>,
+        session_store: Option<Arc<dyn SessionStore>>,
+        gateway_config: GatewayConfig,
+        session_cleanup_interval: Duration,
+    ) -> Self {
         Self {
             turn_runner,
             startup_status,
             users: RwLock::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
             session_store,
-            max_concurrent_turns,
+            max_sessions_per_user: gateway_config.max_sessions_per_user,
+            max_concurrent_turns: gateway_config.max_concurrent_turns_per_user,
+            max_queued_turns: gateway_config.max_sessions_per_user,
+            session_idle_ttl: Duration::from_secs(
+                gateway_config
+                    .session_idle_ttl_hours
+                    .saturating_mul(60 * 60),
+            ),
+            session_cleanup_interval,
+            session_cleanup_started: AtomicBool::new(false),
+            cancellation: CancellationToken::new(),
             proactive_senders: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn router(self: Arc<Self>) -> Router {
+        self.start_session_cleanup_task();
         Router::new()
             .route(WS_ROUTE, get(Self::upgrade_websocket))
             .with_state(self)
@@ -205,6 +251,8 @@ impl GatewayServer {
             return Err(format!("session `{id}` not found for user `{user_id}`"));
         }
 
+        self.ensure_session_capacity(user_id, &user).await?;
+
         // Create a new session.
         let new_session_id = uuid::Uuid::now_v7().to_string();
         let session = Arc::new(SessionState::new(
@@ -215,6 +263,12 @@ impl GatewayServer {
             channel_origin.to_owned(),
         ));
         let mut sessions = user.sessions.write().await;
+        if sessions.len() >= self.max_sessions_per_user {
+            return Err(format!(
+                "maximum sessions reached (limit: {})",
+                self.max_sessions_per_user
+            ));
+        }
         sessions.insert(new_session_id.clone(), Arc::clone(&session));
         drop(sessions);
 
@@ -844,6 +898,8 @@ impl GatewayServer {
             return Ok(session);
         }
 
+        self.ensure_session_capacity(&hello.user_id, &user).await?;
+
         // Create the default session.
         let session = Arc::new(SessionState::new(
             default_id.clone(),
@@ -937,11 +993,8 @@ impl GatewayServer {
         }
         *session.latest_terminal_frame.lock().await = None;
 
-        // Track concurrent turns per user.
         let user = self.get_or_create_user(&session.user_id).await;
-        let current = user.increment_concurrent_turns();
-        if current > self.max_concurrent_turns {
-            user.decrement_concurrent_turns();
+        if !user.try_enqueue_turn() {
             {
                 let mut active_turn = session.active_turn.lock().await;
                 *active_turn = None;
@@ -951,8 +1004,8 @@ impl GatewayServer {
                 session: Some(session.gateway_session()),
                 turn: None,
                 message: format!(
-                    "too many concurrent turns (limit: {})",
-                    self.max_concurrent_turns
+                    "too many queued turns (queue limit: {})",
+                    self.max_queued_turns
                 ),
             }));
         }
@@ -961,22 +1014,84 @@ impl GatewayServer {
             turn_id: send_turn.turn_id.clone(),
             state: GatewayTurnState::Running,
         };
-        session.publish(GatewayServerFrame::TurnStarted(GatewayTurnStarted {
-            request_id: send_turn.request_id.clone(),
-            session: session.gateway_session(),
-            turn: running_turn.clone(),
-        }));
-        tracing::info!(
-            turn_id = %send_turn.turn_id,
-            session_id = %session.session_id,
-            "turn started"
-        );
-
         let runtime = Arc::clone(&self.turn_runner);
         let session = Arc::clone(session);
-        let user_for_decrement = Arc::clone(&user);
+        let user_for_permit = Arc::clone(&user);
         let session_store = self.session_store.clone();
         tokio::spawn(async move {
+            let permit = user_for_permit.acquire_turn_permit(&cancellation).await;
+            if permit.is_none() {
+                let terminal_frame = if cancellation.is_cancelled() {
+                    GatewayServerFrame::TurnCancelled(GatewayTurnCancelled {
+                        request_id: send_turn.request_id.clone(),
+                        session: session.gateway_session(),
+                        turn: GatewayTurnStatus {
+                            turn_id: send_turn.turn_id.clone(),
+                            state: GatewayTurnState::Cancelled,
+                        },
+                    })
+                } else {
+                    GatewayServerFrame::Error(GatewayErrorFrame {
+                        request_id: Some(send_turn.request_id.clone()),
+                        session: Some(session.gateway_session()),
+                        turn: Some(GatewayTurnStatus {
+                            turn_id: send_turn.turn_id.clone(),
+                            state: GatewayTurnState::Failed,
+                        }),
+                        message: "failed to acquire turn permit".to_owned(),
+                    })
+                };
+
+                {
+                    let mut active_turn = session.active_turn.lock().await;
+                    if active_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.turn_id == send_turn.turn_id)
+                    {
+                        *active_turn = None;
+                    }
+                }
+                *session.latest_terminal_frame.lock().await = Some(terminal_frame.clone());
+                session.publish(terminal_frame);
+                return;
+            }
+            let _permit = permit;
+
+            if cancellation.is_cancelled() {
+                let cancelled = GatewayServerFrame::TurnCancelled(GatewayTurnCancelled {
+                    request_id: send_turn.request_id.clone(),
+                    session: session.gateway_session(),
+                    turn: GatewayTurnStatus {
+                        turn_id: send_turn.turn_id.clone(),
+                        state: GatewayTurnState::Cancelled,
+                    },
+                });
+                {
+                    let mut active_turn = session.active_turn.lock().await;
+                    if active_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.turn_id == send_turn.turn_id)
+                    {
+                        *active_turn = None;
+                    }
+                }
+                *session.latest_terminal_frame.lock().await = Some(cancelled.clone());
+                session.publish(cancelled);
+                return;
+            }
+
+            session.mark_active();
+            session.publish(GatewayServerFrame::TurnStarted(GatewayTurnStarted {
+                request_id: send_turn.request_id.clone(),
+                session: session.gateway_session(),
+                turn: running_turn.clone(),
+            }));
+            tracing::info!(
+                turn_id = %send_turn.turn_id,
+                session_id = %session.session_id,
+                "turn started"
+            );
+
             let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<StreamItem>();
             let channel_capabilities = origin
                 .channel_id
@@ -1115,9 +1230,7 @@ impl GatewayServer {
             }
             *session.latest_terminal_frame.lock().await = Some(terminal_frame.clone());
             session.publish(terminal_frame);
-
-            // Decrement concurrent turn count after turn completes.
-            user_for_decrement.decrement_concurrent_turns();
+            session.mark_active();
 
             // Touch session in store on turn completion.
             if let Some(store) = session_store
@@ -1202,6 +1315,121 @@ impl GatewayServer {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    async fn ensure_session_capacity(
+        &self,
+        user_id: &str,
+        user: &Arc<UserState>,
+    ) -> Result<(), String> {
+        let in_memory_count = user.sessions.read().await.len();
+        let persisted_count = if let Some(store) = &self.session_store {
+            match store.list_sessions(user_id, false).await {
+                Ok(records) => records.len(),
+                Err(error) => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        error = %error,
+                        "failed to check persisted session count; falling back to in-memory count"
+                    );
+                    in_memory_count
+                }
+            }
+        } else {
+            in_memory_count
+        };
+
+        if in_memory_count.max(persisted_count) >= self.max_sessions_per_user {
+            return Err(format!(
+                "maximum sessions reached (limit: {})",
+                self.max_sessions_per_user
+            ));
+        }
+        Ok(())
+    }
+
+    fn start_session_cleanup_task(self: &Arc<Self>) {
+        if self.session_cleanup_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let server = Arc::clone(self);
+        let cancellation = self.cancellation.child_token();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(server.session_cleanup_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = ticker.tick() => server.cleanup_sessions_once().await,
+                }
+            }
+        });
+    }
+
+    async fn cleanup_sessions_once(&self) {
+        let users: Vec<(String, Arc<UserState>)> = {
+            let users = self.users.read().await;
+            users
+                .iter()
+                .map(|(id, user)| (id.clone(), Arc::clone(user)))
+                .collect()
+        };
+
+        for (user_id, user) in users {
+            let stale_session_ids: Vec<String> = {
+                let sessions = user.sessions.read().await;
+                sessions
+                    .iter()
+                    .filter(|(_, session)| {
+                        session.events.receiver_count() == 0
+                            && session.idle_for_at_least(self.session_idle_ttl)
+                    })
+                    .map(|(session_id, _)| session_id.clone())
+                    .collect()
+            };
+
+            for session_id in stale_session_ids {
+                let removed = {
+                    let mut sessions = user.sessions.write().await;
+                    let should_remove = sessions.get(&session_id).is_some_and(|session| {
+                        session.events.receiver_count() == 0
+                            && session.idle_for_at_least(self.session_idle_ttl)
+                    });
+                    if should_remove {
+                        sessions.remove(&session_id).is_some()
+                    } else {
+                        false
+                    }
+                };
+
+                if !removed {
+                    continue;
+                }
+
+                if let Some(store) = &self.session_store
+                    && let Err(error) = store.archive_session(&session_id).await
+                {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        session_id = %session_id,
+                        error = %error,
+                        "failed to archive stale session"
+                    );
+                }
+
+                self.turn_runner.drop_session_context(&session_id).await;
+                tracing::info!(
+                    user_id = %user_id,
+                    session_id = %session_id,
+                    "gateway session evicted after idle TTL"
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn run_session_cleanup_once_for_tests(&self) {
+        self.cleanup_sessions_once().await;
+    }
+
     async fn get_or_create_user(&self, user_id: &str) -> Arc<UserState> {
         // Fast path: read lock.
         {
@@ -1212,10 +1440,24 @@ impl GatewayServer {
         }
         // Slow path: write lock.
         let mut users = self.users.write().await;
+        let max_concurrent_turns = self.max_concurrent_turns;
+        let max_queued_turns = self.max_queued_turns;
         users
             .entry(user_id.to_owned())
-            .or_insert_with(|| Arc::new(UserState::new(user_id.to_owned())))
+            .or_insert_with(|| {
+                Arc::new(UserState::new(
+                    user_id.to_owned(),
+                    max_concurrent_turns,
+                    max_queued_turns,
+                ))
+            })
             .clone()
+    }
+}
+
+impl Drop for GatewayServer {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 

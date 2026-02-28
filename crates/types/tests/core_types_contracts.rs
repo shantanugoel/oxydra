@@ -8,8 +8,10 @@ use serde_json::json;
 use types::{
     CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, MemoryChunkDocument,
     MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest,
-    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord,
-    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
+    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryNoteStoreRequest, MemoryRecallRequest,
+    MemoryRecord, MemoryScratchpadClearRequest, MemoryScratchpadReadRequest, MemoryScratchpadState,
+    MemoryScratchpadWriteRequest, MemoryScratchpadWriteResult, MemoryStoreRequest,
+    MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
     MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
     ModelLimits, ProviderCaps, ProviderError, ProviderId, Response, RuntimeError, ToolCall,
     ToolError, UnknownModelCaps, derive_caps, derive_input_caps, init_tracing,
@@ -120,6 +122,7 @@ fn memory_contract_types_serialize_round_trip() {
     let hybrid_query = MemoryHybridQueryRequest {
         session_id: "session-1".to_owned(),
         query: "hello".to_owned(),
+        tags: Some(vec!["prefs".to_owned(), "project".to_owned()]),
         query_embedding: Some(vec![0.9, 0.1]),
         top_k: Some(5),
         vector_weight: Some(0.7),
@@ -154,6 +157,35 @@ fn memory_contract_types_serialize_round_trip() {
         upper_sequence: 42,
         summary: "new summary".to_owned(),
         metadata: Some(json!({"reason":"budget"})),
+    };
+    let note_store = MemoryNoteStoreRequest {
+        session_id: "memory:user-1".to_owned(),
+        note_id: "note-123".to_owned(),
+        content: "Remember this preference".to_owned(),
+        source: Some("memory_save".to_owned()),
+        tags: Some(vec!["prefs".to_owned(), "profile".to_owned()]),
+    };
+    let scratchpad_read = MemoryScratchpadReadRequest {
+        session_id: "session-1".to_owned(),
+    };
+    let scratchpad_state = MemoryScratchpadState {
+        session_id: "session-1".to_owned(),
+        items: vec![
+            "Investigate flaky test".to_owned(),
+            "Run targeted suite".to_owned(),
+        ],
+        updated_at: "2026-01-01T00:00:00Z".to_owned(),
+    };
+    let scratchpad_write = MemoryScratchpadWriteRequest {
+        session_id: "session-1".to_owned(),
+        items: vec!["Capture failing stack trace".to_owned()],
+    };
+    let scratchpad_write_result = MemoryScratchpadWriteResult {
+        updated: true,
+        item_count: 1,
+    };
+    let scratchpad_clear = MemoryScratchpadClearRequest {
+        session_id: "session-1".to_owned(),
     };
     let summary_write_result = MemorySummaryWriteResult {
         applied: true,
@@ -228,6 +260,42 @@ fn memory_contract_types_serialize_round_trip() {
         serde_json::from_str(&summary_write_result_json)
             .expect("summary write result should deserialize");
     assert_eq!(parsed_summary_write_result, summary_write_result);
+
+    let note_store_json = serde_json::to_string(&note_store).expect("note store should serialize");
+    let parsed_note_store: MemoryNoteStoreRequest =
+        serde_json::from_str(&note_store_json).expect("note store should deserialize");
+    assert_eq!(parsed_note_store, note_store);
+
+    let scratchpad_read_json =
+        serde_json::to_string(&scratchpad_read).expect("scratchpad read should serialize");
+    let parsed_scratchpad_read: MemoryScratchpadReadRequest =
+        serde_json::from_str(&scratchpad_read_json).expect("scratchpad read should deserialize");
+    assert_eq!(parsed_scratchpad_read, scratchpad_read);
+
+    let scratchpad_state_json =
+        serde_json::to_string(&scratchpad_state).expect("scratchpad state should serialize");
+    let parsed_scratchpad_state: MemoryScratchpadState =
+        serde_json::from_str(&scratchpad_state_json).expect("scratchpad state should deserialize");
+    assert_eq!(parsed_scratchpad_state, scratchpad_state);
+
+    let scratchpad_write_json =
+        serde_json::to_string(&scratchpad_write).expect("scratchpad write should serialize");
+    let parsed_scratchpad_write: MemoryScratchpadWriteRequest =
+        serde_json::from_str(&scratchpad_write_json).expect("scratchpad write should deserialize");
+    assert_eq!(parsed_scratchpad_write, scratchpad_write);
+
+    let scratchpad_write_result_json = serde_json::to_string(&scratchpad_write_result)
+        .expect("scratchpad write result should serialize");
+    let parsed_scratchpad_write_result: MemoryScratchpadWriteResult =
+        serde_json::from_str(&scratchpad_write_result_json)
+            .expect("scratchpad write result should deserialize");
+    assert_eq!(parsed_scratchpad_write_result, scratchpad_write_result);
+
+    let scratchpad_clear_json =
+        serde_json::to_string(&scratchpad_clear).expect("scratchpad clear should serialize");
+    let parsed_scratchpad_clear: MemoryScratchpadClearRequest =
+        serde_json::from_str(&scratchpad_clear_json).expect("scratchpad clear should deserialize");
+    assert_eq!(parsed_scratchpad_clear, scratchpad_clear);
 }
 
 #[test]

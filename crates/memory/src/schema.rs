@@ -6,6 +6,7 @@ use types::MemoryError;
 use crate::errors::{initialization_error, migration_error};
 
 const MIGRATION_BOOKKEEPING_TABLE: &str = "memory_migrations";
+pub(crate) const CHUNKS_VECTOR_INDEX_NAME: &str = "idx_chunks_vec_embedding_ann";
 pub(crate) const REQUIRED_TABLES: &[&str] = &[
     MIGRATION_BOOKKEEPING_TABLE,
     "sessions",
@@ -27,6 +28,7 @@ pub(crate) const REQUIRED_INDEXES: &[&str] = &[
     "idx_chunks_session_created_at",
     "idx_chunks_file_id",
     "idx_chunks_session_content_hash",
+    CHUNKS_VECTOR_INDEX_NAME,
     "idx_schedules_user_id",
     "idx_schedules_due",
     "idx_schedules_status",
@@ -139,6 +141,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: "0023_add_full_output_to_schedule_runs",
         sql: include_str!("../migrations/0023_add_full_output_to_schedule_runs.sql"),
+    },
+    Migration {
+        version: "0024_create_chunks_vec_vector_index",
+        sql: include_str!("../migrations/0024_create_chunks_vec_vector_index.sql"),
     },
 ];
 
@@ -276,6 +282,37 @@ pub(crate) async fn verify_required_schema(conn: &Connection) -> Result<(), Memo
             )));
         }
     }
+    Ok(())
+}
+
+pub(crate) async fn verify_native_vector_support(conn: &Connection) -> Result<(), MemoryError> {
+    let probe_embedding = serde_json::to_string(&vec![0.0_f32; 512]).map_err(|error| {
+        initialization_error(format!(
+            "failed to build native vector probe embedding: {error}"
+        ))
+    })?;
+    let query = format!(
+        "SELECT id
+         FROM vector_top_k(
+             '{CHUNKS_VECTOR_INDEX_NAME}',
+             COALESCE((SELECT embedding_blob FROM chunks_vec LIMIT 1), vector32(?1)),
+             1
+         )
+         LIMIT 1"
+    );
+    let mut rows = conn
+        .query(query.as_str(), params![probe_embedding.as_str()])
+        .await
+        .map_err(|error| {
+            initialization_error(format!(
+                "native libsql vector support is required but unavailable: {error}"
+            ))
+        })?;
+    let _ = rows.next().await.map_err(|error| {
+        initialization_error(format!(
+            "native libsql vector support is required but unavailable: {error}"
+        ))
+    })?;
     Ok(())
 }
 

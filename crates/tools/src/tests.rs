@@ -700,7 +700,7 @@ mod memory_tool_tests {
     use serde_json::json;
     use types::{MemoryRetrieval, SafetyTier, Tool, ToolExecutionContext};
 
-    use crate::memory_tools::*;
+    use crate::{memory_tools::*, scratchpad_tools::*};
 
     fn temp_db_path(label: &str) -> String {
         use std::{
@@ -759,6 +759,7 @@ mod memory_tool_tests {
                 .iter()
                 .any(|v| v.as_str() == Some("query"))
         );
+        assert!(schema.parameters["properties"]["tags"].is_object());
         assert_eq!(tool.safety_tier(), SafetyTier::ReadOnly);
     }
 
@@ -779,6 +780,7 @@ mod memory_tool_tests {
                 .iter()
                 .any(|v| v.as_str() == Some("content"))
         );
+        assert!(schema.parameters["properties"]["tags"].is_object());
         assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
     }
 
@@ -795,6 +797,7 @@ mod memory_tool_tests {
             .expect("required should be array");
         assert!(required.iter().any(|v| v.as_str() == Some("note_id")));
         assert!(required.iter().any(|v| v.as_str() == Some("content")));
+        assert!(schema.parameters["properties"]["tags"].is_object());
         assert_eq!(tool.safety_tier(), SafetyTier::SideEffecting);
     }
 
@@ -882,6 +885,56 @@ mod memory_tool_tests {
             !first["note_id"].as_str().unwrap_or("").is_empty(),
             "note_id should be present"
         );
+        assert!(first["tags"].is_array(), "result should include tags");
+        assert!(
+            first["created_at"].is_string(),
+            "result should include created_at"
+        );
+        assert!(
+            first["updated_at"].is_string(),
+            "result should include updated_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_search_can_filter_by_tags() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-alice");
+        let save_tool = MemorySaveTool::new(memory.clone());
+        let search_tool = MemorySearchTool::new(memory, 0.7, 0.3);
+
+        save_tool
+            .execute(
+                &json!({"content": "Use rust for backend work", "tags": ["backend", "project-x"]})
+                    .to_string(),
+                &ctx,
+            )
+            .await
+            .expect("first save should succeed");
+        save_tool
+            .execute(
+                &json!({"content": "Use react for dashboard", "tags": ["frontend"]}).to_string(),
+                &ctx,
+            )
+            .await
+            .expect("second save should succeed");
+
+        let filtered = search_tool
+            .execute(
+                &json!({"query": "use", "tags": ["project-x"]}).to_string(),
+                &ctx,
+            )
+            .await
+            .expect("tag-filtered search should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&filtered).expect("json output");
+        let results = parsed.as_array().expect("array output");
+        assert_eq!(results.len(), 1, "tag filtering should narrow results");
+        let first = &results[0];
+        assert!(
+            first["text"].as_str().unwrap_or("").contains("rust"),
+            "filtered result should match tagged note"
+        );
+        assert_eq!(first["tags"], json!(["backend", "project-x"]));
     }
 
     #[tokio::test]
@@ -1080,5 +1133,94 @@ mod memory_tool_tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let results = parsed.as_array().unwrap();
         assert!(!results.is_empty(), "alice should see her own notes");
+    }
+
+    #[tokio::test]
+    async fn scratchpad_tools_schema_is_valid() {
+        let memory = test_memory_backend().await;
+        let read_tool = ScratchpadReadTool::new(memory.clone());
+        let write_tool = ScratchpadWriteTool::new(memory.clone());
+        let clear_tool = ScratchpadClearTool::new(memory);
+
+        let read_schema = read_tool.schema();
+        assert_eq!(read_schema.name, SCRATCHPAD_READ_TOOL_NAME);
+        assert_eq!(read_tool.safety_tier(), SafetyTier::ReadOnly);
+
+        let write_schema = write_tool.schema();
+        assert_eq!(write_schema.name, SCRATCHPAD_WRITE_TOOL_NAME);
+        assert!(
+            write_schema.parameters["required"]
+                .as_array()
+                .expect("required should be array")
+                .iter()
+                .any(|value| value.as_str() == Some("items"))
+        );
+        assert_eq!(write_tool.safety_tier(), SafetyTier::SideEffecting);
+
+        let clear_schema = clear_tool.schema();
+        assert_eq!(clear_schema.name, SCRATCHPAD_CLEAR_TOOL_NAME);
+        assert_eq!(clear_tool.safety_tier(), SafetyTier::SideEffecting);
+    }
+
+    #[tokio::test]
+    async fn scratchpad_tools_write_read_clear_roundtrip() {
+        let memory = test_memory_backend().await;
+        let ctx = test_context("alice", "runtime-scratchpad");
+        let write_tool = ScratchpadWriteTool::new(memory.clone());
+        let read_tool = ScratchpadReadTool::new(memory.clone());
+        let clear_tool = ScratchpadClearTool::new(memory.clone());
+
+        let write_result = write_tool
+            .execute(
+                &json!({"items": ["Collect logs", "Patch parser"]}).to_string(),
+                &ctx,
+            )
+            .await
+            .expect("scratchpad write should succeed");
+        let parsed_write: serde_json::Value =
+            serde_json::from_str(&write_result).expect("write output should parse");
+        assert_eq!(parsed_write["item_count"].as_u64(), Some(2));
+
+        let read_result = read_tool
+            .execute(&json!({}).to_string(), &ctx)
+            .await
+            .expect("scratchpad read should succeed");
+        let parsed_read: serde_json::Value =
+            serde_json::from_str(&read_result).expect("read output should parse");
+        assert_eq!(parsed_read["item_count"].as_u64(), Some(2));
+        assert_eq!(
+            parsed_read["items"],
+            json!(["Collect logs", "Patch parser"])
+        );
+        assert!(parsed_read["updated_at"].is_string());
+
+        let clear_result = clear_tool
+            .execute(&json!({}).to_string(), &ctx)
+            .await
+            .expect("scratchpad clear should succeed");
+        let parsed_clear: serde_json::Value =
+            serde_json::from_str(&clear_result).expect("clear output should parse");
+        assert_eq!(parsed_clear["cleared"].as_bool(), Some(true));
+
+        let read_after_clear = read_tool
+            .execute(&json!({}).to_string(), &ctx)
+            .await
+            .expect("scratchpad read after clear should succeed");
+        let parsed_after_clear: serde_json::Value =
+            serde_json::from_str(&read_after_clear).expect("read output should parse");
+        assert_eq!(parsed_after_clear["item_count"].as_u64(), Some(0));
+        assert_eq!(parsed_after_clear["items"], json!([]));
+        assert!(parsed_after_clear["updated_at"].is_null());
+    }
+
+    #[tokio::test]
+    async fn register_scratchpad_tools_adds_tools_to_registry() {
+        let memory = test_memory_backend().await;
+        let mut registry = crate::ToolRegistry::default();
+        register_scratchpad_tools(&mut registry, memory);
+
+        assert!(registry.get(SCRATCHPAD_READ_TOOL_NAME).is_some());
+        assert!(registry.get(SCRATCHPAD_WRITE_TOOL_NAME).is_some());
+        assert!(registry.get(SCRATCHPAD_CLEAR_TOOL_NAME).is_some());
     }
 }

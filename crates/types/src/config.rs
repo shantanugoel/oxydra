@@ -307,7 +307,29 @@ impl SummarizationConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEmbeddingBackend {
+    #[default]
+    Model2vec,
+    /// Deterministic hashing-based embeddings.
+    ///
+    /// This mode converts content into stable vectors derived from hashes:
+    /// identical text always maps to identical vectors, but semantic similarity
+    /// across paraphrases is not guaranteed.
+    Deterministic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Model2vecModel {
+    #[serde(rename = "potion_8m")]
+    Potion8m,
+    #[default]
+    #[serde(rename = "potion_32m")]
+    Potion32m,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -315,8 +337,25 @@ pub struct MemoryConfig {
     pub remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
+    #[serde(default = "default_memory_embedding_backend")]
+    pub embedding_backend: MemoryEmbeddingBackend,
+    #[serde(default = "default_memory_model2vec_model")]
+    pub model2vec_model: Model2vecModel,
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            remote_url: None,
+            auth_token: None,
+            embedding_backend: default_memory_embedding_backend(),
+            model2vec_model: default_memory_model2vec_model(),
+            retrieval: RetrievalConfig::default(),
+        }
+    }
 }
 
 impl MemoryConfig {
@@ -935,6 +974,14 @@ fn default_summarization_min_turns() -> usize {
 
 fn default_max_turns() -> usize {
     8
+}
+
+fn default_memory_embedding_backend() -> MemoryEmbeddingBackend {
+    MemoryEmbeddingBackend::Model2vec
+}
+
+fn default_memory_model2vec_model() -> Model2vecModel {
+    Model2vecModel::Potion32m
 }
 
 fn default_retrieval_top_k() -> usize {

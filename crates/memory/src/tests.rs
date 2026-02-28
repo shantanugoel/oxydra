@@ -6,16 +6,18 @@ use std::{
 use libsql::{Builder, params};
 use serde_json::json;
 use types::{
-    Memory, MemoryConfig, MemoryError, MemoryForgetRequest, MemoryHybridQueryRequest,
-    MemoryRecallRequest, MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest,
-    MemorySummaryWriteRequest, Message, MessageRole,
+    Memory, MemoryConfig, MemoryEmbeddingBackend, MemoryError, MemoryForgetRequest,
+    MemoryHybridQueryRequest, MemoryNoteStoreRequest, MemoryRecallRequest, MemoryRetrieval,
+    MemoryScratchpadClearRequest, MemoryScratchpadReadRequest, MemoryScratchpadWriteRequest,
+    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryWriteRequest, Message, MessageRole,
+    Model2vecModel,
 };
 
 use crate::{
     LibsqlMemory,
     connection::ConnectionStrategy,
     schema::{
-        MIGRATIONS, REQUIRED_INDEXES, REQUIRED_TABLES, REQUIRED_TRIGGERS,
+        CHUNKS_VECTOR_INDEX_NAME, MIGRATIONS, REQUIRED_INDEXES, REQUIRED_TABLES, REQUIRED_TRIGGERS,
         applied_migration_versions, enable_foreign_keys, ensure_migration_bookkeeping,
         run_pending_migrations, schema_exists,
     },
@@ -35,6 +37,8 @@ async fn remote_connection_strategy_requires_auth_token() {
         enabled: true,
         remote_url: Some("libsql://example-org.turso.io".to_owned()),
         auth_token: None,
+        embedding_backend: MemoryEmbeddingBackend::Model2vec,
+        model2vec_model: Model2vecModel::Potion32m,
         retrieval: types::RetrievalConfig::default(),
     };
     let error = ConnectionStrategy::from_config(&config)
@@ -678,6 +682,116 @@ async fn chunks_fts_triggers_keep_index_synchronized() {
 }
 
 #[tokio::test]
+async fn vector_top_k_retrieval_smoke_uses_native_index() {
+    let db_path = temp_db_path("vector-top-k-smoke");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect().expect("backend should connect");
+    insert_test_session(&conn, "session-vector-smoke").await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-a",
+        "session-vector-smoke",
+        1,
+        "anchor",
+        r#"{"tag":"a"}"#,
+        &[1.0, 0.0],
+    )
+    .await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-b",
+        "session-vector-smoke",
+        2,
+        "other",
+        r#"{"tag":"b"}"#,
+        &[0.0, 1.0],
+    )
+    .await;
+
+    let mut query_embedding_values = vec![1.0_f32, 0.0_f32];
+    query_embedding_values.resize(512, 0.0);
+    let query_embedding =
+        serde_json::to_string(&query_embedding_values).expect("query embedding should serialize");
+    let sql = format!(
+        "SELECT c.chunk_id, vector_distance_cos(cv.embedding_blob, vector32(?1)) AS distance
+         FROM vector_top_k('{CHUNKS_VECTOR_INDEX_NAME}', vector32(?1), 2) AS v
+         INNER JOIN chunks_vec cv ON cv.rowid = v.id
+         INNER JOIN chunks c ON c.chunk_id = cv.chunk_id
+         WHERE c.session_id = ?2
+         ORDER BY distance ASC, c.chunk_id ASC"
+    );
+    let mut rows = conn
+        .query(
+            sql.as_str(),
+            params![query_embedding.as_str(), "session-vector-smoke"],
+        )
+        .await
+        .expect("vector_top_k query should succeed");
+    let first_row = rows
+        .next()
+        .await
+        .expect("first row should be readable")
+        .expect("first row should exist");
+    let first_chunk_id = first_row
+        .get::<String>(0)
+        .expect("chunk id should be readable");
+    assert_eq!(first_chunk_id, "chunk-a");
+
+    drop(conn);
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn hybrid_query_fails_fast_when_native_vector_index_is_missing() {
+    let db_path = temp_db_path("hybrid-query-missing-vector-index");
+    let backend = local_memory_backend(&db_path).await;
+    let conn = backend.connect().expect("backend should connect");
+    insert_test_session(&conn, "session-vector-missing-index").await;
+    insert_chunk_with_embedding(
+        &conn,
+        "chunk-a",
+        "session-vector-missing-index",
+        1,
+        "anchor",
+        r#"{"tag":"a"}"#,
+        &[1.0, 0.0],
+    )
+    .await;
+
+    let drop_index_sql = format!("DROP INDEX {CHUNKS_VECTOR_INDEX_NAME}");
+    conn.execute(drop_index_sql.as_str(), params![])
+        .await
+        .expect("vector index should drop");
+    drop(conn);
+
+    let error = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "session-vector-missing-index".to_owned(),
+            query: "anchor".to_owned(),
+            tags: None,
+            query_embedding: Some(vec![1.0, 0.0]),
+            top_k: Some(1),
+            vector_weight: Some(1.0),
+            fts_weight: Some(0.0),
+        },
+    )
+    .await
+    .expect_err("hybrid query should fail without native vector index");
+    match error {
+        MemoryError::Query { message } => {
+            assert!(
+                message.contains("native libsql vector query failed"),
+                "error should mention native vector query failure: {message}"
+            );
+        }
+        other => panic!("expected MemoryError::Query, got {other:?}"),
+    }
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn hybrid_query_merges_vector_and_fts_with_weighted_rank() {
     let db_path = temp_db_path("hybrid-query-merge");
     let backend = local_memory_backend(&db_path).await;
@@ -720,6 +834,7 @@ async fn hybrid_query_merges_vector_and_fts_with_weighted_rank() {
         MemoryHybridQueryRequest {
             session_id: "session-hybrid".to_owned(),
             query: "banana".to_owned(),
+            tags: None,
             query_embedding: Some(vec![1.0, 0.0]),
             top_k: Some(3),
             vector_weight: Some(0.5),
@@ -793,6 +908,7 @@ async fn hybrid_query_breaks_ties_by_recency_then_chunk_id() {
         MemoryHybridQueryRequest {
             session_id: "session-hybrid-tie".to_owned(),
             query: "unmatched-token".to_owned(),
+            tags: None,
             query_embedding: Some(vec![1.0, 0.0]),
             top_k: Some(3),
             vector_weight: Some(1.0),
@@ -1104,22 +1220,22 @@ async fn insert_chunk_with_embedding(
     .await
     .expect("test chunk should insert");
 
-    let embedding_blob = encode_embedding_blob(embedding);
+    const TEST_VECTOR_DIMENSIONS: usize = 512;
+    let mut normalized_embedding = embedding.to_vec();
+    assert!(
+        normalized_embedding.len() <= TEST_VECTOR_DIMENSIONS,
+        "test embedding dimensions must not exceed {TEST_VECTOR_DIMENSIONS}"
+    );
+    normalized_embedding.resize(TEST_VECTOR_DIMENSIONS, 0.0);
+    let embedding_json =
+        serde_json::to_string(&normalized_embedding).expect("embedding json should serialize");
     conn.execute(
         "INSERT INTO chunks_vec (chunk_id, embedding_blob, embedding_model)
-         VALUES (?1, ?2, ?3)",
-        params![chunk_id, embedding_blob.as_slice(), "test-embedding-model"],
+         VALUES (?1, vector32(?2), ?3)",
+        params![chunk_id, embedding_json.as_str(), "test-embedding-model"],
     )
     .await
     .expect("test chunk vector should insert");
-}
-
-fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
-    let mut blob = Vec::with_capacity(std::mem::size_of_val(embedding));
-    for value in embedding {
-        blob.extend_from_slice(&value.to_le_bytes());
-    }
-    blob
 }
 
 fn assert_approx_eq(left: f64, right: f64) {
@@ -1127,6 +1243,16 @@ fn assert_approx_eq(left: f64, right: f64) {
         (left - right).abs() <= 1e-6,
         "expected {left} ~= {right} within 1e-6"
     );
+}
+
+fn note_store_request(session_id: &str, note_id: &str, content: &str) -> MemoryNoteStoreRequest {
+    MemoryNoteStoreRequest {
+        session_id: session_id.to_owned(),
+        note_id: note_id.to_owned(),
+        content: content.to_owned(),
+        source: Some("memory_save".to_owned()),
+        tags: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,15 +1263,16 @@ fn assert_approx_eq(left: f64, right: f64) {
 async fn store_note_creates_chunks_with_note_id_in_metadata() {
     let db_path = temp_db_path("store-note-metadata");
     let backend = local_memory_backend(&db_path).await;
+    let mut request = note_store_request("memory:alice", "note-abc123", "User likes chocolate");
+    request.tags = Some(vec![
+        " Preferences ".to_owned(),
+        "PREFERENCES".to_owned(),
+        "theme".to_owned(),
+    ]);
 
-    MemoryRetrieval::store_note(
-        &backend,
-        "memory:alice",
-        "note-abc123",
-        "User likes chocolate",
-    )
-    .await
-    .expect("store_note should succeed");
+    MemoryRetrieval::store_note(&backend, request)
+        .await
+        .expect("store_note should succeed");
 
     let conn = backend.connect().expect("backend should connect");
     let mut rows = conn
@@ -1173,6 +1300,29 @@ async fn store_note_creates_chunks_with_note_id_in_metadata() {
             Some("memory_save"),
             "chunk metadata should carry source marker"
         );
+        assert_eq!(
+            metadata.get("schema_version").and_then(|v| v.as_u64()),
+            Some(1),
+            "chunk metadata should carry schema_version"
+        );
+        let tags = metadata
+            .get("tags")
+            .and_then(|value| value.as_array())
+            .expect("chunk metadata should carry tags array");
+        let normalized_tags: Vec<&str> = tags.iter().filter_map(|value| value.as_str()).collect();
+        assert_eq!(normalized_tags, vec!["preferences", "theme"]);
+        let created_at = metadata
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .expect("chunk metadata should carry created_at");
+        let updated_at = metadata
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .expect("chunk metadata should carry updated_at");
+        chrono::DateTime::parse_from_rfc3339(created_at)
+            .expect("created_at should be RFC3339 timestamp");
+        chrono::DateTime::parse_from_rfc3339(updated_at)
+            .expect("updated_at should be RFC3339 timestamp");
     }
     assert!(found, "at least one chunk should have been created");
 
@@ -1187,9 +1337,7 @@ async fn store_note_creates_searchable_conversation_event() {
 
     MemoryRetrieval::store_note(
         &backend,
-        "memory:alice",
-        "note-ev1",
-        "User prefers dark mode",
+        note_store_request("memory:alice", "note-ev1", "User prefers dark mode"),
     )
     .await
     .expect("store_note should succeed");
@@ -1226,9 +1374,7 @@ async fn delete_note_removes_chunks_and_event() {
 
     MemoryRetrieval::store_note(
         &backend,
-        "memory:alice",
-        "note-del1",
-        "User likes chocolates",
+        note_store_request("memory:alice", "note-del1", "User likes chocolates"),
     )
     .await
     .expect("store_note should succeed");
@@ -1317,9 +1463,7 @@ async fn note_save_search_update_delete_roundtrip() {
     // Save
     MemoryRetrieval::store_note(
         &backend,
-        "memory:bob",
-        "note-rt1",
-        "User's name is Shantanu",
+        note_store_request("memory:bob", "note-rt1", "User's name is Shantanu"),
     )
     .await
     .expect("store_note should succeed");
@@ -1330,6 +1474,7 @@ async fn note_save_search_update_delete_roundtrip() {
         MemoryHybridQueryRequest {
             session_id: "memory:bob".to_owned(),
             query: "name".to_owned(),
+            tags: None,
             query_embedding: None,
             top_k: Some(5),
             vector_weight: Some(0.7),
@@ -1348,9 +1493,7 @@ async fn note_save_search_update_delete_roundtrip() {
         .expect("delete old note should succeed");
     MemoryRetrieval::store_note(
         &backend,
-        "memory:bob",
-        "note-rt1",
-        "User prefers to be called SG",
+        note_store_request("memory:bob", "note-rt1", "User prefers to be called SG"),
     )
     .await
     .expect("store updated note should succeed");
@@ -1361,6 +1504,7 @@ async fn note_save_search_update_delete_roundtrip() {
         MemoryHybridQueryRequest {
             session_id: "memory:bob".to_owned(),
             query: "name".to_owned(),
+            tags: None,
             query_embedding: None,
             top_k: Some(5),
             vector_weight: Some(0.7),
@@ -1389,6 +1533,7 @@ async fn note_save_search_update_delete_roundtrip() {
         MemoryHybridQueryRequest {
             session_id: "memory:bob".to_owned(),
             query: "name".to_owned(),
+            tags: None,
             query_embedding: None,
             top_k: Some(5),
             vector_weight: Some(0.7),
@@ -1411,14 +1556,20 @@ async fn note_user_scoping_isolates_across_users() {
     let backend = local_memory_backend(&db_path).await;
 
     // User A saves a note
-    MemoryRetrieval::store_note(&backend, "memory:user-a", "note-ua1", "User A prefers red")
-        .await
-        .expect("user A store should succeed");
+    MemoryRetrieval::store_note(
+        &backend,
+        note_store_request("memory:user-a", "note-ua1", "User A prefers red"),
+    )
+    .await
+    .expect("user A store should succeed");
 
     // User B saves a note
-    MemoryRetrieval::store_note(&backend, "memory:user-b", "note-ub1", "User B prefers blue")
-        .await
-        .expect("user B store should succeed");
+    MemoryRetrieval::store_note(
+        &backend,
+        note_store_request("memory:user-b", "note-ub1", "User B prefers blue"),
+    )
+    .await
+    .expect("user B store should succeed");
 
     // User A's search should only find their own note
     let results_a = MemoryRetrieval::hybrid_query(
@@ -1426,6 +1577,7 @@ async fn note_user_scoping_isolates_across_users() {
         MemoryHybridQueryRequest {
             session_id: "memory:user-a".to_owned(),
             query: "prefers".to_owned(),
+            tags: None,
             query_embedding: None,
             top_k: Some(10),
             vector_weight: Some(0.5),
@@ -1448,6 +1600,7 @@ async fn note_user_scoping_isolates_across_users() {
         MemoryHybridQueryRequest {
             session_id: "memory:user-b".to_owned(),
             query: "prefers".to_owned(),
+            tags: None,
             query_embedding: None,
             top_k: Some(10),
             vector_weight: Some(0.5),
@@ -1474,17 +1627,13 @@ async fn store_note_multiple_notes_in_same_session_coexist() {
 
     MemoryRetrieval::store_note(
         &backend,
-        "memory:carol",
-        "note-m1",
-        "Favorite color is green",
+        note_store_request("memory:carol", "note-m1", "Favorite color is green"),
     )
     .await
     .expect("first note should store");
     MemoryRetrieval::store_note(
         &backend,
-        "memory:carol",
-        "note-m2",
-        "Preferred language is Rust",
+        note_store_request("memory:carol", "note-m2", "Preferred language is Rust"),
     )
     .await
     .expect("second note should store");
@@ -1501,6 +1650,7 @@ async fn store_note_multiple_notes_in_same_session_coexist() {
         MemoryHybridQueryRequest {
             session_id: "memory:carol".to_owned(),
             query: "Rust".to_owned(),
+            tags: None,
             query_embedding: None,
             top_k: Some(5),
             vector_weight: Some(0.5),
@@ -1515,6 +1665,297 @@ async fn store_note_multiple_notes_in_same_session_coexist() {
     );
     let has_rust = results.iter().any(|r| r.text.contains("Rust"));
     assert!(has_rust, "second note should be found");
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn same_content_notes_stay_independent_on_update_delete_and_search() {
+    let db_path = temp_db_path("note-same-content-independence");
+    let backend = local_memory_backend(&db_path).await;
+    let session_id = "memory:dana";
+
+    MemoryRetrieval::store_note(
+        &backend,
+        note_store_request(session_id, "note-a", "User likes jazz music"),
+    )
+    .await
+    .expect("first note should store");
+    MemoryRetrieval::store_note(
+        &backend,
+        note_store_request(session_id, "note-b", "User likes jazz music"),
+    )
+    .await
+    .expect("second note should store");
+
+    // Simulate update semantics used by memory tools: delete then store same note_id.
+    let removed = MemoryRetrieval::delete_note(&backend, session_id, "note-a")
+        .await
+        .expect("note-a delete before update should succeed");
+    assert!(removed, "note-a should exist before update");
+    MemoryRetrieval::store_note(
+        &backend,
+        note_store_request(session_id, "note-a", "User likes rock music"),
+    )
+    .await
+    .expect("updated note-a should store");
+
+    let jazz_results = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: session_id.to_owned(),
+            query: "jazz music".to_owned(),
+            tags: None,
+            query_embedding: None,
+            top_k: Some(1),
+            vector_weight: Some(0.0),
+            fts_weight: Some(1.0),
+        },
+    )
+    .await
+    .expect("jazz search should succeed");
+    let jazz_note_ids: Vec<&str> = jazz_results
+        .iter()
+        .filter_map(|result| result.metadata.as_ref())
+        .filter_map(|metadata| metadata.get("note_id"))
+        .filter_map(|value| value.as_str())
+        .collect();
+    assert_eq!(
+        jazz_note_ids.first().copied(),
+        Some("note-b"),
+        "jazz search should rank note-b first after note-a update"
+    );
+    assert!(
+        jazz_note_ids.contains(&"note-b"),
+        "jazz search should still return note-b"
+    );
+
+    let removed_again = MemoryRetrieval::delete_note(&backend, session_id, "note-a")
+        .await
+        .expect("note-a delete should succeed");
+    assert!(removed_again, "updated note-a should be deletable");
+
+    let conn = backend.connect().expect("backend should connect");
+    let mut rows = conn
+        .query(
+            "SELECT
+                 COALESCE(SUM(CASE WHEN json_extract(metadata_json, '$.note_id') = 'note-a' THEN 1 ELSE 0 END), 0) AS note_a_chunks,
+                 COALESCE(SUM(CASE WHEN json_extract(metadata_json, '$.note_id') = 'note-b' THEN 1 ELSE 0 END), 0) AS note_b_chunks
+             FROM chunks
+             WHERE session_id = ?1",
+            params![session_id],
+        )
+        .await
+        .expect("chunk counts query should run");
+    let row = rows.next().await.expect("row read").expect("row exists");
+    let note_a_chunks = row.get::<i64>(0).expect("note-a count should be readable");
+    let note_b_chunks = row.get::<i64>(1).expect("note-b count should be readable");
+    assert_eq!(note_a_chunks, 0, "note-a chunks should be fully removed");
+    assert!(note_b_chunks > 0, "note-b chunks should remain present");
+
+    let jazz_results_after_delete = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: session_id.to_owned(),
+            query: "jazz".to_owned(),
+            tags: None,
+            query_embedding: None,
+            top_k: Some(10),
+            vector_weight: Some(0.0),
+            fts_weight: Some(1.0),
+        },
+    )
+    .await
+    .expect("jazz search after delete should succeed");
+    let jazz_note_ids_after_delete: Vec<&str> = jazz_results_after_delete
+        .iter()
+        .filter_map(|result| result.metadata.as_ref())
+        .filter_map(|metadata| metadata.get("note_id"))
+        .filter_map(|value| value.as_str())
+        .collect();
+    assert!(
+        jazz_note_ids_after_delete.contains(&"note-b"),
+        "note-b should remain searchable after deleting note-a"
+    );
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn hybrid_query_tag_filter_requires_all_requested_tags() {
+    let db_path = temp_db_path("hybrid-query-tag-filter");
+    let backend = local_memory_backend(&db_path).await;
+
+    let mut first = note_store_request("memory:tags", "note-tags-a", "deploy checklist");
+    first.tags = Some(vec!["project-a".to_owned(), "workflow".to_owned()]);
+    MemoryRetrieval::store_note(&backend, first)
+        .await
+        .expect("first tagged note should store");
+
+    let mut second = note_store_request("memory:tags", "note-tags-b", "deploy checklist");
+    second.tags = Some(vec!["project-b".to_owned()]);
+    MemoryRetrieval::store_note(&backend, second)
+        .await
+        .expect("second tagged note should store");
+
+    let filtered = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:tags".to_owned(),
+            query: "deploy checklist".to_owned(),
+            tags: Some(vec!["project-a".to_owned(), "workflow".to_owned()]),
+            query_embedding: None,
+            top_k: Some(10),
+            vector_weight: Some(0.0),
+            fts_weight: Some(1.0),
+        },
+    )
+    .await
+    .expect("tag filtered search should succeed");
+    assert_eq!(
+        filtered.len(),
+        1,
+        "only fully matching tags should be returned"
+    );
+    let note_id = filtered[0]
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("note_id"))
+        .and_then(|value| value.as_str());
+    assert_eq!(note_id, Some("note-tags-a"));
+
+    let no_match = MemoryRetrieval::hybrid_query(
+        &backend,
+        MemoryHybridQueryRequest {
+            session_id: "memory:tags".to_owned(),
+            query: "deploy checklist".to_owned(),
+            tags: Some(vec!["workflow".to_owned(), "project-b".to_owned()]),
+            query_embedding: None,
+            top_k: Some(10),
+            vector_weight: Some(0.0),
+            fts_weight: Some(1.0),
+        },
+    )
+    .await
+    .expect("non-matching tag search should succeed");
+    assert!(
+        no_match.is_empty(),
+        "results should be empty when not all requested tags are present"
+    );
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scratchpad_state_roundtrip_is_session_scoped() {
+    let db_path = temp_db_path("scratchpad-roundtrip");
+    let backend = local_memory_backend(&db_path).await;
+    let session_id = "runtime:session-1";
+
+    let write_result = MemoryRetrieval::write_scratchpad(
+        &backend,
+        MemoryScratchpadWriteRequest {
+            session_id: session_id.to_owned(),
+            items: vec![
+                "Inspect failing test".to_owned(),
+                "Apply minimal patch".to_owned(),
+            ],
+        },
+    )
+    .await
+    .expect("scratchpad write should succeed");
+    assert_eq!(write_result.item_count, 2);
+
+    let scratchpad = MemoryRetrieval::read_scratchpad(
+        &backend,
+        MemoryScratchpadReadRequest {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await
+    .expect("scratchpad read should succeed")
+    .expect("scratchpad should exist");
+    assert_eq!(
+        scratchpad.items,
+        vec![
+            "Inspect failing test".to_owned(),
+            "Apply minimal patch".to_owned()
+        ]
+    );
+    chrono::DateTime::parse_from_rfc3339(&scratchpad.updated_at)
+        .expect("scratchpad updated_at should be RFC3339");
+
+    let other_session = MemoryRetrieval::read_scratchpad(
+        &backend,
+        MemoryScratchpadReadRequest {
+            session_id: "runtime:session-2".to_owned(),
+        },
+    )
+    .await
+    .expect("scratchpad read for other session should succeed");
+    assert!(
+        other_session.is_none(),
+        "scratchpad must be isolated per session"
+    );
+
+    let cleared = MemoryRetrieval::clear_scratchpad(
+        &backend,
+        MemoryScratchpadClearRequest {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await
+    .expect("scratchpad clear should succeed");
+    assert!(cleared, "clear should report scratchpad existed");
+
+    let after_clear = MemoryRetrieval::read_scratchpad(
+        &backend,
+        MemoryScratchpadReadRequest {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await
+    .expect("scratchpad read after clear should succeed");
+    assert!(
+        after_clear.is_none(),
+        "scratchpad should be removed after clear"
+    );
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn scratchpad_write_enforces_limits() {
+    let db_path = temp_db_path("scratchpad-limits");
+    let backend = local_memory_backend(&db_path).await;
+
+    let too_many_items = MemoryRetrieval::write_scratchpad(
+        &backend,
+        MemoryScratchpadWriteRequest {
+            session_id: "runtime:limits".to_owned(),
+            items: (0..33).map(|index| format!("item-{index}")).collect(),
+        },
+    )
+    .await
+    .expect_err("write should fail when item count exceeds limit");
+    assert!(matches!(
+        too_many_items,
+        MemoryError::Query { message } if message.contains("exceeds max")
+    ));
+
+    let oversized_payload = MemoryRetrieval::write_scratchpad(
+        &backend,
+        MemoryScratchpadWriteRequest {
+            session_id: "runtime:limits".to_owned(),
+            items: vec!["é".repeat(240); 32],
+        },
+    )
+    .await
+    .expect_err("write should fail when payload exceeds byte limit");
+    assert!(matches!(
+        oversized_payload,
+        MemoryError::Query { message } if message.contains("payload size")
+    ));
 
     let _ = fs::remove_file(db_path);
 }

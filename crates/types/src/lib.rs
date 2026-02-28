@@ -25,10 +25,10 @@ pub use channel::{
 };
 pub use config::{
     AgentConfig, AgentDefinition, CatalogConfig, ConfigError, ContextBudgetConfig, GatewayConfig,
-    MemoryConfig, ProviderConfigs, ProviderRegistryEntry, ProviderSelection, ProviderType,
-    ReliabilityConfig, RetrievalConfig, RuntimeConfig, SUPPORTED_CONFIG_MAJOR_VERSION,
-    SchedulerConfig, ShellConfig, SummarizationConfig, ToolsConfig, UnknownModelCaps,
-    WebSearchConfig, validate_config_version,
+    MemoryConfig, MemoryEmbeddingBackend, Model2vecModel, ProviderConfigs, ProviderRegistryEntry,
+    ProviderSelection, ProviderType, ReliabilityConfig, RetrievalConfig, RuntimeConfig,
+    SUPPORTED_CONFIG_MAJOR_VERSION, SchedulerConfig, ShellConfig, SummarizationConfig, ToolsConfig,
+    UnknownModelCaps, WebSearchConfig, validate_config_version,
 };
 pub use delegation::{
     DelegationExecutor, DelegationProgressSender, DelegationRequest, DelegationResult,
@@ -39,9 +39,11 @@ pub use error::{
 };
 pub use memory::{
     Memory, MemoryChunkDocument, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse,
-    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
-    MemoryRecord, MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest,
-    MemorySummaryState, MemorySummaryWriteRequest, MemorySummaryWriteResult,
+    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryNoteStoreRequest,
+    MemoryRecallRequest, MemoryRecord, MemoryRetrieval, MemoryScratchpadClearRequest,
+    MemoryScratchpadReadRequest, MemoryScratchpadState, MemoryScratchpadWriteRequest,
+    MemoryScratchpadWriteResult, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
+    MemorySummaryWriteRequest, MemorySummaryWriteResult,
 };
 pub use model::{
     CapsOverrideEntry, CapsOverrides, CatalogProvider, Context, InlineMedia, InputModality,

@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use types::{
-    FunctionDecl, MemoryHybridQueryRequest, MemoryRetrieval, SafetyTier, Tool, ToolError,
-    ToolExecutionContext,
+    FunctionDecl, MemoryHybridQueryRequest, MemoryNoteStoreRequest, MemoryRetrieval, SafetyTier,
+    Tool, ToolError, ToolExecutionContext,
 };
 
 use crate::{execution_failed, invalid_args, parse_args};
@@ -17,6 +17,8 @@ pub const MEMORY_DELETE_TOOL_NAME: &str = "memory_delete";
 
 const MEMORY_SEARCH_MAX_TOP_K: usize = 20;
 const MEMORY_SEARCH_DEFAULT_TOP_K: usize = 5;
+const MEMORY_NOTE_TAG_MAX_COUNT: usize = 16;
+const MEMORY_NOTE_TAG_MAX_CHARS: usize = 64;
 
 /// Compute the well-known session ID for a user's persistent memory namespace.
 fn user_memory_session_id(user_id: &str) -> String {
@@ -32,17 +34,20 @@ struct MemorySearchArgs {
     query: String,
     top_k: Option<usize>,
     include_conversation: Option<bool>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MemorySaveArgs {
     content: String,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MemoryUpdateArgs {
     note_id: String,
     content: String,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +74,27 @@ fn resolve_session_id(
         .session_id
         .clone()
         .ok_or_else(|| execution_failed(tool_name, "session context is not available"))
+}
+
+fn metadata_string_field(metadata: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    metadata
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn metadata_tags_field(metadata: Option<&serde_json::Value>) -> Vec<String> {
+    metadata
+        .and_then(|value| value.get("tags"))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +151,16 @@ impl Tool for MemorySearchTool {
                         "type": "boolean",
                         "description": "Also search the current conversation session (default false)",
                         "default": false
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": "Optional tag filters. When provided, results must include every requested tag.",
+                        "maxItems": MEMORY_NOTE_TAG_MAX_COUNT,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MEMORY_NOTE_TAG_MAX_CHARS
+                        }
                     }
                 }
             }),
@@ -160,6 +196,7 @@ impl Tool for MemorySearchTool {
             .hybrid_query(MemoryHybridQueryRequest {
                 session_id: memory_session,
                 query: request.query.clone(),
+                tags: request.tags.clone(),
                 query_embedding: None,
                 top_k: Some(top_k),
                 vector_weight: Some(self.vector_weight),
@@ -176,17 +213,16 @@ impl Tool for MemorySearchTool {
         let mut results: Vec<serde_json::Value> = memory_results
             .iter()
             .map(|result| {
-                let note_id = result
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("note_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let metadata = result.metadata.as_ref();
+                let note_id = metadata_string_field(metadata, "note_id").unwrap_or_default();
                 json!({
                     "note_id": note_id,
                     "text": result.text,
                     "score": result.score,
-                    "source": "user_memory"
+                    "source": "user_memory",
+                    "tags": metadata_tags_field(metadata),
+                    "created_at": metadata_string_field(metadata, "created_at"),
+                    "updated_at": metadata_string_field(metadata, "updated_at")
                 })
             })
             .collect();
@@ -200,6 +236,7 @@ impl Tool for MemorySearchTool {
                         .hybrid_query(MemoryHybridQueryRequest {
                             session_id: conversation_session,
                             query: request.query.clone(),
+                            tags: request.tags.clone(),
                             query_embedding: None,
                             top_k: Some(top_k),
                             vector_weight: Some(self.vector_weight),
@@ -220,7 +257,10 @@ impl Tool for MemorySearchTool {
                                     "note_id": "",
                                     "text": result.text,
                                     "score": result.score,
-                                    "source": "conversation"
+                                    "source": "conversation",
+                                    "tags": [],
+                                    "created_at": null,
+                                    "updated_at": null
                                 }));
                             }
                         }
@@ -298,6 +338,7 @@ impl Tool for MemorySaveTool {
                  decisions, states facts, or tells you something worth remembering across \
                  conversations. Also save corrected procedures — when you discover the right \
                  approach after initial failed attempts via any tools or other methods, save the working method for next time. \
+                 Add tags when helpful to improve future filtering (for example: preference, workflow, project). \
                  Do NOT save ephemeral details, secrets, or one-off outputs. Saved notes persist \
                  across all sessions and channels. Returns a note_id for future reference."
                     .to_owned(),
@@ -310,6 +351,16 @@ impl Tool for MemorySaveTool {
                         "type": "string",
                         "description": "Natural language text to save (fact, preference, decision, etc.)",
                         "minLength": 1
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": "Optional tags for retrieval filtering and organization",
+                        "maxItems": MEMORY_NOTE_TAG_MAX_COUNT,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MEMORY_NOTE_TAG_MAX_CHARS
+                        }
                     }
                 }
             }),
@@ -340,7 +391,13 @@ impl Tool for MemorySaveTool {
         );
 
         self.memory
-            .store_note(&memory_session, &note_id, &request.content)
+            .store_note(MemoryNoteStoreRequest {
+                session_id: memory_session,
+                note_id: note_id.clone(),
+                content: request.content,
+                source: Some(MEMORY_SAVE_TOOL_NAME.to_owned()),
+                tags: request.tags,
+            })
             .await
             .map_err(|error| {
                 execution_failed(
@@ -390,7 +447,8 @@ impl Tool for MemoryUpdateTool {
                  or changes previously stored information (e.g., a new preferred name, an updated \
                  preference), or when a saved procedure is superseded by a better approach. First \
                  use memory_search to find the note and its note_id, then call this with the \
-                 note_id and the new content."
+                 note_id and the new content. Update tags when categorization changes, and keep \
+                 corrected procedures current."
                     .to_owned(),
             ),
             json!({
@@ -406,6 +464,16 @@ impl Tool for MemoryUpdateTool {
                         "type": "string",
                         "description": "New content to replace the existing note",
                         "minLength": 1
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": "Optional replacement tags for the updated note",
+                        "maxItems": MEMORY_NOTE_TAG_MAX_COUNT,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MEMORY_NOTE_TAG_MAX_CHARS
+                        }
                     }
                 }
             }),
@@ -454,7 +522,13 @@ impl Tool for MemoryUpdateTool {
 
         // Store with the same note_id.
         self.memory
-            .store_note(&memory_session, &request.note_id, &request.content)
+            .store_note(MemoryNoteStoreRequest {
+                session_id: memory_session,
+                note_id: request.note_id.clone(),
+                content: request.content,
+                source: Some(MEMORY_UPDATE_TOOL_NAME.to_owned()),
+                tags: request.tags,
+            })
             .await
             .map_err(|error| {
                 execution_failed(

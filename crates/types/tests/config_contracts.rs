@@ -1,6 +1,6 @@
 use types::{
-    AgentConfig, ConfigError, MemoryConfig, ModelId, ProviderId, SUPPORTED_CONFIG_MAJOR_VERSION,
-    validate_config_version,
+    AgentConfig, ConfigError, MemoryConfig, MemoryEmbeddingBackend, Model2vecModel, ModelId,
+    ProviderId, SUPPORTED_CONFIG_MAJOR_VERSION, validate_config_version,
 };
 
 #[test]
@@ -9,7 +9,39 @@ fn default_agent_config_is_valid() {
     assert_eq!(config.selection.provider, ProviderId::from("openai"));
     assert_eq!(config.selection.model, ModelId::from("gpt-4o-mini"));
     assert_eq!(config.memory, MemoryConfig::default());
+    assert_eq!(
+        config.memory.embedding_backend,
+        MemoryEmbeddingBackend::Model2vec
+    );
+    assert_eq!(config.memory.model2vec_model, Model2vecModel::Potion32m);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn default_memory_embedding_config_uses_model2vec_potion_32m() {
+    let config = MemoryConfig::default();
+    assert_eq!(config.embedding_backend, MemoryEmbeddingBackend::Model2vec);
+    assert_eq!(config.model2vec_model, Model2vecModel::Potion32m);
+}
+
+#[test]
+fn memory_embedding_enums_serialize_with_expected_wire_values() {
+    assert_eq!(
+        serde_json::to_string(&MemoryEmbeddingBackend::Model2vec).expect("serialize backend"),
+        "\"model2vec\""
+    );
+    assert_eq!(
+        serde_json::to_string(&MemoryEmbeddingBackend::Deterministic).expect("serialize backend"),
+        "\"deterministic\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Model2vecModel::Potion8m).expect("serialize model"),
+        "\"potion_8m\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Model2vecModel::Potion32m).expect("serialize model"),
+        "\"potion_32m\""
+    );
 }
 
 #[test]

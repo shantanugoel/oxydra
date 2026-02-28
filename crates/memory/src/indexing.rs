@@ -1,17 +1,21 @@
-#[cfg(feature = "fastembed")]
-use fastembed::TextEmbedding;
-use libsql::{Connection, params};
-use serde_json::json;
-use types::{MemoryError, Message, MessageRole};
+use std::sync::Arc;
 
-use crate::errors::query_error;
+use libsql::{Connection, params};
+use model2vec_rs::model::StaticModel;
+use serde_json::json;
+use types::{
+    MemoryConfig, MemoryEmbeddingBackend, MemoryError, Message, MessageRole, Model2vecModel,
+};
+
+use crate::errors::{initialization_error, query_error};
 
 const INDEX_CHUNK_MAX_CHARS: usize = 640;
 const INDEX_CHUNK_OVERLAP_CHARS: usize = 96;
 const DETERMINISTIC_EMBEDDING_DIMENSIONS: usize = 64;
+const INDEX_VECTOR_DIMENSIONS: usize = 512;
 const DETERMINISTIC_EMBEDDING_MODEL: &str = "deterministic-hash-v1";
-#[cfg(feature = "fastembed")]
-const FASTEMBED_EMBEDDING_MODEL: &str = "fastembed-default";
+const MODEL2VEC_POTION_8M_MODEL_ID: &str = "minishlab/potion-base-8M";
+const MODEL2VEC_POTION_32M_MODEL_ID: &str = "minishlab/potion-base-32M";
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedIndexDocument {
@@ -28,9 +32,10 @@ struct PreparedChunk {
     content_hash: String,
     chunk_text: String,
     metadata_json: String,
+    note_id: Option<String>,
     sequence_start: i64,
     sequence_end: i64,
-    embedding_blob: Vec<u8>,
+    embedding_json: String,
 }
 
 #[derive(Debug)]
@@ -41,8 +46,22 @@ struct IndexablePayload {
     tool_call_id: Option<String>,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct EmbeddingAdapter;
+#[derive(Debug, Clone)]
+pub(crate) struct EmbeddingAdapter {
+    backend: EmbeddingBackend,
+}
+
+#[derive(Debug, Clone)]
+enum EmbeddingBackend {
+    Deterministic,
+    Model2vec(Model2vecBackend),
+}
+
+#[derive(Debug, Clone)]
+struct Model2vecBackend {
+    model_id: String,
+    model: Arc<StaticModel>,
+}
 
 #[derive(Debug, Clone)]
 struct EmbeddingBatch {
@@ -51,41 +70,79 @@ struct EmbeddingBatch {
 }
 
 impl EmbeddingAdapter {
+    pub(crate) fn from_memory_config(config: &MemoryConfig) -> Result<Self, MemoryError> {
+        match config.embedding_backend {
+            MemoryEmbeddingBackend::Deterministic => Ok(Self::deterministic()),
+            MemoryEmbeddingBackend::Model2vec => Self::model2vec(config.model2vec_model),
+        }
+    }
+
+    pub(crate) fn deterministic() -> Self {
+        Self {
+            backend: EmbeddingBackend::Deterministic,
+        }
+    }
+
+    fn model2vec(model: Model2vecModel) -> Result<Self, MemoryError> {
+        let model_id = match model {
+            Model2vecModel::Potion8m => MODEL2VEC_POTION_8M_MODEL_ID,
+            Model2vecModel::Potion32m => MODEL2VEC_POTION_32M_MODEL_ID,
+        };
+        let loaded = StaticModel::from_pretrained(model_id, None, None, None).map_err(|error| {
+            initialization_error(format!(
+                "model2vec initialization failed for `{model_id}`: {error}"
+            ))
+        })?;
+        Ok(Self {
+            backend: EmbeddingBackend::Model2vec(Model2vecBackend {
+                model_id: model_id.to_owned(),
+                model: Arc::new(loaded),
+            }),
+        })
+    }
+
     fn embed_batch(&self, texts: &[String]) -> Result<EmbeddingBatch, MemoryError> {
         if texts.is_empty() {
+            let model = match &self.backend {
+                EmbeddingBackend::Deterministic => DETERMINISTIC_EMBEDDING_MODEL.to_owned(),
+                EmbeddingBackend::Model2vec(backend) => backend.model_id.clone(),
+            };
             return Ok(EmbeddingBatch {
-                model: DETERMINISTIC_EMBEDDING_MODEL.to_owned(),
+                model,
                 vectors: Vec::new(),
             });
         }
-
-        #[cfg(feature = "fastembed")]
-        if std::env::var("OXYDRA_MEMORY_EMBEDDING_BACKEND")
-            .ok()
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("fastembed"))
-        {
-            let vectors = embed_with_fastembed(texts)?;
-            return Ok(EmbeddingBatch {
-                model: FASTEMBED_EMBEDDING_MODEL.to_owned(),
-                vectors,
-            });
+        match &self.backend {
+            EmbeddingBackend::Deterministic => {
+                let vectors = texts
+                    .iter()
+                    .map(|text| deterministic_embedding(text))
+                    .map(normalize_embedding_dimensions)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(EmbeddingBatch {
+                    model: DETERMINISTIC_EMBEDDING_MODEL.to_owned(),
+                    vectors,
+                })
+            }
+            EmbeddingBackend::Model2vec(backend) => {
+                let vectors = backend
+                    .model
+                    .encode(texts)
+                    .into_iter()
+                    .map(normalize_embedding_dimensions)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(EmbeddingBatch {
+                    model: backend.model_id.clone(),
+                    vectors,
+                })
+            }
         }
-
-        let vectors = texts
-            .iter()
-            .map(|text| deterministic_embedding(text))
-            .collect();
-        Ok(EmbeddingBatch {
-            model: DETERMINISTIC_EMBEDDING_MODEL.to_owned(),
-            vectors,
-        })
     }
 
     pub(crate) fn embed_query(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
         let normalized = normalize_text_for_indexing(text);
         if normalized.is_empty() {
-            return Ok(vec![0.0; DETERMINISTIC_EMBEDDING_DIMENSIONS]);
+            return Ok(vec![0.0; INDEX_VECTOR_DIMENSIONS]);
         }
         let batch = self.embed_batch(&[normalized])?;
         batch
@@ -96,13 +153,10 @@ impl EmbeddingAdapter {
     }
 }
 
-#[cfg(feature = "fastembed")]
-fn embed_with_fastembed(texts: &[String]) -> Result<Vec<Vec<f32>>, MemoryError> {
-    let mut model = TextEmbedding::try_new(Default::default())
-        .map_err(|error| query_error(format!("fastembed model initialization failed: {error}")))?;
-    model
-        .embed(texts, None)
-        .map_err(|error| query_error(format!("fastembed embedding failed: {error}")))
+impl Default for EmbeddingAdapter {
+    fn default() -> Self {
+        Self::deterministic()
+    }
 }
 
 pub(crate) fn prepare_index_document(
@@ -176,6 +230,10 @@ pub(crate) fn prepare_index_document_with_extra_metadata(
                 target.insert(key.clone(), value.clone());
             }
         }
+        let note_id = chunk_metadata
+            .get("note_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
         let chunk_metadata_json = serde_json::to_string(&chunk_metadata)?;
         chunks.push(PreparedChunk {
             chunk_id: format!(
@@ -185,9 +243,10 @@ pub(crate) fn prepare_index_document_with_extra_metadata(
             content_hash,
             chunk_text,
             metadata_json: chunk_metadata_json,
+            note_id,
             sequence_start: sequence,
             sequence_end: sequence,
-            embedding_blob: encode_embedding_blob(&embedding),
+            embedding_json: encode_embedding_json(&embedding)?,
         });
     }
 
@@ -321,27 +380,27 @@ fn deterministic_embedding(text: &str) -> Vec<f32> {
     embedding
 }
 
-fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
-    let mut blob = Vec::with_capacity(std::mem::size_of_val(embedding));
-    for value in embedding {
-        blob.extend_from_slice(&value.to_le_bytes());
+fn normalize_embedding_dimensions(mut embedding: Vec<f32>) -> Result<Vec<f32>, MemoryError> {
+    match embedding.len().cmp(&INDEX_VECTOR_DIMENSIONS) {
+        std::cmp::Ordering::Less => {
+            embedding.resize(INDEX_VECTOR_DIMENSIONS, 0.0);
+            Ok(embedding)
+        }
+        std::cmp::Ordering::Equal => Ok(embedding),
+        std::cmp::Ordering::Greater => Err(query_error(format!(
+            "embedding dimension {} exceeds indexed dimension {}",
+            embedding.len(),
+            INDEX_VECTOR_DIMENSIONS
+        ))),
     }
-    blob
 }
 
-pub(crate) fn decode_embedding_blob(blob: &[u8]) -> Result<Vec<f32>, MemoryError> {
-    const FLOAT_WIDTH: usize = std::mem::size_of::<f32>();
-    if !blob.len().is_multiple_of(FLOAT_WIDTH) {
-        return Err(query_error(format!(
-            "embedding blob length {} is not aligned to f32 width",
-            blob.len()
-        )));
-    }
-    let mut embedding = Vec::with_capacity(blob.len() / FLOAT_WIDTH);
-    for chunk in blob.chunks_exact(FLOAT_WIDTH) {
-        embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(embedding)
+pub(crate) fn normalize_embedding_for_index(embedding: &[f32]) -> Result<Vec<f32>, MemoryError> {
+    normalize_embedding_dimensions(embedding.to_vec())
+}
+
+pub(crate) fn encode_embedding_json(embedding: &[f32]) -> Result<String, MemoryError> {
+    serde_json::to_string(embedding).map_err(Into::into)
 }
 
 fn stable_hash_hex(input: &[u8]) -> String {
@@ -356,10 +415,22 @@ pub(crate) async fn index_prepared_document(
 ) -> Result<(), MemoryError> {
     let file_id = upsert_index_file(conn, session_id, document).await?;
     for chunk in &document.chunks {
-        if let Some(existing_chunk_id) =
-            find_existing_chunk_id(conn, session_id, chunk.content_hash.as_str()).await?
+        if let Some(existing_chunk_id) = find_existing_chunk_id(
+            conn,
+            session_id,
+            chunk.content_hash.as_str(),
+            chunk.note_id.as_deref(),
+        )
+        .await?
         {
-            touch_existing_chunk(conn, existing_chunk_id.as_str(), sequence).await?;
+            let replacement_metadata = chunk.note_id.as_ref().map(|_| chunk.metadata_json.as_str());
+            touch_existing_chunk(
+                conn,
+                existing_chunk_id.as_str(),
+                sequence,
+                replacement_metadata,
+            )
+            .await?;
             continue;
         }
 
@@ -385,14 +456,14 @@ pub(crate) async fn index_prepared_document(
 
         conn.execute(
             "INSERT INTO chunks_vec (chunk_id, embedding_blob, embedding_model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             VALUES (?1, vector32(?2), ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              ON CONFLICT(chunk_id) DO UPDATE SET
-                 embedding_blob = excluded.embedding_blob,
+                 embedding_blob = vector32(?2),
                  embedding_model = excluded.embedding_model,
                  updated_at = CURRENT_TIMESTAMP",
             params![
                 chunk.chunk_id.as_str(),
-                chunk.embedding_blob.as_slice(),
+                chunk.embedding_json.as_str(),
                 document.embedding_model.as_str(),
             ],
         )
@@ -449,14 +520,19 @@ async fn find_existing_chunk_id(
     conn: &Connection,
     session_id: &str,
     content_hash: &str,
+    note_id: Option<&str>,
 ) -> Result<Option<String>, MemoryError> {
     let mut rows = conn
         .query(
             "SELECT chunk_id FROM chunks
-             WHERE session_id = ?1 AND content_hash = ?2
-             ORDER BY updated_at DESC, chunk_id ASC
-             LIMIT 1",
-            params![session_id, content_hash],
+              WHERE session_id = ?1 AND content_hash = ?2
+               AND (
+                   (?3 IS NULL AND json_extract(metadata_json, '$.note_id') IS NULL)
+                   OR json_extract(metadata_json, '$.note_id') = ?3
+               )
+              ORDER BY updated_at DESC, chunk_id ASC
+              LIMIT 1",
+            params![session_id, content_hash, note_id],
         )
         .await
         .map_err(|error| query_error(error.to_string()))?;
@@ -476,6 +552,7 @@ async fn touch_existing_chunk(
     conn: &Connection,
     chunk_id: &str,
     sequence: i64,
+    replacement_metadata_json: Option<&str>,
 ) -> Result<(), MemoryError> {
     conn.execute(
         "UPDATE chunks
@@ -483,9 +560,10 @@ async fn touch_existing_chunk(
                  WHEN sequence_end IS NULL OR sequence_end < ?2 THEN ?2
                  ELSE sequence_end
              END,
+             metadata_json = COALESCE(?3, metadata_json),
              updated_at = CURRENT_TIMESTAMP
          WHERE chunk_id = ?1",
-        params![chunk_id, sequence],
+        params![chunk_id, sequence, replacement_metadata_json],
     )
     .await
     .map_err(|error| query_error(error.to_string()))?;

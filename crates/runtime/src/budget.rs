@@ -441,6 +441,7 @@ impl AgentRuntime {
             .hybrid_query(MemoryHybridQueryRequest {
                 session_id: session_id.to_owned(),
                 query,
+                tags: None,
                 query_embedding: None,
                 top_k: Some(self.limits.retrieval.top_k),
                 vector_weight: Some(self.limits.retrieval.vector_weight),

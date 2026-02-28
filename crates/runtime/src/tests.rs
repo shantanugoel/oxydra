@@ -17,13 +17,15 @@ use tokio_util::sync::CancellationToken;
 use types::{
     CatalogProvider, Context, FunctionDecl, InlineMedia, MediaAttachment, MediaType, Memory,
     MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryError, MemoryForgetRequest,
-    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest, MemoryRecord,
-    MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
-    MemorySummaryWriteRequest, MemorySummaryWriteResult, Message, MessageRole, ModelCatalog,
-    ModelDescriptor, ModelId, ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId,
-    ProviderSelection, Response, RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent,
-    RuntimeProgressKind, SafetyTier, SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem,
-    Tool, ToolCall, ToolCallDelta, ToolError, ToolExecutionContext, UsageUpdate,
+    MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryNoteStoreRequest, MemoryRecallRequest,
+    MemoryRecord, MemoryRetrieval, MemoryScratchpadClearRequest, MemoryScratchpadReadRequest,
+    MemoryScratchpadState, MemoryScratchpadWriteRequest, MemoryScratchpadWriteResult,
+    MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState, MemorySummaryWriteRequest,
+    MemorySummaryWriteResult, Message, MessageRole, ModelCatalog, ModelDescriptor, ModelId,
+    ModelLimits, Provider, ProviderCaps, ProviderError, ProviderId, ProviderSelection, Response,
+    RunnerBootstrapEnvelope, RuntimeError, RuntimeProgressEvent, RuntimeProgressKind, SafetyTier,
+    SandboxTier, SidecarEndpoint, SidecarTransport, StreamItem, Tool, ToolCall, ToolCallDelta,
+    ToolError, ToolExecutionContext, UsageUpdate,
 };
 
 use super::{AgentRuntime, PathScrubMapping, RuntimeLimits};
@@ -550,16 +552,35 @@ impl MemoryRetrieval for RecordingMemory {
         })
     }
 
-    async fn store_note(
-        &self,
-        _session_id: &str,
-        _note_id: &str,
-        _content: &str,
-    ) -> Result<(), MemoryError> {
+    async fn store_note(&self, _request: MemoryNoteStoreRequest) -> Result<(), MemoryError> {
         Ok(())
     }
 
     async fn delete_note(&self, _session_id: &str, _note_id: &str) -> Result<bool, MemoryError> {
+        Ok(false)
+    }
+
+    async fn read_scratchpad(
+        &self,
+        _request: MemoryScratchpadReadRequest,
+    ) -> Result<Option<MemoryScratchpadState>, MemoryError> {
+        Ok(None)
+    }
+
+    async fn write_scratchpad(
+        &self,
+        _request: MemoryScratchpadWriteRequest,
+    ) -> Result<MemoryScratchpadWriteResult, MemoryError> {
+        Ok(MemoryScratchpadWriteResult {
+            updated: true,
+            item_count: 0,
+        })
+    }
+
+    async fn clear_scratchpad(
+        &self,
+        _request: MemoryScratchpadClearRequest,
+    ) -> Result<bool, MemoryError> {
         Ok(false)
     }
 }

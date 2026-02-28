@@ -66,6 +66,8 @@ pub struct MemoryHybridQueryRequest {
     pub session_id: String,
     pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_embedding: Option<Vec<f32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<usize>,
@@ -125,6 +127,46 @@ pub struct MemorySummaryWriteResult {
     pub current_epoch: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryNoteStoreRequest {
+    pub session_id: String,
+    pub note_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryScratchpadReadRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryScratchpadState {
+    pub session_id: String,
+    pub items: Vec<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryScratchpadWriteRequest {
+    pub session_id: String,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryScratchpadWriteResult {
+    pub updated: bool,
+    pub item_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryScratchpadClearRequest {
+    pub session_id: String,
+}
+
 #[async_trait]
 pub trait Memory: Send + Sync {
     async fn store(&self, request: MemoryStoreRequest) -> Result<MemoryRecord, MemoryError>;
@@ -156,18 +198,14 @@ pub trait MemoryRetrieval: Memory {
         request: MemorySummaryWriteRequest,
     ) -> Result<MemorySummaryWriteResult, MemoryError>;
 
-    /// Store a note in the given session with the specified `note_id`.
+    /// Store a note in the given session with the specified identity and
+    /// optional metadata.
     ///
     /// The content is stored as a synthetic conversation event, chunked,
     /// embedded, and indexed for hybrid search. The `note_id` is propagated
     /// into each chunk's `metadata_json` so it can be queried by
     /// [`Self::delete_note`].
-    async fn store_note(
-        &self,
-        session_id: &str,
-        note_id: &str,
-        content: &str,
-    ) -> Result<(), MemoryError>;
+    async fn store_note(&self, request: MemoryNoteStoreRequest) -> Result<(), MemoryError>;
 
     /// Delete all chunks and the conversation event associated with `note_id`
     /// within the given session.
@@ -175,4 +213,19 @@ pub trait MemoryRetrieval: Memory {
     /// Returns `true` if the note was found and deleted, `false` if nothing
     /// matched.
     async fn delete_note(&self, session_id: &str, note_id: &str) -> Result<bool, MemoryError>;
+
+    async fn read_scratchpad(
+        &self,
+        request: MemoryScratchpadReadRequest,
+    ) -> Result<Option<MemoryScratchpadState>, MemoryError>;
+
+    async fn write_scratchpad(
+        &self,
+        request: MemoryScratchpadWriteRequest,
+    ) -> Result<MemoryScratchpadWriteResult, MemoryError>;
+
+    async fn clear_scratchpad(
+        &self,
+        request: MemoryScratchpadClearRequest,
+    ) -> Result<bool, MemoryError>;
 }

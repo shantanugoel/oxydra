@@ -35,6 +35,7 @@ pub mod media_tools;
 pub mod memory_tools;
 pub mod path_spec;
 pub mod scheduler_tools;
+pub mod scratchpad_tools;
 
 #[cfg(test)]
 mod tests;
@@ -58,6 +59,10 @@ pub use scheduler_tools::{
     SCHEDULE_CREATE_TOOL_NAME, SCHEDULE_DELETE_TOOL_NAME, SCHEDULE_EDIT_TOOL_NAME,
     SCHEDULE_RUN_OUTPUT_TOOL_NAME, SCHEDULE_RUNS_TOOL_NAME, SCHEDULE_SEARCH_TOOL_NAME,
     register_scheduler_tools,
+};
+pub use scratchpad_tools::{
+    SCRATCHPAD_CLEAR_TOOL_NAME, SCRATCHPAD_READ_TOOL_NAME, SCRATCHPAD_WRITE_TOOL_NAME,
+    register_scratchpad_tools,
 };
 
 pub const FILE_READ_TOOL_NAME: &str = "file_read";

@@ -20,6 +20,7 @@ use thiserror::Error;
 use tools::{
     RuntimeToolsBootstrap, ToolAvailability, ToolRegistry, bootstrap_runtime_tools,
     register_delegation_tools, register_memory_tools, register_scheduler_tools,
+    register_scratchpad_tools,
 };
 use types::{
     AgentConfig, AgentDefinition, BootstrapEnvelopeError, CatalogProvider, ConfigError,
@@ -452,7 +453,8 @@ pub async fn build_memory_backend(
             db_path = %db_path.display(),
             "using local memory database"
         );
-        let backend = LibsqlMemory::new_local(db_path.to_string_lossy()).await?;
+        let backend =
+            LibsqlMemory::new_local_with_config(db_path.to_string_lossy(), &config.memory).await?;
         return Ok(Some(Arc::new(backend)));
     }
 
@@ -528,6 +530,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
             config.memory.retrieval.vector_weight,
             config.memory.retrieval.fts_weight,
         );
+        register_scratchpad_tools(&mut registry, memory_retrieval.clone());
     }
 
     // Build scheduler store and register scheduler tools when enabled.
@@ -846,7 +849,13 @@ fn build_system_prompt(
          - Save corrected procedures after trial-and-error happening from any tool usage or with user interactions or other methods, so the working method is remembered.\n\
          - Do not save secrets, one-off outputs, or transient status details.\n\
          - Use `memory_update` when previously saved information or procedures are corrected.\n\
-         Keep memory writes lightweight and focused on high-value long-term context."
+         Keep memory writes lightweight and focused on high-value long-term context.\n\
+         \n\
+         For active in-session coordination, use scratchpad tools:\n\
+         - `scratchpad_write` to track current sub-tasks for this session.\n\
+         - `scratchpad_read` to review current scratchpad state.\n\
+         - `scratchpad_clear` to reset scratchpad state and free capacity.\n\
+         Scratchpad data is session-scoped working memory and does not persist across sessions unless explicitly saved to memory."
     } else {
         ""
     };
@@ -1297,6 +1306,8 @@ remote_url = "libsql://example-org.turso.io"
         assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("corrected procedures"));
         assert!(prompt.contains("Do not save secrets"));
+        assert!(prompt.contains("scratchpad_write"));
+        assert!(prompt.contains("scratchpad_clear"));
         let _ = fs::remove_dir_all(root);
     }
 

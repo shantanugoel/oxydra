@@ -10,31 +10,42 @@ pub use cadence::{format_in_timezone, next_run_for_cadence, parse_cadence, valid
 pub use scheduler_store::{LibsqlSchedulerStore, SchedulerStore};
 pub use session_store::LibsqlSessionStore;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use libsql::{Builder, Connection, Database, params};
 use serde_json::{Map, Value, json};
 use types::{
     Memory, MemoryChunkUpsertRequest, MemoryChunkUpsertResponse, MemoryConfig, MemoryError,
-    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryRecallRequest,
-    MemoryRecord, MemoryRetrieval, MemoryStoreRequest, MemorySummaryReadRequest,
-    MemorySummaryState, MemorySummaryWriteRequest, MemorySummaryWriteResult, RetrievalConfig,
+    MemoryForgetRequest, MemoryHybridQueryRequest, MemoryHybridQueryResult, MemoryNoteStoreRequest,
+    MemoryRecallRequest, MemoryRecord, MemoryRetrieval, MemoryScratchpadClearRequest,
+    MemoryScratchpadReadRequest, MemoryScratchpadState, MemoryScratchpadWriteRequest,
+    MemoryScratchpadWriteResult, MemoryStoreRequest, MemorySummaryReadRequest, MemorySummaryState,
+    MemorySummaryWriteRequest, MemorySummaryWriteResult, RetrievalConfig,
 };
 
 use connection::{ConnectionStrategy, ensure_local_parent_directory};
 use errors::{connection_error, initialization_error, query_error};
 use indexing::{
-    EmbeddingAdapter, decode_embedding_blob, index_prepared_document, prepare_index_document,
+    EmbeddingAdapter, encode_embedding_json, index_prepared_document,
+    normalize_embedding_for_index, prepare_index_document,
     prepare_index_document_with_extra_metadata,
 };
 use schema::{
-    enable_foreign_keys, enable_wal_mode, ensure_migration_bookkeeping, rollback_quietly,
-    run_pending_migrations, verify_required_schema,
+    CHUNKS_VECTOR_INDEX_NAME, enable_foreign_keys, enable_wal_mode, ensure_migration_bookkeeping,
+    rollback_quietly, run_pending_migrations, verify_native_vector_support, verify_required_schema,
 };
-
 const RETRIEVAL_WEIGHT_SUM_EPSILON: f64 = 1e-6;
 const RETRIEVAL_CANDIDATE_MULTIPLIER: usize = 4;
+const NOTE_METADATA_SCHEMA_VERSION: u64 = 1;
+const NOTE_TAG_MAX_COUNT: usize = 16;
+const NOTE_TAG_MAX_CHARS: usize = 64;
+const NOTE_DEFAULT_SOURCE: &str = "memory_save";
+const SCRATCHPAD_STATE_KEY: &str = "scratchpad_state";
+const SCRATCHPAD_SCHEMA_VERSION: u64 = 1;
+const SCRATCHPAD_MAX_ITEMS: usize = 32;
+const SCRATCHPAD_MAX_ITEM_CHARS: usize = 240;
+const SCRATCHPAD_MAX_BYTES: usize = 8 * 1024;
 
 pub struct LibsqlMemory {
     db: Database,
@@ -79,7 +90,8 @@ impl LibsqlMemory {
         let Some(strategy) = ConnectionStrategy::from_config(config)? else {
             return Ok(None);
         };
-        Self::open(strategy).await.map(Some)
+        let embedding_adapter = EmbeddingAdapter::from_memory_config(config)?;
+        Self::open(strategy, embedding_adapter).await.map(Some)
     }
 
     /// Returns `true` when memory is enabled but no remote URL is configured,
@@ -94,9 +106,26 @@ impl LibsqlMemory {
     }
 
     pub async fn new_local(db_path: impl Into<String>) -> Result<Self, MemoryError> {
-        Self::open(ConnectionStrategy::Local {
-            db_path: db_path.into(),
-        })
+        Self::open(
+            ConnectionStrategy::Local {
+                db_path: db_path.into(),
+            },
+            EmbeddingAdapter::default(),
+        )
+        .await
+    }
+
+    pub async fn new_local_with_config(
+        db_path: impl Into<String>,
+        config: &MemoryConfig,
+    ) -> Result<Self, MemoryError> {
+        let embedding_adapter = EmbeddingAdapter::from_memory_config(config)?;
+        Self::open(
+            ConnectionStrategy::Local {
+                db_path: db_path.into(),
+            },
+            embedding_adapter,
+        )
         .await
     }
 
@@ -104,10 +133,13 @@ impl LibsqlMemory {
         url: impl Into<String>,
         auth_token: impl Into<String>,
     ) -> Result<Self, MemoryError> {
-        Self::open(ConnectionStrategy::Remote {
-            url: url.into(),
-            auth_token: auth_token.into(),
-        })
+        Self::open(
+            ConnectionStrategy::Remote {
+                url: url.into(),
+                auth_token: auth_token.into(),
+            },
+            EmbeddingAdapter::default(),
+        )
         .await
     }
 
@@ -148,7 +180,10 @@ impl LibsqlMemory {
         Ok(sessions)
     }
 
-    async fn open(strategy: ConnectionStrategy) -> Result<Self, MemoryError> {
+    async fn open(
+        strategy: ConnectionStrategy,
+        embedding_adapter: EmbeddingAdapter,
+    ) -> Result<Self, MemoryError> {
         let db = match strategy {
             ConnectionStrategy::Local { db_path } => {
                 ensure_local_parent_directory(&db_path)?;
@@ -165,7 +200,7 @@ impl LibsqlMemory {
 
         let memory = Self {
             db,
-            embedding_adapter: EmbeddingAdapter,
+            embedding_adapter,
         };
         memory.initialize().await?;
         Ok(memory)
@@ -178,6 +213,7 @@ impl LibsqlMemory {
         ensure_migration_bookkeeping(&conn).await?;
         run_pending_migrations(&conn).await?;
         verify_required_schema(&conn).await?;
+        verify_native_vector_support(&conn).await?;
         Ok(())
     }
 
@@ -197,7 +233,16 @@ impl LibsqlMemory {
         &self,
         request: MemoryHybridQueryRequest,
     ) -> Result<Vec<MemoryHybridQueryResult>, MemoryError> {
-        let query = request.query.trim();
+        let MemoryHybridQueryRequest {
+            session_id,
+            query,
+            tags,
+            query_embedding,
+            top_k,
+            vector_weight,
+            fts_weight,
+        } = request;
+        let query = query.trim();
         if query.is_empty() {
             return Err(query_error(
                 "hybrid query must include a non-empty query string".to_owned(),
@@ -205,32 +250,40 @@ impl LibsqlMemory {
         }
 
         let defaults = RetrievalConfig::default();
-        let top_k = request.top_k.unwrap_or(defaults.top_k);
+        let top_k = top_k.unwrap_or(defaults.top_k);
         if top_k == 0 {
             return Err(query_error(
                 "hybrid query `top_k` must be greater than zero".to_owned(),
             ));
         }
-        let vector_weight = request.vector_weight.unwrap_or(defaults.vector_weight);
-        let fts_weight = request.fts_weight.unwrap_or(defaults.fts_weight);
+        let vector_weight = vector_weight.unwrap_or(defaults.vector_weight);
+        let fts_weight = fts_weight.unwrap_or(defaults.fts_weight);
         validate_hybrid_weights(vector_weight, fts_weight)?;
 
-        let query_embedding = match request.query_embedding {
+        let query_embedding = match query_embedding {
             Some(embedding) => embedding,
             None => self.embedding_adapter.embed_query(query)?,
         };
         validate_query_embedding(&query_embedding)?;
+        let normalized_query_tags = normalize_note_tags(tags);
+        let tag_filters = (!normalized_query_tags.is_empty()).then_some(normalized_query_tags);
 
         let candidate_limit = top_k
             .checked_mul(RETRIEVAL_CANDIDATE_MULTIPLIER)
             .ok_or_else(|| query_error("hybrid query top_k is too large".to_owned()))?;
         let (vector_candidates, fts_candidates) = futures::try_join!(
             self.vector_search(
-                request.session_id.as_str(),
+                session_id.as_str(),
                 query_embedding.as_slice(),
-                candidate_limit
+                candidate_limit,
+                tag_filters.as_deref(),
             ),
-            self.fts_search(request.session_id.as_str(), query, candidate_limit)
+            self.fts_search(
+                session_id.as_str(),
+                query,
+                candidate_limit,
+                tag_filters.as_deref()
+            )
         )?;
 
         let vector_scores = normalize_scores(vector_candidates.as_slice());
@@ -298,47 +351,80 @@ impl LibsqlMemory {
         session_id: &str,
         query_embedding: &[f32],
         candidate_limit: usize,
+        tags: Option<&[String]>,
     ) -> Result<Vec<ScoredHybridCandidate>, MemoryError> {
         let conn = self.connect()?;
         enable_foreign_keys(&conn).await?;
 
+        let candidate_limit = i64::try_from(candidate_limit)
+            .map_err(|_| query_error("hybrid candidate limit exceeds sqlite range".to_owned()))?;
+        let normalized_query_embedding = normalize_embedding_for_index(query_embedding)?;
+        let query_embedding_json = encode_embedding_json(normalized_query_embedding.as_slice())?;
+        let mut vector_sql = format!(
+            "SELECT c.chunk_id, c.session_id, c.chunk_text, c.file_id, c.sequence_start, c.sequence_end, c.metadata_json, -vector_distance_cos(cv.embedding_blob, vector32(?1)) AS score
+             FROM vector_top_k('{CHUNKS_VECTOR_INDEX_NAME}', vector32(?1), ?2) AS v
+             INNER JOIN chunks_vec cv ON cv.rowid = v.id
+             INNER JOIN chunks c ON c.chunk_id = cv.chunk_id
+             WHERE c.session_id = ?3"
+        );
+        let mut bind_values: Vec<libsql::Value> = vec![
+            query_embedding_json.into(),
+            candidate_limit.into(),
+            session_id.into(),
+            candidate_limit.into(),
+        ];
+        let mut next_param_index = 5_u32;
+        if let Some(tags) = tags {
+            for tag in tags {
+                vector_sql.push_str(
+                    format!(
+                        " AND EXISTS (
+                             SELECT 1
+                               FROM json_each(COALESCE(json_extract(c.metadata_json, '$.tags'), '[]')) AS jt
+                              WHERE jt.value = ?{next_param_index}
+                         )"
+                    )
+                    .as_str(),
+                );
+                bind_values.push(tag.clone().into());
+                next_param_index += 1;
+            }
+        }
+        vector_sql.push_str(
+            " ORDER BY score DESC, c.sequence_end DESC, c.sequence_start DESC, c.chunk_id ASC
+              LIMIT ?4",
+        );
         let mut rows = conn
             .query(
-                "SELECT c.chunk_id, c.session_id, c.chunk_text, c.file_id, c.sequence_start, c.sequence_end, c.metadata_json, cv.embedding_blob
-                 FROM chunks c
-                 INNER JOIN chunks_vec cv ON cv.chunk_id = c.chunk_id
-                 WHERE c.session_id = ?1",
-                params![session_id],
+                vector_sql.as_str(),
+                libsql::params::Params::Positional(bind_values),
             )
             .await
-            .map_err(|error| query_error(error.to_string()))?;
+            .map_err(|error| {
+                query_error(format!(
+                    "native libsql vector query failed for index `{CHUNKS_VECTOR_INDEX_NAME}`: {error}"
+                ))
+            })?;
 
         let mut candidates = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| query_error(error.to_string()))?
-        {
+        while let Some(row) = rows.next().await.map_err(|error| {
+            query_error(format!(
+                "native libsql vector query failed for index `{CHUNKS_VECTOR_INDEX_NAME}`: {error}"
+            ))
+        })? {
             let row_data = hybrid_candidate_from_row(&row)?;
-            let embedding_blob = row
-                .get::<Vec<u8>>(7)
-                .map_err(|error| query_error(error.to_string()))?;
-            let chunk_embedding = decode_embedding_blob(embedding_blob.as_slice())?;
-            let score = cosine_similarity(query_embedding, chunk_embedding.as_slice())?;
+            let score = row
+                .get::<f64>(7)
+                .map_err(|error| {
+                    query_error(format!(
+                        "native libsql vector query returned invalid score data for index `{CHUNKS_VECTOR_INDEX_NAME}`: {error}"
+                    ))
+                })?;
             candidates.push(ScoredHybridCandidate {
                 row: row_data,
                 raw_score: score,
             });
         }
-
-        candidates.sort_by(|left, right| {
-            right
-                .raw_score
-                .total_cmp(&left.raw_score)
-                .then_with(|| right.row.recency_sequence.cmp(&left.row.recency_sequence))
-                .then_with(|| left.row.chunk_id.cmp(&right.row.chunk_id))
-        });
-        candidates.truncate(candidate_limit);
         Ok(candidates)
     }
 
@@ -347,6 +433,7 @@ impl LibsqlMemory {
         session_id: &str,
         query: &str,
         candidate_limit: usize,
+        tags: Option<&[String]>,
     ) -> Result<Vec<ScoredHybridCandidate>, MemoryError> {
         let conn = self.connect()?;
         enable_foreign_keys(&conn).await?;
@@ -354,15 +441,42 @@ impl LibsqlMemory {
         let candidate_limit = i64::try_from(candidate_limit)
             .map_err(|_| query_error("hybrid candidate limit exceeds sqlite range".to_owned()))?;
         let match_query = format_fts_match_query(query);
+        let mut fts_sql = String::from(
+            "SELECT c.chunk_id, c.session_id, c.chunk_text, c.file_id, c.sequence_start, c.sequence_end, c.metadata_json, -bm25(chunks_fts) AS score
+             FROM chunks_fts
+             INNER JOIN chunks c ON c.rowid = chunks_fts.rowid
+             WHERE chunks_fts MATCH ?1 AND c.session_id = ?2",
+        );
+        let mut bind_values: Vec<libsql::Value> = vec![
+            match_query.into(),
+            session_id.into(),
+            candidate_limit.into(),
+        ];
+        let mut next_param_index = 4_u32;
+        if let Some(tags) = tags {
+            for tag in tags {
+                fts_sql.push_str(
+                    format!(
+                        " AND EXISTS (
+                             SELECT 1
+                               FROM json_each(COALESCE(json_extract(c.metadata_json, '$.tags'), '[]')) AS jt
+                              WHERE jt.value = ?{next_param_index}
+                         )"
+                    )
+                    .as_str(),
+                );
+                bind_values.push(tag.clone().into());
+                next_param_index += 1;
+            }
+        }
+        fts_sql.push_str(
+            " ORDER BY score DESC, c.sequence_end DESC, c.sequence_start DESC, c.chunk_id ASC
+              LIMIT ?3",
+        );
         let mut rows = conn
             .query(
-                "SELECT c.chunk_id, c.session_id, c.chunk_text, c.file_id, c.sequence_start, c.sequence_end, c.metadata_json, -bm25(chunks_fts) AS score
-                 FROM chunks_fts
-                 INNER JOIN chunks c ON c.rowid = chunks_fts.rowid
-                 WHERE chunks_fts MATCH ?1 AND c.session_id = ?2
-                 ORDER BY score DESC, c.sequence_end DESC, c.sequence_start DESC, c.chunk_id ASC
-                 LIMIT ?3",
-                params![match_query, session_id, candidate_limit],
+                fts_sql.as_str(),
+                libsql::params::Params::Positional(bind_values),
             )
             .await
             .map_err(|error| query_error(error.to_string()))?;
@@ -693,35 +807,54 @@ impl MemoryRetrieval for LibsqlMemory {
         Ok(result)
     }
 
-    async fn store_note(
-        &self,
-        session_id: &str,
-        note_id: &str,
-        content: &str,
-    ) -> Result<(), MemoryError> {
+    async fn store_note(&self, request: MemoryNoteStoreRequest) -> Result<(), MemoryError> {
+        let MemoryNoteStoreRequest {
+            session_id,
+            note_id,
+            content,
+            source,
+            tags,
+        } = request;
+        if session_id.trim().is_empty() {
+            return Err(query_error("note session_id must not be empty".to_owned()));
+        }
+        if note_id.trim().is_empty() {
+            return Err(query_error("note note_id must not be empty".to_owned()));
+        }
+        if content.trim().is_empty() {
+            return Err(query_error("note content must not be empty".to_owned()));
+        }
+        let normalized_source = normalize_note_source(source.as_deref());
+        let normalized_tags = normalize_note_tags(tags);
+        let now = chrono::Utc::now().to_rfc3339();
+
         let conn = self.connect()?;
         enable_foreign_keys(&conn).await?;
 
         // Build a synthetic message payload that the indexing pipeline can extract.
         let payload = json!({
             "role": "user",
-            "content": content,
-            "tool_call_id": note_id,
+            "content": content.as_str(),
+            "tool_call_id": note_id.as_str(),
         });
         let payload_json = serde_json::to_string(&payload)?;
 
         // Determine the next sequence for this session.
-        let next_sequence = next_event_sequence(&conn, session_id).await?;
+        let next_sequence = next_event_sequence(&conn, session_id.as_str()).await?;
         let sequence = i64::try_from(next_sequence)
             .map_err(|_| query_error("note sequence exceeds sqlite integer range".to_owned()))?;
 
         let extra_metadata = json!({
-            "note_id": note_id,
-            "source": "memory_save",
+            "note_id": note_id.as_str(),
+            "source": normalized_source,
+            "tags": normalized_tags,
+            "created_at": now,
+            "updated_at": now,
+            "schema_version": NOTE_METADATA_SCHEMA_VERSION,
         });
         let prepared_index = prepare_index_document_with_extra_metadata(
             &self.embedding_adapter,
-            session_id,
+            session_id.as_str(),
             sequence,
             &payload,
             Some(&extra_metadata),
@@ -735,7 +868,7 @@ impl MemoryRetrieval for LibsqlMemory {
                 "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
                  VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                  ON CONFLICT(session_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
-                params![session_id],
+                params![session_id.as_str()],
             )
             .await
             .map_err(|error| query_error(error.to_string()))?;
@@ -743,13 +876,14 @@ impl MemoryRetrieval for LibsqlMemory {
             conn.execute(
                 "INSERT INTO conversation_events (session_id, sequence, payload_json, created_at)
                  VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
-                params![session_id, sequence, payload_json],
+                params![session_id.as_str(), sequence, payload_json],
             )
             .await
             .map_err(|error| query_error(error.to_string()))?;
 
             if let Some(index_document) = prepared_index.as_ref() {
-                index_prepared_document(&conn, session_id, sequence, index_document).await?;
+                index_prepared_document(&conn, session_id.as_str(), sequence, index_document)
+                    .await?;
             }
 
             Ok::<(), MemoryError>(())
@@ -813,6 +947,144 @@ impl MemoryRetrieval for LibsqlMemory {
             .await
             .map_err(|error| query_error(error.to_string()))?;
         Ok(found)
+    }
+
+    async fn read_scratchpad(
+        &self,
+        request: MemoryScratchpadReadRequest,
+    ) -> Result<Option<MemoryScratchpadState>, MemoryError> {
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+        let Some(session_state) =
+            load_session_state_map(&conn, request.session_id.as_str()).await?
+        else {
+            return Ok(None);
+        };
+        read_scratchpad_state_from_map(request.session_id.as_str(), &session_state)
+    }
+
+    async fn write_scratchpad(
+        &self,
+        request: MemoryScratchpadWriteRequest,
+    ) -> Result<MemoryScratchpadWriteResult, MemoryError> {
+        if request.session_id.trim().is_empty() {
+            return Err(query_error(
+                "scratchpad session_id must not be empty".to_owned(),
+            ));
+        }
+        let normalized_items = normalize_scratchpad_items(request.items)?;
+        let item_count = normalized_items.len();
+        let now = chrono::Utc::now().to_rfc3339();
+        let scratchpad_state = json!({
+            "items": normalized_items,
+            "updated_at": now,
+            "schema_version": SCRATCHPAD_SCHEMA_VERSION,
+        });
+        ensure_scratchpad_size_limit(&scratchpad_state)?;
+
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            conn.execute(
+                "INSERT INTO sessions (session_id, agent_identity, created_at, updated_at)
+                 VALUES (?1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+                params![request.session_id.as_str()],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            let mut session_state = load_session_state_map(&conn, request.session_id.as_str())
+                .await?
+                .unwrap_or_default();
+            let updated = session_state
+                .get(SCRATCHPAD_STATE_KEY)
+                .is_none_or(|existing| existing != &scratchpad_state);
+            session_state.insert(SCRATCHPAD_STATE_KEY.to_owned(), scratchpad_state);
+            let session_state_json = serde_json::to_string(&Value::Object(session_state))?;
+            conn.execute(
+                "INSERT INTO session_state (session_id, state_json, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                      state_json = excluded.state_json,
+                      updated_at = CURRENT_TIMESTAMP",
+                params![request.session_id.as_str(), session_state_json],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+
+            Ok::<MemoryScratchpadWriteResult, MemoryError>(MemoryScratchpadWriteResult {
+                updated,
+                item_count,
+            })
+        }
+        .await;
+        let result = match transaction_result {
+            Ok(result) => result,
+            Err(error) => {
+                rollback_quietly(&conn).await;
+                return Err(error);
+            }
+        };
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(result)
+    }
+
+    async fn clear_scratchpad(
+        &self,
+        request: MemoryScratchpadClearRequest,
+    ) -> Result<bool, MemoryError> {
+        if request.session_id.trim().is_empty() {
+            return Err(query_error(
+                "scratchpad session_id must not be empty".to_owned(),
+            ));
+        }
+
+        let conn = self.connect()?;
+        enable_foreign_keys(&conn).await?;
+        conn.execute("BEGIN IMMEDIATE TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        let transaction_result = async {
+            let Some(mut session_state) =
+                load_session_state_map(&conn, request.session_id.as_str()).await?
+            else {
+                return Ok::<bool, MemoryError>(false);
+            };
+            let removed = session_state.remove(SCRATCHPAD_STATE_KEY).is_some();
+            if !removed {
+                return Ok::<bool, MemoryError>(false);
+            }
+            let session_state_json = serde_json::to_string(&Value::Object(session_state))?;
+            conn.execute(
+                "INSERT INTO session_state (session_id, state_json, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                      state_json = excluded.state_json,
+                      updated_at = CURRENT_TIMESTAMP",
+                params![request.session_id.as_str(), session_state_json],
+            )
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+            Ok::<bool, MemoryError>(true)
+        }
+        .await;
+        let cleared = match transaction_result {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                rollback_quietly(&conn).await;
+                return Err(error);
+            }
+        };
+        conn.execute("COMMIT TRANSACTION", params![])
+            .await
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(cleared)
     }
 }
 
@@ -885,16 +1157,32 @@ impl MemoryRetrieval for UnconfiguredMemory {
         Err(Self::backend_unavailable())
     }
 
-    async fn store_note(
-        &self,
-        _session_id: &str,
-        _note_id: &str,
-        _content: &str,
-    ) -> Result<(), MemoryError> {
+    async fn store_note(&self, _request: MemoryNoteStoreRequest) -> Result<(), MemoryError> {
         Err(Self::backend_unavailable())
     }
 
     async fn delete_note(&self, _session_id: &str, _note_id: &str) -> Result<bool, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn read_scratchpad(
+        &self,
+        _request: MemoryScratchpadReadRequest,
+    ) -> Result<Option<MemoryScratchpadState>, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn write_scratchpad(
+        &self,
+        _request: MemoryScratchpadWriteRequest,
+    ) -> Result<MemoryScratchpadWriteResult, MemoryError> {
+        Err(Self::backend_unavailable())
+    }
+
+    async fn clear_scratchpad(
+        &self,
+        _request: MemoryScratchpadClearRequest,
+    ) -> Result<bool, MemoryError> {
         Err(Self::backend_unavailable())
     }
 }
@@ -999,6 +1287,75 @@ fn read_summary_string_field(
     })
 }
 
+fn read_scratchpad_state_from_map(
+    session_id: &str,
+    state: &Map<String, Value>,
+) -> Result<Option<MemoryScratchpadState>, MemoryError> {
+    let Some(scratchpad_value) = state.get(SCRATCHPAD_STATE_KEY) else {
+        return Ok(None);
+    };
+    if scratchpad_value.is_null() {
+        return Ok(None);
+    }
+    let scratchpad_object = scratchpad_value.as_object().ok_or_else(|| {
+        query_error(format!(
+            "scratchpad state for session `{session_id}` must be a JSON object"
+        ))
+    })?;
+    let items_value = scratchpad_object.get("items").ok_or_else(|| {
+        query_error(format!(
+            "scratchpad state for session `{session_id}` is missing `items`"
+        ))
+    })?;
+    let items_array = items_value.as_array().ok_or_else(|| {
+        query_error(format!(
+            "scratchpad state field `items` for session `{session_id}` must be an array"
+        ))
+    })?;
+    if items_array.len() > SCRATCHPAD_MAX_ITEMS {
+        return Err(query_error(format!(
+            "scratchpad state for session `{session_id}` exceeds max item count {}; found {}",
+            SCRATCHPAD_MAX_ITEMS,
+            items_array.len()
+        )));
+    }
+    let mut items = Vec::with_capacity(items_array.len());
+    for (index, item) in items_array.iter().enumerate() {
+        let item_value = item.as_str().ok_or_else(|| {
+            query_error(format!(
+                "scratchpad state item at index {index} for session `{session_id}` must be a string"
+            ))
+        })?;
+        if item_value.chars().count() > SCRATCHPAD_MAX_ITEM_CHARS {
+            return Err(query_error(format!(
+                "scratchpad state item at index {index} for session `{session_id}` exceeds max character length {}",
+                SCRATCHPAD_MAX_ITEM_CHARS
+            )));
+        }
+        items.push(item_value.to_owned());
+    }
+
+    let updated_at = scratchpad_object
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            query_error(format!(
+                "scratchpad state for session `{session_id}` is missing `updated_at`"
+            ))
+        })?;
+    chrono::DateTime::parse_from_rfc3339(updated_at).map_err(|error| {
+        query_error(format!(
+            "scratchpad state field `updated_at` for session `{session_id}` must be RFC3339: {error}"
+        ))
+    })?;
+
+    Ok(Some(MemoryScratchpadState {
+        session_id: session_id.to_owned(),
+        items,
+        updated_at: updated_at.to_owned(),
+    }))
+}
+
 async fn ensure_monotonic_sequence(
     conn: &Connection,
     session_id: &str,
@@ -1024,6 +1381,83 @@ async fn ensure_monotonic_sequence(
     if max_sequence >= 0 && sequence <= max_sequence {
         return Err(query_error(format!(
             "store sequence {sequence} must be greater than existing max sequence {max_sequence} for session `{session_id}`"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_note_source(source: Option<&str>) -> String {
+    source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(NOTE_DEFAULT_SOURCE)
+        .to_owned()
+}
+
+fn normalize_note_tags(tags: Option<Vec<String>>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw_tag in tags.unwrap_or_default() {
+        if normalized.len() >= NOTE_TAG_MAX_COUNT {
+            break;
+        }
+        let trimmed = raw_tag.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lowered = trimmed.to_lowercase();
+        let bounded: String = lowered.chars().take(NOTE_TAG_MAX_CHARS).collect();
+        if bounded.is_empty() {
+            continue;
+        }
+        if seen.insert(bounded.clone()) {
+            normalized.push(bounded);
+        }
+    }
+
+    normalized
+}
+
+fn normalize_scratchpad_items(items: Vec<String>) -> Result<Vec<String>, MemoryError> {
+    if items.len() > SCRATCHPAD_MAX_ITEMS {
+        return Err(query_error(format!(
+            "scratchpad item count {} exceeds max {}",
+            items.len(),
+            SCRATCHPAD_MAX_ITEMS
+        )));
+    }
+
+    let mut normalized = Vec::with_capacity(items.len());
+    for (index, raw_item) in items.into_iter().enumerate() {
+        let trimmed = raw_item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() > SCRATCHPAD_MAX_ITEM_CHARS {
+            return Err(query_error(format!(
+                "scratchpad item at index {index} exceeds max character length {}",
+                SCRATCHPAD_MAX_ITEM_CHARS
+            )));
+        }
+        normalized.push(trimmed.to_owned());
+    }
+
+    if normalized.is_empty() {
+        return Err(query_error(
+            "scratchpad items must contain at least one non-empty item".to_owned(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn ensure_scratchpad_size_limit(scratchpad_state: &Value) -> Result<(), MemoryError> {
+    let encoded = serde_json::to_vec(scratchpad_state)?;
+    if encoded.len() > SCRATCHPAD_MAX_BYTES {
+        return Err(query_error(format!(
+            "scratchpad payload size {} bytes exceeds max {} bytes",
+            encoded.len(),
+            SCRATCHPAD_MAX_BYTES
         )));
     }
     Ok(())
@@ -1199,30 +1633,6 @@ fn read_optional_u64(
             })
         })
         .transpose()
-}
-
-fn cosine_similarity(query: &[f32], candidate: &[f32]) -> Result<f64, MemoryError> {
-    if query.len() != candidate.len() {
-        return Err(query_error(format!(
-            "embedding dimension mismatch for hybrid vector search: query has {}, candidate has {}",
-            query.len(),
-            candidate.len()
-        )));
-    }
-    let mut dot = 0.0_f64;
-    let mut query_norm = 0.0_f64;
-    let mut candidate_norm = 0.0_f64;
-    for (left, right) in query.iter().zip(candidate.iter()) {
-        let left = f64::from(*left);
-        let right = f64::from(*right);
-        dot += left * right;
-        query_norm += left * left;
-        candidate_norm += right * right;
-    }
-    if query_norm <= f64::EPSILON || candidate_norm <= f64::EPSILON {
-        return Ok(0.0);
-    }
-    Ok(dot / (query_norm.sqrt() * candidate_norm.sqrt()))
 }
 
 fn format_fts_match_query(query: &str) -> String {

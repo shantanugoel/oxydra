@@ -14,3 +14,13 @@ members = [
   "crates/tui",
   "crates/wasm-guest",
 ]
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true

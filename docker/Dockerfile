@@ -8,7 +8,7 @@ FROM rust:1-trixie AS builder
 WORKDIR /build
 COPY . .
 
-RUN apt-get update && apt-get install -y musl-tools cmake && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y musl-tools cmake g++ && rm -rf /var/lib/apt/lists/*
 
 # Detect architecture and set the appropriate musl target
 RUN case "$(uname -m)" in \
@@ -18,6 +18,7 @@ RUN case "$(uname -m)" in \
     esac
 
 RUN rustup target add wasm32-wasip1 "$(cat /tmp/rust-target)"
+ENV CXX=g++ CC=musl-gcc
 RUN cargo build --release --target "$(cat /tmp/rust-target)" --bin oxydra-vm --bin shell-daemon
 
 # --- oxydra-vm image ---

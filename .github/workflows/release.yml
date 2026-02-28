@@ -47,7 +47,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Install musl toolchain and build dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
+        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake g++
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -93,6 +93,9 @@ jobs:
 
       - name: Build Linux binaries
         run: cargo build --release --target ${{ matrix.rust_target }} --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
+        env:
+          CXX: g++
+          CC: musl-gcc
 
       - name: Package linux release artifact
         run: |

@@ -15,6 +15,7 @@ Oxydra is designed for people who want an agent runtime they can self-host, insp
 - **Provider-agnostic LLM layer**: OpenAI, Anthropic, Gemini, and OpenAI Responses API, with streaming, retries, and model-catalog-based validation.
 - **Multi-agent orchestration**: Define specialist subagents with distinct prompts/tools/models and delegate tasks between them.
 - **Async by default**: Multiple sessions/chats can run in parallel without blocking each other.
+- **Multi-user**: It is trivial to use oxydra in a multi user environment, and each user is isolated from other users
 - **Tooling with safety rails**: `#[tool]` macro, auto schema generation, safety tiers, and workspace path hardening (`/shared`, `/tmp`, `/vault`).
 - **Structured runtime loop**: Planning, tool dispatch, retries, context budget management, and bounded turn/cost controls.
 - **Persistent memory**: libSQL-backed hybrid retrieval (vector + FTS), summarization, memory CRUD tools, and session scratchpad.

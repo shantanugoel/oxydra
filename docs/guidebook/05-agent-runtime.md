@@ -224,17 +224,36 @@ Sessions are lazily created on first message storage. The runtime can restore a 
 
 When memory is enabled, the system prompt injects an explicit operational protocol that guides the agent toward proactive, autonomous behavior. This is implemented in `runner/src/bootstrap.rs::build_system_prompt()`.
 
+The prompt is structured using several techniques to maximize tool usage and protocol compliance:
+
+### Agent Identity Framing
+
+The system prompt opens by identifying the agent as an **autonomous AI agent** rather than an assistant or chatbot. This identity priming has an outsized effect on tool-use frequency — it shifts the model's default from "discuss" to "act."
+
+### Pre-Action Requirement
+
+Before executing any task, the agent is **mandated** to call `memory_search` with relevant queries. This is framed as a gating requirement rather than a suggestion — the agent cannot rationalize skipping it.
+
 ### Operational Loop
 
-The agent is instructed to follow a five-phase cycle for each task:
+The agent is mandated to follow a five-phase cycle for each task, using explicit gating language ("You MUST follow this cycle for every user request, no exceptions"):
 
-1. **Plan** — decompose the task into concrete steps
-2. **Recall** — search memory for relevant prior knowledge, preferences, or corrected procedures
-3. **Execute** — use tools to carry out each step
-4. **Reflect** — when a step fails, diagnose the cause before retrying
-5. **Learn** — save durable insights and corrected procedures to memory for future sessions
+1. **Plan** — break the task into concrete steps, write to scratchpad
+2. **Recall** — call `memory_search` with relevant keywords (mandatory, even if agent believes nothing is stored)
+3. **Execute** — use tools to carry out each step, update scratchpad
+4. **Reflect** — if a step fails, diagnose the cause before retrying
+5. **Learn** — save corrected procedures and new insights to memory
 
-The scratchpad (`scratchpad_write`) is recommended for tracking progress through the plan during long multi-step execution.
+The scratchpad (`scratchpad_write`) is **required** (not merely recommended) when a task involves more than 2 tool calls.
+
+### Memory Save Triggers
+
+Instead of vague guidance like "save durable insights," the prompt provides concrete mandatory triggers:
+- User corrections to behavior, format, or approach
+- Discovered tool/procedure corrections after trial-and-error
+- User-stated preferences (formatting, tone, schedule, naming)
+- Project-specific conventions or constraints
+- Successful retries with a different approach
 
 ### Retry Protocol
 
@@ -250,6 +269,24 @@ The prompt explicitly restricts when the agent should ask the user for input:
 - All retry attempts for a sub-task have been exhausted
 
 The agent is instructed NOT to ask for confirmation on routine actions it can safely try and verify itself.
+
+### Anti-Patterns
+
+The prompt includes an explicit list of prohibited behaviors (using "❌ NEVER do these" framing):
+- Answering from memory alone when tools could verify or enrich
+- Skipping `memory_search` because nothing is assumed to be stored
+- Skipping `scratchpad_write` for multi-step tasks
+- Not saving user corrections to memory
+- Asking "would you like me to..." instead of acting
+- Describing intended actions instead of performing them
+
+### Worked Example
+
+A single concrete example turn demonstrates the complete protocol (scratchpad → memory_search → web_search → file_write → send_media → scratchpad_clear), dramatically increasing compliance with the multi-step loop.
+
+### Prompt Placement Strategy
+
+Critical behavioral instructions are placed at both the **start** (agent identity framing) and **end** (closing behavioral reminder) of the system prompt to exploit both primacy and recency bias in attention. The closing reminder reinforces the mandatory memory_search and tools-first behavior.
 
 ## Credential Scrubbing
 

@@ -843,35 +843,49 @@ fn build_system_prompt(
 
     let memory_note = if memory_enabled {
         "\n\n## Memory\n\n\
-         You have persistent memory that can carry important context across conversations.\n\
-         Use memory tools thoughtfully:\n\
-         - Save durable user preferences, stable project conventions, and important decisions.\n\
-         - Save corrected procedures after trial-and-error happening from any tool usage or with user interactions or other methods, so the working method is remembered.\n\
-         - Do not save secrets, one-off outputs, or transient status details.\n\
-         - Use `memory_update` when previously saved information or procedures are corrected.\n\
-         Keep memory writes lightweight and focused on high-value long-term context.\n\
+         You have persistent memory across conversations and MUST use it actively.\n\
          \n\
-         For active in-session coordination, use scratchpad tools:\n\
-         - `scratchpad_write` to track current sub-tasks for this session.\n\
-         - `scratchpad_read` to review current scratchpad state.\n\
-         - `scratchpad_clear` to reset scratchpad state and free capacity.\n\
-         Scratchpad data is session-scoped working memory and does not persist across sessions unless explicitly saved to memory.\n\
+         ### Pre-Action Requirement\n\n\
+         Before executing ANY task, you MUST call `memory_search` with at least one relevant query. \
+         If the task touches multiple domains (e.g., user preferences AND a technical procedure), search for each. \
+         If no results are returned, that is fine — proceed, but the search MUST happen. \
+         Do NOT skip this because you assume nothing is stored.\n\
          \n\
          ### Operational Loop\n\n\
-         For each task, follow this cycle:\n\
-         1. **Plan** — break the task into concrete steps.\n\
-         2. **Recall** — search memory (`memory_search`) for relevant prior knowledge, preferences, or corrected procedures before acting.\n\
-         3. **Execute** — use tools to carry out each step.\n\
-         4. **Reflect** — if a step fails, diagnose the cause before retrying.\n\
-         5. **Learn** — save durable insights and corrected procedures to memory so future sessions benefit.\n\
+         You MUST follow this cycle for every user request, no exceptions. \
+         Do not generate a final response until steps 1-4 have been completed with actual tool calls.\n\n\
+         1. **Plan** — Break the task into concrete steps. Write the plan to scratchpad using `scratchpad_write`.\n\
+         2. **Recall** — ALWAYS call `memory_search` with relevant keywords before acting. This is mandatory, even if you believe nothing is stored.\n\
+         3. **Execute** — Use tools to carry out each step. Update the scratchpad after each major step.\n\
+         4. **Reflect** — If a step fails, diagnose the cause before retrying. Write your diagnosis to the scratchpad.\n\
+         5. **Learn** — After task completion, evaluate what you learned. Save corrected procedures and new insights using `memory_save` or `memory_update`.\n\
          \n\
-         Use `scratchpad_write` to keep track of your progress through the plan during long multi-step execution.\n\
+         ### Scratchpad\n\n\
+         If a task requires more than 2 tool calls, you MUST use `scratchpad_write` to track your plan and progress. \
+         Update it after completing each major step. \
+         Use `scratchpad_read` to review and `scratchpad_clear` to reset after task completion. \
+         Scratchpad data is session-scoped and does not persist across sessions.\n\
+         \n\
+         ### When to Save to Memory\n\n\
+         You MUST save to memory when:\n\
+         - The user corrects your behavior, output format, or approach\n\
+         - You discover a tool or procedure works differently than expected (save the corrected procedures)\n\
+         - The user states a preference (formatting, tone, schedule, naming conventions)\n\
+         - You learn a project-specific convention or constraint\n\
+         - A retry succeeded with a different approach than the first attempt\n\
+         \n\
+         Do NOT save to memory:\n\
+         - One-off task outputs or transient status\n\
+         - Information already in a file in /shared\n\
+         - Secrets, tokens, or credentials\n\
+         \n\
+         Use `memory_update` when previously saved information or corrected procedures need updating.\n\
          \n\
          ### Retry Protocol\n\n\
          When an action fails:\n\
          - Do NOT repeat the exact same failed action.\n\
          - Diagnose the root cause, then attempt a distinct alternative approach.\n\
-         - If you can't get it done at all, escalate to the user with a concise summary of what was tried and why each approach failed.\n\
+         - If you cannot resolve it after trying alternatives, escalate to the user with a concise summary of what was tried and why each approach failed.\n\
          \n\
          ### When to Ask the User\n\n\
          Stay action-oriented. Only ask the user when:\n\
@@ -879,7 +893,28 @@ fn build_system_prompt(
          - A decision is irreversible and the correct choice is ambiguous.\n\
          - All retry attempts for a sub-task have been exhausted.\n\
          \n\
-         Do NOT ask for confirmation on routine actions you can safely try and verify yourself."
+         Do NOT ask for confirmation on routine actions you can safely try and verify yourself.\n\
+         \n\
+         ### Anti-Patterns (NEVER do these)\n\n\
+         - ❌ Answering from memory alone when you have tools that could verify or enrich your answer\n\
+         - ❌ Skipping `memory_search` because you assume nothing is stored\n\
+         - ❌ Skipping `scratchpad_write` for multi-step tasks\n\
+         - ❌ Completing a task where the user corrected you without saving the correction to memory\n\
+         - ❌ Asking the user \"would you like me to...\" instead of just doing it\n\
+         - ❌ Describing what you would do instead of actually doing it\n\
+         - ❌ Generating a long text response when a file + `send_media` would be more useful\n\
+         \n\
+         ### Example Turn\n\n\
+         User: \"Find recent news about AI and save a summary\"\n\n\
+         Your process:\n\
+         1. `scratchpad_write`: \"Task: find AI news & save summary. Steps: (a) recall preferences, (b) search web, (c) summarize, (d) save file\"\n\
+         2. `memory_search`: \"news preferences summary format\" → found: \"User prefers bullet-point summaries\"\n\
+         3. `web_search`: \"latest AI news\"\n\
+         4. `web_fetch`: top result URL\n\
+         5. `file_write`: /shared/ai_news_summary.txt (bullet-point format per user preference from memory)\n\
+         6. `send_media`: attach the summary file\n\
+         7. `memory_save`: only if something new was learned\n\
+         8. `scratchpad_clear`"
     } else {
         ""
     };
@@ -925,7 +960,12 @@ fn build_system_prompt(
     };
 
     let default_prompt = format!(
-        "You are Oxydra - an AI assistant with access to a sandboxed workspace.\n\n\
+        "You are Oxydra — an autonomous AI agent that accomplishes tasks by using tools.\n\
+         You are NOT a chatbot. Your default behavior is to act, not to discuss.\n\
+         When given a task, your first instinct should be to reach for tools, not to \
+         generate a text-only response. A response without tool usage should be the \
+         exception, not the norm.\n\n\
+         You operate in a sandboxed workspace.\n\n\
          ## File System\n\n\
          Your workspace contains three directories:\n\
          - `/shared` — persistent working directory for reading and writing files\n\
@@ -954,11 +994,22 @@ fn build_system_prompt(
         })
         .and_then(|path| std::fs::read_to_string(&path).ok());
 
+    // Closing behavioral reminder placed at the very end for recency bias.
+    // The most critical behavioral instructions appear both at the start
+    // (agent identity) and at the end (this reminder) of the prompt.
+    let closing_note = if memory_enabled {
+        "\n\n---\n\n\
+         **CRITICAL REMINDER:** Always call `memory_search` before acting on any task. \
+         Use tools to accomplish tasks rather than describing what you would do. Act first, discuss second."
+    } else {
+        ""
+    };
+
     let prompt = match system_md_content {
         Some(custom) if !custom.trim().is_empty() => {
-            format!("{default_prompt}\n\n---\n\n{}", custom.trim())
+            format!("{default_prompt}\n\n---\n\n{}{closing_note}", custom.trim())
         }
-        _ => default_prompt,
+        _ => format!("{default_prompt}{closing_note}"),
     };
 
     Some(prompt)
@@ -1329,13 +1380,21 @@ remote_url = "libsql://example-org.turso.io"
             .expect("system prompt should be generated");
         assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("corrected procedures"));
-        assert!(prompt.contains("Do not save secrets"));
+        assert!(prompt.contains("Secrets, tokens, or credentials"));
         assert!(prompt.contains("scratchpad_write"));
         assert!(prompt.contains("scratchpad_clear"));
         // Autonomy protocol sections
+        assert!(prompt.contains("### Pre-Action Requirement"));
         assert!(prompt.contains("### Operational Loop"));
         assert!(prompt.contains("### Retry Protocol"));
         assert!(prompt.contains("### When to Ask the User"));
+        assert!(prompt.contains("### Anti-Patterns"));
+        assert!(prompt.contains("### Example Turn"));
+        // Mandatory language
+        assert!(prompt.contains("MUST follow this cycle"));
+        assert!(prompt.contains("MUST call `memory_search`"));
+        // Closing behavioral reminder
+        assert!(prompt.contains("CRITICAL REMINDER"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1349,6 +1408,11 @@ remote_url = "libsql://example-org.turso.io"
         assert!(!prompt.contains("corrected procedures"));
         assert!(!prompt.contains("### Operational Loop"));
         assert!(!prompt.contains("### Retry Protocol"));
+        assert!(!prompt.contains("### Anti-Patterns"));
+        assert!(!prompt.contains("CRITICAL REMINDER"));
+        // Agent identity framing should still be present
+        assert!(prompt.contains("autonomous AI agent"));
+        assert!(prompt.contains("NOT a chatbot"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1430,6 +1494,164 @@ remote_url = "libsql://example-org.turso.io"
         assert!(prompt.contains("delegate_to_agent"));
         assert!(prompt.contains("different provider/model selections"));
         assert!(prompt.contains("`researcher`"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_contains_agent_identity_framing() {
+        let root = temp_dir("system-prompt-agent-identity");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("autonomous AI agent"),
+            "prompt should identify as an autonomous agent"
+        );
+        assert!(
+            prompt.contains("NOT a chatbot"),
+            "prompt should explicitly state it is not a chatbot"
+        );
+        assert!(
+            prompt.contains("reach for tools"),
+            "prompt should instruct tools-first behavior"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_contains_pre_action_requirement() {
+        let root = temp_dir("system-prompt-pre-action");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("### Pre-Action Requirement"),
+            "prompt should have a pre-action requirement section"
+        );
+        assert!(
+            prompt.contains("MUST call `memory_search`"),
+            "pre-action requirement should mandate memory_search"
+        );
+        assert!(
+            prompt.contains("Do NOT skip this"),
+            "pre-action requirement should forbid skipping"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_contains_anti_patterns() {
+        let root = temp_dir("system-prompt-anti-patterns");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("### Anti-Patterns"),
+            "prompt should have an anti-patterns section"
+        );
+        assert!(
+            prompt.contains("NEVER do these"),
+            "anti-patterns should use strong prohibitive language"
+        );
+        assert!(
+            prompt.contains("Skipping `memory_search`"),
+            "anti-patterns should list skipping memory_search"
+        );
+        assert!(
+            prompt.contains("Describing what you would do"),
+            "anti-patterns should list describing instead of acting"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_contains_example_turn() {
+        let root = temp_dir("system-prompt-example-turn");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("### Example Turn"),
+            "prompt should include a worked example turn"
+        );
+        assert!(
+            prompt.contains("scratchpad_write"),
+            "example should demonstrate scratchpad usage"
+        );
+        assert!(
+            prompt.contains("memory_search"),
+            "example should demonstrate memory search"
+        );
+        assert!(
+            prompt.contains("scratchpad_clear"),
+            "example should demonstrate scratchpad cleanup"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_contains_memory_save_triggers() {
+        let root = temp_dir("system-prompt-memory-triggers");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("### When to Save to Memory"),
+            "prompt should have explicit memory save triggers"
+        );
+        assert!(
+            prompt.contains("MUST save to memory when"),
+            "memory triggers should use mandatory language"
+        );
+        assert!(
+            prompt.contains("user corrects your behavior"),
+            "should trigger save on user corrections"
+        );
+        assert!(
+            prompt.contains("retry succeeded with a different approach"),
+            "should trigger save on successful retry with new approach"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_scratchpad_has_usage_threshold() {
+        let root = temp_dir("system-prompt-scratchpad-threshold");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("more than 2 tool calls"),
+            "scratchpad should have an explicit usage threshold"
+        );
+        assert!(
+            prompt.contains("MUST use `scratchpad_write`"),
+            "scratchpad threshold should use mandatory language"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_closing_reminder_at_end() {
+        let root = temp_dir("system-prompt-closing-reminder");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("CRITICAL REMINDER"),
+            "prompt should have a closing behavioral reminder"
+        );
+        // The closing reminder should be at the very end of the prompt
+        let reminder_pos = prompt
+            .rfind("CRITICAL REMINDER")
+            .expect("closing reminder should be present");
+        let memory_section_pos = prompt
+            .find("## Memory")
+            .expect("memory section should be present");
+        assert!(
+            reminder_pos > memory_section_pos,
+            "closing reminder should appear after the memory section"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

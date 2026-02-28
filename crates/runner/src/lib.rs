@@ -225,6 +225,15 @@ impl Runner {
         let stale_marker = workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
         let _ = fs::remove_file(&stale_marker);
 
+        // Remove stale shell-daemon socket files from prior runs.  The
+        // shell-daemon binary inside the container tries to `remove_file`
+        // before `bind`, but that operation can fail with ENOTSUP (os error
+        // 95) on virtiofs mounts (e.g. Colima on macOS).  Cleaning up from
+        // the host side avoids the issue entirely.
+        for sock_name in ["shell-daemon.sock", "shell-daemon-vsock.sock"] {
+            let _ = fs::remove_file(workspace.ipc.join(sock_name));
+        }
+
         let mut launch = self.backend.launch(SandboxLaunchRequest {
             user_id: user_id.clone(),
             host_os: host_os.to_owned(),
@@ -890,6 +899,9 @@ impl RunnerStartup {
         // a future `connect_tui` call.
         let marker_path = self.workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
         let _ = fs::remove_file(&marker_path);
+        for sock_name in ["shell-daemon.sock", "shell-daemon-vsock.sock"] {
+            let _ = fs::remove_file(self.workspace.ipc.join(sock_name));
+        }
         Ok(())
     }
 
@@ -912,6 +924,9 @@ impl RunnerStartup {
         );
         let marker_path = self.workspace.ipc.join(GATEWAY_ENDPOINT_MARKER_FILE);
         let _ = fs::remove_file(&marker_path);
+        for sock_name in ["shell-daemon.sock", "shell-daemon-vsock.sock"] {
+            let _ = fs::remove_file(self.workspace.ipc.join(sock_name));
+        }
         Ok(())
     }
 

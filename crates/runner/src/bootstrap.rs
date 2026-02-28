@@ -1378,8 +1378,8 @@ remote_url = "libsql://example-org.turso.io"
             "retry protocol should instruct against repeating failed actions"
         );
         assert!(
-            prompt.contains("3 distinct failed approaches"),
-            "retry protocol should mention the 3-attempt escalation threshold"
+            prompt.contains("distinct alternative approach"),
+            "retry protocol should instruct trying a distinct alternative"
         );
         assert!(
             prompt.contains("escalate to the user"),

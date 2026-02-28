@@ -1,0 +1,31 @@
+name: Build macOS Artifacts
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build macos arm64
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+
+      - name: Build macOS binaries
+        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui

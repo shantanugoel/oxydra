@@ -4,14 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build-linux-and-docker:
-    name: Build linux artifacts + push Docker
+  build-linux-amd64:
+    name: Build linux amd64 artifacts + image
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -28,26 +29,22 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Enable QEMU for arm64 Docker builds
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Install zig
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zig
-
-      - name: Install cargo-zigbuild
-        run: cargo install --locked cargo-zigbuild
+      - name: Install wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
 
       - name: Resolve image namespace
         run: |
           if [[ -n "${IMAGE_NAMESPACE}" ]]; then
-            echo "IMAGE_NAMESPACE=${IMAGE_NAMESPACE}" >> "${GITHUB_ENV}"
+            RESOLVED_NAMESPACE="${IMAGE_NAMESPACE}"
           elif [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
-            echo "IMAGE_NAMESPACE=${GITHUB_REPOSITORY_OWNER}" >> "${GITHUB_ENV}"
+            RESOLVED_NAMESPACE="${GITHUB_REPOSITORY_OWNER}"
           else
-            echo "IMAGE_NAMESPACE=${DOCKERHUB_USERNAME}" >> "${GITHUB_ENV}"
+            RESOLVED_NAMESPACE="${DOCKERHUB_USERNAME}"
           fi
+          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            RESOLVED_NAMESPACE="$(echo "${RESOLVED_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          fi
+          echo "IMAGE_NAMESPACE=${RESOLVED_NAMESPACE}" >> "${GITHUB_ENV}"
 
       - name: Log in to GHCR
         if: env.IMAGE_REGISTRY == 'ghcr'
@@ -64,23 +61,227 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Linux artifacts and publish Docker images
-        run: |
-          ./scripts/build-release-assets.sh \
-            --platforms linux-amd64,linux-arm64 \
-            --tag "${GITHUB_REF_NAME}" \
-            --push-docker \
-            --registry "${IMAGE_REGISTRY}" \
-            --image-namespace "${IMAGE_NAMESPACE}"
+      - name: Build Linux amd64 binaries
+        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
 
-      - name: Upload linux artifacts
+      - name: Package linux amd64 release artifact
+        run: |
+          mkdir -p dist/linux-amd64
+          cp target/release/runner dist/linux-amd64/runner
+          cp target/release/oxydra-vm dist/linux-amd64/oxydra-vm
+          cp target/release/shell-daemon dist/linux-amd64/shell-daemon
+          cp target/release/oxydra-tui dist/linux-amd64/oxydra-tui
+          tar -C dist/linux-amd64 -czf "dist/oxydra-${GITHUB_REF_NAME}-linux-amd64.tar.gz" runner oxydra-vm shell-daemon oxydra-tui
+          shasum -a 256 "dist/oxydra-${GITHUB_REF_NAME}-linux-amd64.tar.gz" > dist/SHA256SUMS-linux-amd64
+
+      - name: Build and push linux amd64 Docker images
+        run: |
+          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            IMAGE_PREFIX="ghcr.io/${IMAGE_NAMESPACE}"
+          else
+            IMAGE_PREFIX="${IMAGE_NAMESPACE}"
+          fi
+          OXYDRA_IMAGE="${IMAGE_PREFIX}/oxydra-vm"
+          SHELL_IMAGE="${IMAGE_PREFIX}/shell-vm"
+
+          mkdir -p docker/staging/linux-amd64
+          cp target/release/oxydra-vm docker/staging/linux-amd64/oxydra-vm
+          cp target/release/shell-daemon docker/staging/linux-amd64/shell-daemon
+
+          docker build \
+            --platform linux/amd64 \
+            --build-arg "BINARY=docker/staging/linux-amd64/oxydra-vm" \
+            --target oxydra-vm \
+            -t "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}-linux-amd64" \
+            -f docker/Dockerfile.prebuilt \
+            .
+
+          docker build \
+            --platform linux/amd64 \
+            --build-arg "BINARY=docker/staging/linux-amd64/shell-daemon" \
+            --target shell-vm \
+            -t "${SHELL_IMAGE}:${GITHUB_REF_NAME}-linux-amd64" \
+            -f docker/Dockerfile.prebuilt \
+            .
+
+          docker push "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}-linux-amd64"
+          docker push "${SHELL_IMAGE}:${GITHUB_REF_NAME}-linux-amd64"
+
+      - name: Upload linux amd64 artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux
+          name: release-linux-amd64
           path: |
             dist/oxydra-${{ github.ref_name }}-linux-amd64.tar.gz
+            dist/SHA256SUMS-linux-amd64
+
+  build-linux-arm64:
+    name: Build linux arm64 artifacts + image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'ghcr' }}
+      IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+
+      - name: Resolve image namespace
+        run: |
+          if [[ -n "${IMAGE_NAMESPACE}" ]]; then
+            RESOLVED_NAMESPACE="${IMAGE_NAMESPACE}"
+          elif [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            RESOLVED_NAMESPACE="${GITHUB_REPOSITORY_OWNER}"
+          else
+            RESOLVED_NAMESPACE="${DOCKERHUB_USERNAME}"
+          fi
+          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            RESOLVED_NAMESPACE="$(echo "${RESOLVED_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          fi
+          echo "IMAGE_NAMESPACE=${RESOLVED_NAMESPACE}" >> "${GITHUB_ENV}"
+
+      - name: Log in to GHCR
+        if: env.IMAGE_REGISTRY == 'ghcr'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: env.IMAGE_REGISTRY == 'dockerhub'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Linux arm64 binaries
+        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
+
+      - name: Package linux arm64 release artifact
+        run: |
+          mkdir -p dist/linux-arm64
+          cp target/release/runner dist/linux-arm64/runner
+          cp target/release/oxydra-vm dist/linux-arm64/oxydra-vm
+          cp target/release/shell-daemon dist/linux-arm64/shell-daemon
+          cp target/release/oxydra-tui dist/linux-arm64/oxydra-tui
+          tar -C dist/linux-arm64 -czf "dist/oxydra-${GITHUB_REF_NAME}-linux-arm64.tar.gz" runner oxydra-vm shell-daemon oxydra-tui
+          shasum -a 256 "dist/oxydra-${GITHUB_REF_NAME}-linux-arm64.tar.gz" > dist/SHA256SUMS-linux-arm64
+
+      - name: Build and push linux arm64 Docker images
+        run: |
+          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            IMAGE_PREFIX="ghcr.io/${IMAGE_NAMESPACE}"
+          else
+            IMAGE_PREFIX="${IMAGE_NAMESPACE}"
+          fi
+          OXYDRA_IMAGE="${IMAGE_PREFIX}/oxydra-vm"
+          SHELL_IMAGE="${IMAGE_PREFIX}/shell-vm"
+
+          mkdir -p docker/staging/linux-arm64
+          cp target/release/oxydra-vm docker/staging/linux-arm64/oxydra-vm
+          cp target/release/shell-daemon docker/staging/linux-arm64/shell-daemon
+
+          docker build \
+            --platform linux/arm64 \
+            --build-arg "BINARY=docker/staging/linux-arm64/oxydra-vm" \
+            --target oxydra-vm \
+            -t "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}-linux-arm64" \
+            -f docker/Dockerfile.prebuilt \
+            .
+
+          docker build \
+            --platform linux/arm64 \
+            --build-arg "BINARY=docker/staging/linux-arm64/shell-daemon" \
+            --target shell-vm \
+            -t "${SHELL_IMAGE}:${GITHUB_REF_NAME}-linux-arm64" \
+            -f docker/Dockerfile.prebuilt \
+            .
+
+          docker push "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}-linux-arm64"
+          docker push "${SHELL_IMAGE}:${GITHUB_REF_NAME}-linux-arm64"
+
+      - name: Upload linux arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64
+          path: |
             dist/oxydra-${{ github.ref_name }}-linux-arm64.tar.gz
-            dist/SHA256SUMS
+            dist/SHA256SUMS-linux-arm64
+
+  publish-linux-manifests:
+    name: Publish multi-arch image manifests
+    needs:
+      - build-linux-amd64
+      - build-linux-arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'ghcr' }}
+      IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - name: Resolve image namespace
+        run: |
+          if [[ -n "${IMAGE_NAMESPACE}" ]]; then
+            RESOLVED_NAMESPACE="${IMAGE_NAMESPACE}"
+          elif [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            RESOLVED_NAMESPACE="${GITHUB_REPOSITORY_OWNER}"
+          else
+            RESOLVED_NAMESPACE="${DOCKERHUB_USERNAME}"
+          fi
+          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            RESOLVED_NAMESPACE="$(echo "${RESOLVED_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          fi
+          echo "IMAGE_NAMESPACE=${RESOLVED_NAMESPACE}" >> "${GITHUB_ENV}"
+
+      - name: Log in to GHCR
+        if: env.IMAGE_REGISTRY == 'ghcr'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: env.IMAGE_REGISTRY == 'dockerhub'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish multi-arch manifests
+        run: |
+          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
+            IMAGE_PREFIX="ghcr.io/${IMAGE_NAMESPACE}"
+          else
+            IMAGE_PREFIX="${IMAGE_NAMESPACE}"
+          fi
+          OXYDRA_IMAGE="${IMAGE_PREFIX}/oxydra-vm"
+          SHELL_IMAGE="${IMAGE_PREFIX}/shell-vm"
+
+          docker manifest rm "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}" >/dev/null 2>&1 || true
+          docker manifest rm "${SHELL_IMAGE}:${GITHUB_REF_NAME}" >/dev/null 2>&1 || true
+
+          docker manifest create "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}" \
+            "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}-linux-amd64" \
+            "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}-linux-arm64"
+          docker manifest create "${SHELL_IMAGE}:${GITHUB_REF_NAME}" \
+            "${SHELL_IMAGE}:${GITHUB_REF_NAME}-linux-amd64" \
+            "${SHELL_IMAGE}:${GITHUB_REF_NAME}-linux-arm64"
+
+          docker manifest push "${OXYDRA_IMAGE}:${GITHUB_REF_NAME}"
+          docker manifest push "${SHELL_IMAGE}:${GITHUB_REF_NAME}"
 
   build-macos-arm64:
     name: Build macos arm64 artifacts
@@ -110,7 +311,9 @@ jobs:
   create-release:
     name: Create GitHub release
     needs:
-      - build-linux-and-docker
+      - build-linux-amd64
+      - build-linux-arm64
+      - publish-linux-manifests
       - build-macos-arm64
     runs-on: ubuntu-latest
     permissions:
@@ -121,11 +324,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download linux artifacts
+      - name: Download linux amd64 artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-linux
-          path: artifacts/linux
+          name: release-linux-amd64
+          path: artifacts/linux-amd64
+
+      - name: Download linux arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-arm64
+          path: artifacts/linux-arm64
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
@@ -136,9 +345,10 @@ jobs:
       - name: Assemble release files
         run: |
           mkdir -p release-assets
-          cp artifacts/linux/*.tar.gz release-assets/
+          cp artifacts/linux-amd64/*.tar.gz release-assets/
+          cp artifacts/linux-arm64/*.tar.gz release-assets/
           cp artifacts/macos/*.tar.gz release-assets/
-          cat artifacts/linux/SHA256SUMS artifacts/macos/SHA256SUMS | sort -u > release-assets/SHA256SUMS
+          cat artifacts/linux-amd64/SHA256SUMS-linux-amd64 artifacts/linux-arm64/SHA256SUMS-linux-arm64 artifacts/macos/SHA256SUMS | sort -u > release-assets/SHA256SUMS
 
       - name: Generate release summary
         run: |

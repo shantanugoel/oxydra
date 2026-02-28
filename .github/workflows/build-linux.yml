@@ -4,21 +4,16 @@ on:
   push:
     branches:
       - "**"
+  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build-linux:
-    name: Build linux amd64 + arm64
+  build-linux-amd64:
+    name: Build linux amd64
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'ghcr' }}
-      IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
-      PUSH_CONTAINER_IMAGES: ${{ vars.PUSH_CONTAINER_IMAGES || 'false' }}
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,51 +24,28 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Enable QEMU for arm64 Docker builds
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+      - name: Install wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
 
-      - name: Install zig
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zig
+      - name: Build Linux amd64 binaries
+        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
 
-      - name: Install cargo-zigbuild
-        run: cargo install --locked cargo-zigbuild
+  build-linux-arm64:
+    name: Build linux arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Resolve image namespace
-        run: |
-          if [[ -n "${IMAGE_NAMESPACE}" ]]; then
-            echo "IMAGE_NAMESPACE=${IMAGE_NAMESPACE}" >> "${GITHUB_ENV}"
-          elif [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
-            echo "IMAGE_NAMESPACE=${GITHUB_REPOSITORY_OWNER}" >> "${GITHUB_ENV}"
-          else
-            echo "IMAGE_NAMESPACE=${DOCKERHUB_USERNAME}" >> "${GITHUB_ENV}"
-          fi
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Log in to GHCR
-        if: env.PUSH_CONTAINER_IMAGES == 'true' && env.IMAGE_REGISTRY == 'ghcr'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
 
-      - name: Log in to Docker Hub
-        if: env.PUSH_CONTAINER_IMAGES == 'true' && env.IMAGE_REGISTRY == 'dockerhub'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Install wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
 
-      - name: Build Linux binaries and Docker images
-        run: |
-          if [[ "${PUSH_CONTAINER_IMAGES}" == "true" ]]; then
-            ./scripts/build-release-assets.sh \
-              --platforms linux-amd64,linux-arm64 \
-              --tag "ci-${GITHUB_SHA}" \
-              --push-docker \
-              --registry "${IMAGE_REGISTRY}" \
-              --image-namespace "${IMAGE_NAMESPACE}"
-          else
-            ./scripts/build-release-assets.sh --platforms linux-amd64,linux-arm64 --tag "ci-${GITHUB_SHA}"
-          fi
+      - name: Build Linux arm64 binaries
+        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui

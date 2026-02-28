@@ -38,6 +38,19 @@ Oxydra is designed for people who want an agent runtime they can self-host, insp
 - macOS: requires Docker Desktop running (used for the sandbox VM runtime)
 - Linux: requires the `firecracker` binary plus Firecracker config paths in `runner.toml`
 
+### WASM Security Across All Tiers
+
+WASM-based tool sandboxing is active in `container`, `micro_vm`, and `process` (`--insecure`) modes.
+
+- File/media tools run with capability-scoped mounts (`/shared`, `/tmp`, `/vault`) and per-tool read/write policies.
+- Path traversal is blocked via canonicalization + boundary checks before execution, so paths outside allowed roots are denied.
+- Web tools (`web_fetch`, `web_search`) run without filesystem mounts.
+- Web tools only accept `http/https` URLs and resolve hostnames before requests.
+- Web tools block loopback/private/link-local/cloud-metadata IP ranges by default to reduce SSRF risk.
+- Vault exfiltration risk is reduced with two-step `vault_copyto` semantics: read from `/vault`, then write to `/shared`/`/tmp` in a separate operation.
+
+In `process` mode, host-level isolation is weaker than container/VM isolation, but the same WASM capability policies and security checks still apply.
+
 ---
 
 ## Part 2 — Quick Start (Install From Releases)
@@ -184,6 +197,8 @@ Use process mode (lower safety, no shell/browser tools):
 runner --config .oxydra/runner.toml --user alice --insecure start
 runner --tui --config .oxydra/runner.toml --user alice
 ```
+
+Even in `--insecure` mode, WASM tool policies still enforce path boundaries and web SSRF checks.
 
 ### 6) TUI session commands
 

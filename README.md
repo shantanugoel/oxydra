@@ -6,6 +6,13 @@ Oxydra is a Rust-based AI agent orchestrator for running capable agents with str
 
 > ⚠️ **Maturity notice:** Oxydra is still pre-pre-alpha and not yet ready for broad production use.
 
+## Table of Contents
+
+- [Part 1 — Product Intro & Features](#part-1--product-intro--features)
+- [Part 2 — Quick Start (Install From Releases)](#part-2--quick-start-install-from-releases)
+- [Part 3 — Use Latest From Repository (and Contribute)](#part-3--use-latest-from-repository-and-contribute)
+- [Comparison: Oxydra vs. ZeroClaw vs. IronClaw vs. MicroClaw](#comparison-oxydra-vs-zeroclaw-vs-ironclaw-vs-microclaw)
+
 ## Part 1 — Product Intro & Features
 
 Oxydra is designed for people who want an agent runtime they can self-host, inspect, and evolve — not a black box.

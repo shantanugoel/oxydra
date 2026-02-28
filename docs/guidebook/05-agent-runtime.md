@@ -220,6 +220,37 @@ Relevant context from memory:
 
 Sessions are lazily created on first message storage. The runtime can restore a session by ID, rebuilding the `Context` from stored `conversation_events`.
 
+## Autonomy Protocol
+
+When memory is enabled, the system prompt injects an explicit operational protocol that guides the agent toward proactive, autonomous behavior. This is implemented in `runner/src/bootstrap.rs::build_system_prompt()`.
+
+### Operational Loop
+
+The agent is instructed to follow a five-phase cycle for each task:
+
+1. **Plan** — decompose the task into concrete steps
+2. **Recall** — search memory for relevant prior knowledge, preferences, or corrected procedures
+3. **Execute** — use tools to carry out each step
+4. **Reflect** — when a step fails, diagnose the cause before retrying
+5. **Learn** — save durable insights and corrected procedures to memory for future sessions
+
+The scratchpad (`scratchpad_write`) is recommended for tracking progress through the plan during long multi-step execution.
+
+### Retry Protocol
+
+The system prompt enforces a structured retry discipline:
+- The agent must NOT repeat the exact same failed action
+- After failure, the agent should diagnose the root cause and attempt a distinct alternative
+
+### User-Ask Boundary
+
+The prompt explicitly restricts when the agent should ask the user for input:
+- Missing information (credentials, requirements, preferences) that cannot be inferred
+- Irreversible decisions where the correct choice is ambiguous
+- All retry attempts for a sub-task have been exhausted
+
+The agent is instructed NOT to ask for confirmation on routine actions it can safely try and verify itself.
+
 ## Credential Scrubbing
 
 **File:** `runtime/src/scrubbing.rs`, `runtime/src/lib.rs`, `runtime/src/tool_execution.rs`

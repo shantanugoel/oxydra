@@ -108,10 +108,13 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `send_media` | `ReadOnly` | Sends a workspace file as a channel media attachment |
 | `delegate_to_agent` | `SideEffecting` | Delegates a goal to a named specialist agent; forwards delegated media outputs when available |
 | `shell_exec` | `Privileged` | Executes shell commands (via sidecar or host) |
-| `memory_search` | `ReadOnly` | Searches the user's personal memory store |
-| `memory_save` | `SideEffecting` | Saves a new note to the user's memory |
+| `memory_search` | `ReadOnly` | Searches the user's personal memory store (with optional tag filtering) |
+| `memory_save` | `SideEffecting` | Saves a new note to the user's memory (with optional tags) |
 | `memory_update` | `SideEffecting` | Replaces the content of an existing note by note_id |
 | `memory_delete` | `SideEffecting` | Deletes a note from the user's memory by note_id |
+| `scratchpad_read` | `ReadOnly` | Reads the session-scoped working scratchpad |
+| `scratchpad_write` | `SideEffecting` | Replaces the session scratchpad with a list of active working items |
+| `scratchpad_clear` | `SideEffecting` | Clears the session scratchpad to free capacity |
 | `schedule_create` | `SideEffecting` | Creates a new one-off or recurring scheduled task |
 | `schedule_search` | `ReadOnly` | Searches and lists scheduled tasks with filters and pagination |
 | `schedule_edit` | `SideEffecting` | Modifies, pauses, or resumes a scheduled task |
@@ -150,19 +153,43 @@ All four tools receive a `ToolExecutionContext` on each invocation, which carrie
 
 | Tool | Parameters | Returns |
 |------|-----------|---------|
-| `memory_search` | `query` (required), `top_k` (optional, default 5, max 20), `include_conversation` (optional, default false) | JSON array of `{text, source, score, note_id}` results |
-| `memory_save` | `content` (required) | `{note_id, message}` with the generated `note-{uuid}` identifier |
-| `memory_update` | `note_id` (required), `content` (required) | `{note_id, message}` confirming the update |
+| `memory_search` | `query` (required), `top_k` (optional, default 5, max 20), `include_conversation` (optional, default false), `tags` (optional, array of strings for tag filtering) | JSON array of `{text, source, score, note_id, tags, created_at, updated_at}` results |
+| `memory_save` | `content` (required), `tags` (optional, array of strings) | `{note_id, message}` with the generated `note-{uuid}` identifier |
+| `memory_update` | `note_id` (required), `content` (required), `tags` (optional, array of strings) | `{note_id, message}` confirming the update |
 | `memory_delete` | `note_id` (required) | `{message}` confirming deletion |
 
-- `memory_search` uses the existing hybrid retrieval pipeline (vector + FTS5) with configurable `vector_weight` and `fts_weight` parameters.
-- `memory_save` generates a UUID-based `note_id` (format: `note-{uuid}`) and stores the content through `MemoryRetrieval::store_note`; it is intended for durable facts/preferences/decisions and corrected working procedures.
-- `memory_update` performs a delete-then-save under the same `note_id`, preserving the identifier while replacing content when previously saved information or procedures are corrected.
+- `memory_search` uses the hybrid retrieval pipeline (native libSQL vector index + FTS5) with configurable `vector_weight` and `fts_weight` parameters. When `tags` are provided, results are filtered at the database level to only include notes containing every requested tag.
+- `memory_save` generates a UUID-based `note_id` (format: `note-{uuid}`) and stores the content through `MemoryRetrieval::store_note`; it is intended for durable facts/preferences/decisions and corrected working procedures. Tags are normalized (trimmed, lowercased, deduplicated, capped at 16) and stored as chunk metadata. Backend-owned timestamps (`created_at`, `updated_at`) are set automatically.
+- `memory_update` performs a delete-then-save under the same `note_id`, preserving the identifier while replacing content when previously saved information or procedures are corrected. Tags can be replaced during update.
 - `memory_delete` removes all chunks and events associated with the `note_id`.
 
 #### Registration
 
 Memory tools are registered during bootstrap via `register_memory_tools()` when a memory backend is configured. The function takes a `ToolRegistry`, `Arc<dyn MemoryRetrieval>`, and the retrieval weight parameters, then creates and registers all four tools.
+
+### Scratchpad Tools
+
+**File:** `tools/src/scratchpad_tools.rs`
+
+Three LLM-callable tools expose a session-scoped working memory scratchpad, enabling the agent to track active sub-goals during long multi-step execution without polluting persistent cross-session memory.
+
+#### Semantics
+
+- Scratchpad data is **session-scoped** — it does not persist across sessions unless the agent explicitly saves items to durable memory via `memory_save`.
+- Each write **replaces** the entire scratchpad (not append-only), keeping state fresh.
+- Hard limits are enforced: maximum 32 items, each up to 240 characters.
+
+#### Tool Details
+
+| Tool | Parameters | Returns |
+|------|-----------|---------|
+| `scratchpad_read` | (none) | `{session_id, items, updated_at, item_count}` |
+| `scratchpad_write` | `items` (required, array of 1–32 strings, each ≤240 chars) | `{updated, item_count, message}` |
+| `scratchpad_clear` | (none) | `{cleared, message}` |
+
+#### Registration
+
+Scratchpad tools are registered during bootstrap via `register_scratchpad_tools()` when a memory backend is configured, alongside memory tools.
 
 ### Scheduler Tools
 

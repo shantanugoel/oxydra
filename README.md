@@ -9,8 +9,8 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 - **Provider-agnostic LLM integration** — OpenAI, Anthropic, Google Gemini, and OpenAI Responses API with SSE streaming, automatic retries, and a pinned model catalog
 - **Multi-modal input** — Users can send images, audio, video, PDFs, and documents from supported channels (Telegram); media is validated against model and provider capabilities then forwarded as inline attachments to the LLM
 - **Tool system** — `#[tool]` proc-macro for defining tools with automatic JSON Schema generation and safety tiers, plus path-hardened virtual workspace handling (`/shared`, `/tmp`, `/vault`) across file, vault, and media tools
-- **Agent runtime** — Turn-loop state machine with tool dispatch, self-correction, context budget management, and cost limits
-- **Persistent memory** — Hybrid retrieval (vector + FTS5) over libSQL with conversation summarization and LLM-callable memory tools (search, save, update, delete)
+- **Agent runtime** — Turn-loop state machine with tool dispatch, self-correction, context budget management, cost limits, and a built-in autonomy protocol (plan → recall → execute → reflect → learn) with structured retry escalation
+- **Persistent memory** — Hybrid retrieval (native libSQL vector index + FTS5) over libSQL with model2vec semantic embeddings (configurable potion-8m/32m), conversation summarization, LLM-callable memory tools (search, save, update, delete) with tag-based filtering and backend-owned timestamps, and a session-scoped working-memory scratchpad for multi-step task coordination
 - **Scheduler** — Durable one-off and periodic task scheduling with cron/interval cadences, origin-aware notification routing (back to the creating channel), full run output storage, run history tools, failure notifications, and automatic execution through the same agent runtime policy envelope
 - **Isolation tiers** — MicroVM, container, and process-level sandboxing via the runner/guest model
 - **Multi-session gateway** — Protocol v2 WebSocket gateway with per-user multi-session support, session persistence, bounded FIFO top-level turn queueing (default 10 concurrent turns/user), session caps (default 50), idle TTL cleanup (default 48h), and pluggable channel adapters
@@ -189,6 +189,41 @@ OXYDRA__MEMORY__ENABLED=true
 ```
 
 API key resolution order: explicit config value > custom `api_key_env` > provider-specific env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) > fallback `API_KEY`.
+
+### Memory configuration
+
+Enable persistent memory in your `agent.toml`:
+
+```toml
+[memory]
+enabled = true
+# embedding_backend = "model2vec"   # default; or "deterministic" for hash-based
+# model2vec_model = "potion_32m"    # default; or "potion_8m" for lighter footprint
+
+[memory.retrieval]
+top_k = 8
+vector_weight = 0.7
+fts_weight = 0.3
+```
+
+**Embedding backends:**
+
+| Backend | Config Value | Description |
+|---------|-------------|-------------|
+| Model2vec | `model2vec` (default) | Semantic embeddings via Potion static models. Paraphrases and related concepts cluster naturally. |
+| Deterministic | `deterministic` | Blake3 hash-based vectors. No semantic similarity, but zero dependencies and instant startup. |
+
+**Model2vec model sizes:**
+
+| Model | Config Value | Size | Use Case |
+|-------|-------------|------|----------|
+| Potion-32M | `potion_32m` (default) | ~32 MB | Higher quality semantic retrieval |
+| Potion-8M | `potion_8m` | ~8 MB | Constrained environments |
+
+When memory is enabled, the agent gains access to:
+- **Memory tools** — `memory_save`, `memory_search` (with tag filtering), `memory_update`, `memory_delete` for cross-session knowledge
+- **Scratchpad tools** — `scratchpad_write`, `scratchpad_read`, `scratchpad_clear` for session-scoped working memory during long tasks
+- **Autonomy protocol** — The agent follows a structured plan→recall→execute→reflect→learn loop and uses a retry protocol (up to 3 distinct approaches before escalating to the user)
 
 ### Runner configuration
 

@@ -855,7 +855,31 @@ fn build_system_prompt(
          - `scratchpad_write` to track current sub-tasks for this session.\n\
          - `scratchpad_read` to review current scratchpad state.\n\
          - `scratchpad_clear` to reset scratchpad state and free capacity.\n\
-         Scratchpad data is session-scoped working memory and does not persist across sessions unless explicitly saved to memory."
+         Scratchpad data is session-scoped working memory and does not persist across sessions unless explicitly saved to memory.\n\
+         \n\
+         ### Operational Loop\n\n\
+         For each task, follow this cycle:\n\
+         1. **Plan** — break the task into concrete steps.\n\
+         2. **Recall** — search memory (`memory_search`) for relevant prior knowledge, preferences, or corrected procedures before acting.\n\
+         3. **Execute** — use tools to carry out each step.\n\
+         4. **Reflect** — if a step fails, diagnose the cause before retrying.\n\
+         5. **Learn** — save durable insights and corrected procedures to memory so future sessions benefit.\n\
+         \n\
+         Use `scratchpad_write` to keep track of your progress through the plan during long multi-step execution.\n\
+         \n\
+         ### Retry Protocol\n\n\
+         When an action fails:\n\
+         - Do NOT repeat the exact same failed action.\n\
+         - Diagnose the root cause, then attempt a distinct alternative approach.\n\
+         - If you can't get it done at all, escalate to the user with a concise summary of what was tried and why each approach failed.\n\
+         \n\
+         ### When to Ask the User\n\n\
+         Stay action-oriented. Only ask the user when:\n\
+         - Required information (credentials, requirements, preferences) is genuinely missing and cannot be inferred.\n\
+         - A decision is irreversible and the correct choice is ambiguous.\n\
+         - All retry attempts for a sub-task have been exhausted.\n\
+         \n\
+         Do NOT ask for confirmation on routine actions you can safely try and verify yourself."
     } else {
         ""
     };
@@ -1308,6 +1332,10 @@ remote_url = "libsql://example-org.turso.io"
         assert!(prompt.contains("Do not save secrets"));
         assert!(prompt.contains("scratchpad_write"));
         assert!(prompt.contains("scratchpad_clear"));
+        // Autonomy protocol sections
+        assert!(prompt.contains("### Operational Loop"));
+        assert!(prompt.contains("### Retry Protocol"));
+        assert!(prompt.contains("### When to Ask the User"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1319,6 +1347,61 @@ remote_url = "libsql://example-org.turso.io"
             .expect("system prompt should be generated");
         assert!(!prompt.contains("## Memory"));
         assert!(!prompt.contains("corrected procedures"));
+        assert!(!prompt.contains("### Operational Loop"));
+        assert!(!prompt.contains("### Retry Protocol"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_operational_loop_contains_all_phases() {
+        let root = temp_dir("system-prompt-operational-loop");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        // All five operational loop phases must be present
+        assert!(prompt.contains("**Plan**"));
+        assert!(prompt.contains("**Recall**"));
+        assert!(prompt.contains("**Execute**"));
+        assert!(prompt.contains("**Reflect**"));
+        assert!(prompt.contains("**Learn**"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_retry_protocol_mentions_distinct_attempts_and_escalation() {
+        let root = temp_dir("system-prompt-retry-protocol");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("Do NOT repeat the exact same failed action"),
+            "retry protocol should instruct against repeating failed actions"
+        );
+        assert!(
+            prompt.contains("3 distinct failed approaches"),
+            "retry protocol should mention the 3-attempt escalation threshold"
+        );
+        assert!(
+            prompt.contains("escalate to the user"),
+            "retry protocol should instruct escalation when retries exhausted"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_user_ask_boundary_is_restrictive() {
+        let root = temp_dir("system-prompt-ask-boundary");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("Only ask the user when"),
+            "prompt should define a clear user-ask boundary"
+        );
+        assert!(
+            prompt.contains("Do NOT ask for confirmation on routine actions"),
+            "prompt should discourage unnecessary confirmations"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

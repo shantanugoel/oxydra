@@ -69,16 +69,46 @@ Controls the agent loop's operational limits:
 
 ### `MemoryConfig`
 
-Controls persistence and retrieval:
+Controls persistence, retrieval, and embedding backend:
 
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `enabled` | false | Whether memory persistence is active |
 | `remote_url` | (none) | Optional Turso remote URL |
 | `auth_token` | (none) | Required if `remote_url` is set |
+| `embedding_backend` | `model2vec` | Embedding strategy: `model2vec` (semantic) or `deterministic` (hash-based) |
+| `model2vec_model` | `potion_32m` | Model2vec model variant: `potion_8m` or `potion_32m` |
 | `retrieval.top_k` | 8 | Number of retrieval results per query |
 | `retrieval.vector_weight` | 0.7 | Weight for vector similarity (must sum to 1.0 with fts_weight) |
 | `retrieval.fts_weight` | 0.3 | Weight for full-text search scoring |
+
+#### Embedding Backends
+
+**`model2vec`** (default) — Uses the [model2vec-rs](https://github.com/MinishLab/model2vec-rs) library with configurable Potion static word embedding models. Produces true semantic embeddings where paraphrases and related concepts cluster naturally. Two model sizes are available:
+
+| Model | Config Value | Dimensions | Quality | Footprint |
+|-------|-------------|------------|---------|-----------|
+| Potion-32M | `potion_32m` | 256 (padded to 512) | Higher semantic quality | ~32 MB |
+| Potion-8M | `potion_8m` | 256 (padded to 512) | Good quality, smaller | ~8 MB |
+
+**`deterministic`** — Uses Blake3 content hashing to produce a fixed 64-dimensional vector (padded to 512). Same text always produces the same vector. This mode is:
+- Fully deterministic and reproducible across runs
+- Zero external model dependency, instant startup
+- **Not truly semantic** — paraphrases or synonyms will NOT produce similar vectors
+- Suitable for: minimal builds, deterministic testing, constrained environments
+
+```toml
+# Use model2vec with the smaller model
+[memory]
+enabled = true
+embedding_backend = "model2vec"
+model2vec_model = "potion_8m"
+
+# Use deterministic hashing (no semantic similarity)
+[memory]
+enabled = true
+embedding_backend = "deterministic"
+```
 
 ### `ProviderSelection`
 
@@ -417,6 +447,8 @@ min_turns    = 6
 enabled = true
 # Local DB is stored at <workspace>/.oxydra/memory.db by convention.
 # For remote mode, set remote_url and auth_token instead.
+# embedding_backend = "model2vec"     # or "deterministic"
+# model2vec_model = "potion_32m"      # or "potion_8m"
 
 [memory.retrieval]
 top_k         = 8

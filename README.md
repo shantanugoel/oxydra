@@ -62,7 +62,7 @@ This is the **recommended path** if you just want Oxydra running quickly.
 Pick a version from the [GitHub releases page](https://github.com/shantanugoel/oxydra/releases) and export it once:
 
 ```bash
-export OXYDRA_TAG=v0.1.2   # replace with the release you want
+export OXYDRA_TAG=v0.1.3   # replace with the release you want
 ```
 
 ### 1) Install binaries and bootstrap config templates
@@ -170,7 +170,7 @@ sudo usermod -aG docker $USER
 newgrp docker   # apply in the current shell without logging out
 ```
 
-The guest images are public on ghcr.io and pull without authentication. If you ever hit a `manifest unknown` 404, double-check that the tag in `runner.toml` includes the `v` prefix (e.g. `v0.1.2`, not `0.1.2`).
+The guest images are public on ghcr.io and pull without authentication. If you ever hit a `manifest unknown` 404, double-check that the tag in `runner.toml` includes the `v` prefix (e.g. `v0.1.3`, not `0.1.2`).
 
 ### 4) Set your provider API key
 
@@ -258,7 +258,7 @@ Telegram supports the same session commands (`/new`, `/sessions`, `/switch`, `/c
 | `oxydra-tui was not found in PATH` | Ensure install dir is in `PATH` or run the binary directly |
 | Docker unreachable / `client error (Connect)` | Start Docker (`sudo systemctl start docker`); for Colima set `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` |
 | `Permission denied` accessing Docker socket | Add your user to the docker group: `sudo usermod -aG docker $USER` then run `newgrp docker` or log out and back in |
-| `pull_image` fails with `manifest unknown` or 404 | Check the tag in `runner.toml` includes the `v` prefix (e.g. `v0.1.2` not `0.1.2`); see [published images](https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm) for available tags |
+| `pull_image` fails with `manifest unknown` or 404 | Check the tag in `runner.toml` includes the `v` prefix (e.g. `v0.1.3` not `0.1.2`); see [published images](https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm) for available tags |
 | Telegram bot does not respond | Verify `bot_token_env` points to an exported token and your Telegram user ID is listed in `[[channels.telegram.senders]]` |
 | `micro_vm` start fails on macOS | Ensure Docker Desktop is installed and running |
 | `micro_vm` start fails on Linux (`firecracker` or config error) | Install `firecracker` and set `guest_images.firecracker_oxydra_vm_config` (and `guest_images.firecracker_shell_vm_config` for sidecar) |

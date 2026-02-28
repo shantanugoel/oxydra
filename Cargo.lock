@@ -713,7 +713,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "channels"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "frankenstein",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -3080,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "memory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3843,7 +3843,7 @@ dependencies = [
 
 [[package]]
 name = "provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4312,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum 0.8.8",
  "base64 0.22.1",
@@ -4344,7 +4344,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4807,7 +4807,7 @@ dependencies = [
 
 [[package]]
 name = "shell-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "clap",
@@ -5604,7 +5604,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5630,7 +5630,7 @@ dependencies = [
 
 [[package]]
 name = "tools-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5811,7 +5811,7 @@ dependencies = [
 
 [[package]]
 name = "tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -5853,7 +5853,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
 name = "types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6211,7 +6211,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-guest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "serde",

@@ -62,7 +62,7 @@ This is the **recommended path** if you just want Oxydra running quickly.
 Pick a version from the [GitHub releases page](https://github.com/shantanugoel/oxydra/releases) and export it once:
 
 ```bash
-export OXYDRA_TAG=v0.1.0   # replace with the release you want
+export OXYDRA_TAG=v0.1.1   # replace with the release you want
 ```
 
 ### 1) Install binaries and bootstrap config templates

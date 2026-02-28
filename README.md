@@ -2,7 +2,7 @@
 
 # Oxydra
 
-Oxydra is a Rust-based AI agent orchestrator for running capable agents with strong isolation, provider flexibility, tool execution, persistent memory, and multi-session concurrency.
+Oxydra is a Rust-based AI agent orchestrator, that strives to run always-evolving and self learning capable agents with strong isolation, provider flexibility, tool execution, persistent memory, and multi-session/multi-agent/multi-user concurrency.
 
 > ⚠️ **Maturity notice:** Oxydra is still pre-pre-alpha and not yet ready for broad production use.
 
@@ -401,7 +401,7 @@ License: see [LICENSE](LICENSE).
 
 ## Comparison: Oxydra vs. ZeroClaw vs. IronClaw vs. MicroClaw
 
-All four are Rust-based AI agent runtimes that emerged from the "\*Claw" ecosystem. Each takes a distinct philosophy.
+All four are Rust-based AI agent runtimes that emerged from the "\*Claw" ecosystem, although Oxydra strives to be unto its own and not a `*claw`. Each takes a distinct philosophy.
 
 ### At a Glance
 
@@ -501,4 +501,4 @@ All four are Rust-based AI agent runtimes that emerged from the "\*Claw" ecosyst
 | **IronClaw** | Largest skill ecosystem (~890 curated), TEE deployment, most mature (v0.12.0), NEAR AI cloud integration |
 | **MicroClaw** | Simplest multi-channel chat automation, wide agentic iteration budget (100 turns), context compaction |
 
-Oxydra's distinguishing technical advantages are in security architecture and engineering rigour while still maintaining as much, if not more, flexibility as others: no other project in this group combines Firecracker-level VM isolation + WASM capability profiles on every tier + a vault with 2-step atomic semantics + entropy-based output scrubbing + a compiler-enforced 5-layer defense model — all without requiring an external database or cloud account.
+Oxydra's distinguishing technical advantages are in security architecture and engineering rigour while still maintaining as much, if not more, flexibility as others and keeping self-learning evolution as a key goal: no other project in this group combines Firecracker-level VM isolation + WASM capability profiles on every tier + a vault with 2-step atomic semantics + entropy-based output scrubbing + a compiler-enforced 5-layer defense model — all without requiring an external database or cloud account.

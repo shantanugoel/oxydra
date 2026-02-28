@@ -1592,12 +1592,21 @@ async fn launch_docker_container_async(
             .try_collect::<Vec<_>>()
             .await
             .map_err(|source| {
-                docker_operation_error(
-                    &params.endpoint,
-                    "pull_image",
-                    &params.container_name,
-                    source,
-                )
+                if is_not_found_error(&source) {
+                    RunnerError::DockerOperation {
+                        endpoint: params.endpoint.label(),
+                        operation: "pull_image",
+                        target: params.image.clone(),
+                        message: pull_image_not_found_message(&params.image),
+                    }
+                } else {
+                    docker_operation_error(
+                        &params.endpoint,
+                        "pull_image",
+                        &params.container_name,
+                        source,
+                    )
+                }
             })?;
     }
 
@@ -1804,6 +1813,46 @@ fn is_not_found_error(error: &BollardError) -> bool {
     }
 }
 
+/// Builds an actionable error message for a failed image pull (404 / manifest unknown).
+/// Provides different hints depending on whether the image looks like a registry
+/// reference (e.g. `ghcr.io/…`) or a plain local name (e.g. `oxydra-vm:latest`).
+fn pull_image_not_found_message(image: &str) -> String {
+    let is_registry_image = image.contains('/');
+    if is_registry_image {
+        // Likely a ghcr.io or other registry image configured by the user.
+        format!(
+            "image `{image}` not found. \
+             Check that the tag in [guest_images] includes the 'v' prefix \
+             (e.g. 'v0.1.2' not '0.1.2'). \
+             Pre-built oxydra images are published at:\n  \
+             https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm\n\n\
+             Alternatively, build the image locally from the oxydra source directory:\n  \
+             docker build --target oxydra-vm -t {image} -f docker/Dockerfile ."
+        )
+    } else {
+        // Plain local image name — has never been pushed to a registry.
+        format!(
+            "image `{image}` not found. \
+             This image is not published to a public registry and must be either:\n\n\
+             1. Built locally from the oxydra source directory:\n   \
+             docker build --target oxydra-vm -t {image} -f docker/Dockerfile .\n\n\
+             2. Or update [guest_images] in your runner.toml to use a pre-built image:\n   \
+             oxydra_vm = \"ghcr.io/shantanugoel/oxydra-vm:latest\"\n   \
+             (see https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm)"
+        )
+    }
+}
+
+/// Returns true when the error indicates the Docker daemon is unreachable or
+/// the current user lacks permission to access the Docker socket.
+fn is_docker_daemon_unreachable(error: &BollardError) -> bool {
+    let msg = error.to_string();
+    msg.contains("client error (Connect)")
+        || msg.contains("Connection refused")
+        || msg.contains("Permission denied")
+        || msg.contains("No such file or directory")
+}
+
 fn docker_client(endpoint: &DockerEndpoint) -> Result<Docker, RunnerError> {
     match endpoint {
         DockerEndpoint::Local => {
@@ -1828,6 +1877,18 @@ fn docker_operation_error(
     target: &str,
     source: BollardError,
 ) -> RunnerError {
+    if is_docker_daemon_unreachable(&source) {
+        return RunnerError::DockerConnect {
+            endpoint: endpoint.label(),
+            message: format!(
+                "{source}. \
+                 Is the Docker daemon running? (e.g. `sudo systemctl start docker`). \
+                 If Docker is running but access is denied, ensure your user is in the \
+                 'docker' group: `sudo usermod -aG docker $USER` \
+                 then log out and back in (or run `newgrp docker` in the current shell)"
+            ),
+        };
+    }
     RunnerError::DockerOperation {
         endpoint: endpoint.label(),
         operation,

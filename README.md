@@ -159,7 +159,20 @@ Update `.oxydra/agent.toml`:
 
 If you want a user id other than `alice`, update `[users.alice]` in `.oxydra/runner.toml` and rename `.oxydra/users/alice.toml` accordingly.
 
-### 3) Set your provider API key
+### 3) Ensure Docker is ready (Linux)
+
+```bash
+# Start Docker daemon and enable it on boot
+sudo systemctl enable --now docker
+
+# Add your user to the docker group so you don't need sudo
+sudo usermod -aG docker $USER
+newgrp docker   # apply in the current shell without logging out
+```
+
+The guest images are public on ghcr.io and pull without authentication. If you ever hit a `manifest unknown` 404, double-check that the tag in `runner.toml` includes the `v` prefix (e.g. `v0.1.2`, not `0.1.2`).
+
+### 4) Set your provider API key
 
 ```bash
 export OPENAI_API_KEY=your-key-here
@@ -167,7 +180,7 @@ export OPENAI_API_KEY=your-key-here
 # or: export GEMINI_API_KEY=...
 ```
 
-### 4) Start and connect
+### 5) Start and connect
 
 Run the daemon in terminal 1:
 
@@ -189,7 +202,7 @@ runner --config .oxydra/runner.toml --user alice stop
 runner --config .oxydra/runner.toml --user alice restart
 ```
 
-### 5) If Docker is unavailable
+### 6) If Docker is unavailable
 
 Use process mode (lower safety, no shell/browser tools):
 
@@ -200,7 +213,7 @@ runner --tui --config .oxydra/runner.toml --user alice
 
 Even in `--insecure` mode, WASM tool policies still enforce path boundaries and web SSRF checks.
 
-### 6) TUI session commands
+### 7) TUI session commands
 
 | Command | Meaning |
 |---|---|
@@ -212,7 +225,7 @@ Even in `--insecure` mode, WASM tool policies still enforce path boundaries and 
 | `/cancelall` | Cancel active turns across sessions |
 | `/status` | Show current session/runtime state |
 
-### 7) (Optional) Enable Telegram
+### 8) (Optional) Enable Telegram
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the bot token.
 2. Find your Telegram user ID (for example with [@userinfobot](https://t.me/userinfobot)).
@@ -243,7 +256,9 @@ Telegram supports the same session commands (`/new`, `/sessions`, `/switch`, `/c
 | Symptom | Fix |
 |---|---|
 | `oxydra-tui was not found in PATH` | Ensure install dir is in `PATH` or run the binary directly |
-| Docker unreachable | Start Docker; for Colima set `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` |
+| Docker unreachable / `client error (Connect)` | Start Docker (`sudo systemctl start docker`); for Colima set `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` |
+| `Permission denied` accessing Docker socket | Add your user to the docker group: `sudo usermod -aG docker $USER` then run `newgrp docker` or log out and back in |
+| `pull_image` fails with `manifest unknown` or 404 | Check the tag in `runner.toml` includes the `v` prefix (e.g. `v0.1.2` not `0.1.2`); see [published images](https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm) for available tags |
 | Telegram bot does not respond | Verify `bot_token_env` points to an exported token and your Telegram user ID is listed in `[[channels.telegram.senders]]` |
 | `micro_vm` start fails on macOS | Ensure Docker Desktop is installed and running |
 | `micro_vm` start fails on Linux (`firecracker` or config error) | Install `firecracker` and set `guest_images.firecracker_oxydra_vm_config` (and `guest_images.firecracker_shell_vm_config` for sidecar) |

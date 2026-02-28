@@ -184,10 +184,16 @@ initialize_config_templates() {
      - set [guest_images] to:
        oxydra_vm = "ghcr.io/shantanugoel/oxydra-vm:${TAG}"
        shell_vm  = "ghcr.io/shantanugoel/shell-vm:${TAG}"
-  2) ${config_root}/agent.toml
+  2) On Linux, ensure Docker is running and your user is in the docker group:
+       sudo systemctl enable --now docker
+       sudo usermod -aG docker \$USER && newgrp docker
+     The guest images are public on ghcr.io and pull without authentication.
+     If you see a 404 "manifest unknown" error, verify the tag in runner.toml
+     includes the "v" prefix (e.g. v${TAG}, not ${TAG#v}).
+  3) ${config_root}/agent.toml
      - set [selection].provider and [selection].model
      - ensure matching [providers.registry.<name>] api_key_env is correct
-  3) Export your provider API key environment variable:
+  4) Export your provider API key environment variable:
      OPENAI_API_KEY or ANTHROPIC_API_KEY or GEMINI_API_KEY
 EOF
 }

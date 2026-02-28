@@ -46,8 +46,11 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - name: Install musl toolchain and build dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake g++
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake
+          pip3 install ziglang
+          cargo install cargo-zigbuild
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -92,10 +95,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Linux binaries
-        run: cargo build --release --target ${{ matrix.rust_target }} --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
-        env:
-          CXX: g++
-          CC: musl-gcc
+        run: cargo zigbuild --release --target ${{ matrix.rust_target }} --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
 
       - name: Package linux release artifact
         run: |

@@ -285,9 +285,13 @@ for binary in "${binaries[@]}"; do
   log "  - ${binary}"
 done
 
+RUNNER_BIN="${INSTALL_DIR}/runner"
+
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   cat <<EOF
 [oxydra-install] ${INSTALL_DIR} is not in PATH.
+[oxydra-install] PATH was not modified automatically.
+[oxydra-install] If you used curl|bash, environment changes cannot persist to the parent shell.
 [oxydra-install] Add it with:
   export PATH="${INSTALL_DIR}:\$PATH"
 EOF
@@ -304,5 +308,7 @@ cat <<EOF
 [oxydra-install] Installed tag: ${TAG}
 [oxydra-install] Workspace base directory: ${BASE_DIR}
 [oxydra-install] Start the runner with:
-  runner --config "${BASE_DIR}/.oxydra/runner.toml" --user alice start
+  "${RUNNER_BIN}" --config "${BASE_DIR}/.oxydra/runner.toml" --user alice start
+[oxydra-install] Connect TUI with:
+  "${RUNNER_BIN}" --tui --config "${BASE_DIR}/.oxydra/runner.toml" --user alice
 EOF

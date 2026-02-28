@@ -463,6 +463,8 @@ sudo install -m 0755 oxydra-tui /usr/local/bin/oxydra-tui
 
 ### 2. Configure
 
+Download example configs from https://github.com/shantanugoel/oxydra/tree/main/examples/config
+
 ```bash
 mkdir -p .oxydra/users
 cp examples/config/agent.toml .oxydra/agent.toml

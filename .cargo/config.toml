@@ -23,3 +23,10 @@
 server  = "run -p runner"
 tui     = "run -p tui"
 sdaemon = "run -p shell-daemon"
+
+# Static linking for portable Linux musl binaries
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

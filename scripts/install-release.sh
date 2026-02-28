@@ -133,6 +133,7 @@ install_binary_system() {
 copy_or_download_config_template() {
   local source_name="$1"
   local destination="$2"
+  local archive_source="${TMP_DIR}/examples/config/${source_name}"
   local local_source="${SCRIPT_DIR}/../examples/config/${source_name}"
 
   if [[ -f "$destination" && "$OVERWRITE_CONFIG" != "true" ]]; then
@@ -142,12 +143,21 @@ copy_or_download_config_template() {
 
   mkdir -p "$(dirname "$destination")"
 
+  # Prefer config bundled in the release archive
+  if [[ -f "$archive_source" ]]; then
+    cp "$archive_source" "$destination"
+    log "Copied template: ${destination}"
+    return
+  fi
+
+  # Fall back to local repo checkout (when running from source tree)
   if [[ -n "$SCRIPT_DIR" && -f "$local_source" ]]; then
     cp "$local_source" "$destination"
     log "Copied template: ${destination}"
     return
   fi
 
+  # Last resort: download from GitHub
   local source_url="https://raw.githubusercontent.com/${REPO}/${TAG}/examples/config/${source_name}"
   if ! curl -fL --retry 3 -o "$destination" "$source_url"; then
     fail "failed to fetch config template ${source_name} from ${source_url}"

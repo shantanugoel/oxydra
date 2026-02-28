@@ -11,11 +11,10 @@
 #                -f docker/Dockerfile.prebuilt .
 
 # --- oxydra-vm image ---
-FROM debian:trixie-slim AS oxydra-vm
+FROM alpine:3 AS oxydra-vm
 
 ARG BINARY
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates musl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates
 COPY ${BINARY} /usr/local/bin/oxydra-vm
 RUN chmod +x /usr/local/bin/oxydra-vm
 ENTRYPOINT ["/usr/local/bin/oxydra-vm"]

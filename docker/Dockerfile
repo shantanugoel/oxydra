@@ -8,19 +8,28 @@ FROM rust:1-trixie AS builder
 WORKDIR /build
 COPY . .
 
-RUN rustup target add wasm32-wasip1
-RUN cargo build --release --bin oxydra-vm --bin shell-daemon
+RUN apt-get update && apt-get install -y musl-tools cmake && rm -rf /var/lib/apt/lists/*
+
+# Detect architecture and set the appropriate musl target
+RUN case "$(uname -m)" in \
+      x86_64|amd64) echo "x86_64-unknown-linux-musl" > /tmp/rust-target ;; \
+      aarch64|arm64) echo "aarch64-unknown-linux-musl" > /tmp/rust-target ;; \
+      *) echo "unsupported architecture: $(uname -m)" && exit 1 ;; \
+    esac
+
+RUN rustup target add wasm32-wasip1 "$(cat /tmp/rust-target)"
+RUN cargo build --release --target "$(cat /tmp/rust-target)" --bin oxydra-vm --bin shell-daemon
 
 # --- oxydra-vm image ---
-FROM debian:trixie-slim AS oxydra-vm
+FROM alpine:3 AS oxydra-vm
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/oxydra-vm /usr/local/bin/oxydra-vm
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /build/target/*/release/oxydra-vm /usr/local/bin/oxydra-vm
 ENTRYPOINT ["/usr/local/bin/oxydra-vm"]
 
 # --- shell-vm (shell-daemon sidecar) image ---
 FROM debian:trixie-slim AS shell-vm
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/shell-daemon /usr/local/bin/shell-daemon
+COPY --from=builder /build/target/*/release/shell-daemon /usr/local/bin/shell-daemon
 ENTRYPOINT ["/usr/local/bin/shell-daemon"]

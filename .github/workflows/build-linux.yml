@@ -20,16 +20,23 @@ jobs:
         include:
           - arch: amd64
             runs_on: ubuntu-latest
+            rust_target: x86_64-unknown-linux-musl
           - arch: arm64
             runs_on: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
     env:
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install musl toolchain and build dependencies
+        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -40,4 +47,4 @@ jobs:
         run: rustup target add wasm32-wasip1
 
       - name: Build Linux binaries
-        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
+        run: cargo build --release --target ${{ matrix.rust_target }} --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui

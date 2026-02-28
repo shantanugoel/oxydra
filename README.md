@@ -12,7 +12,7 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 - **Agent runtime** — Turn-loop state machine with tool dispatch, self-correction, context budget management, cost limits, and a built-in autonomy protocol (plan → recall → execute → reflect → learn) with structured retry escalation
 - **Persistent memory** — Hybrid retrieval (native libSQL vector index + FTS5) over libSQL with model2vec semantic embeddings (configurable potion-8m/32m), conversation summarization, LLM-callable memory tools (search, save, update, delete) with tag-based filtering and backend-owned timestamps, and a session-scoped working-memory scratchpad for multi-step task coordination
 - **Scheduler** — Durable one-off and periodic task scheduling with cron/interval cadences, origin-aware notification routing (back to the creating channel), full run output storage, run history tools, failure notifications, and automatic execution through the same agent runtime policy envelope
-- **Isolation tiers** — MicroVM, container, and process-level sandboxing via the runner/guest model
+- **Isolation tiers** — MicroVM, container, and process-level sandboxing via the runner/guest model (MicroVM is currently experimental; container is the recommended tier today)
 - **Multi-session gateway** — Protocol v2 WebSocket gateway with per-user multi-session support, session persistence, bounded FIFO top-level turn queueing (default 10 concurrent turns/user), session caps (default 50), idle TTL cleanup (default 48h), and pluggable channel adapters
 - **Session lifecycle** — Create, list, and switch between named sessions from the TUI (`/new`, `/sessions`, `/switch`) or via the `--session` CLI flag
 - **External channels (Telegram)** — In-process Telegram bot adapter with pre-configured sender authorization, forum topic threading, and live edit-message streaming responses
@@ -43,6 +43,35 @@ export ANTHROPIC_API_KEY=your-key
 export GEMINI_API_KEY=your-key
 ```
 
+### 1b. Apply bare-minimum runner settings (recommended)
+
+MicroVM support is currently experimental; for most users, set the container tier and image references explicitly in `.oxydra/runner.toml`, and keep the `--user` value aligned with your configured user entry:
+
+```toml
+default_tier = "container"
+
+[guest_images]
+oxydra_vm = "ghcr.io/<owner-or-org>/oxydra-vm:<tag>"
+shell_vm  = "ghcr.io/<owner-or-org>/shell-vm:<tag>"
+
+[users.alice] # replace "alice" if you want a different user ID
+config_path = "users/alice.toml"
+```
+
+Set the provider + model in `.oxydra/agent.toml`, and bind credentials via `api_key_env`:
+
+```toml
+[selection]
+provider = "openai"
+model = "gpt-4o-mini"
+
+[providers.registry.openai]
+provider_type = "openai"
+api_key_env = "OPENAI_API_KEY"
+```
+
+Read the inline comments in `examples/config/agent.toml`, `examples/config/runner.toml`, and `examples/config/runner-user.toml` to review other recommended knobs before production use.
+
 ### 2. Build
 
 ```bash
@@ -51,7 +80,7 @@ cargo build --workspace
 
 ### 3. Build guest Docker images
 
-The container and MicroVM isolation tiers run `oxydra-vm` and `shell-daemon` inside Docker containers. You must build the guest images before using these tiers.
+The container and MicroVM isolation tiers run `oxydra-vm` and `shell-daemon` inside Docker containers. MicroVM support is currently experimental; the recommended path is the container tier. You must build the guest images before using these tiers.
 
 #### Option A — Local cross-compilation (recommended, faster)
 
@@ -94,6 +123,8 @@ export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 ```
 
 ### 5. Run
+
+> **Note:** MicroVM support is currently experimental; use the container tier unless you are specifically testing MicroVM behavior.
 
 **Process tier** (no Docker required, isolation is degraded):
 
@@ -163,6 +194,182 @@ Once connected, you can manage multiple sessions from within the TUI:
 
 Each TUI window manages one session at a time. You can open multiple TUI windows connected to the same gateway to work in multiple sessions simultaneously.
 When the per-user concurrent turn limit is reached, new top-level turns queue fairly (FIFO) instead of being dropped, up to the configured per-user queue bound.
+
+## Local build and run guide
+
+This repo includes `scripts/build-release-assets.sh` to build release tarballs and guest Docker images in one command.
+
+### Platform dependencies
+
+| Platform | Build dependencies |
+|---|---|
+| macOS (Apple Silicon, arm64) | Rust stable (`rustup`), `cargo-zigbuild`, `zig`, Docker |
+| Linux PC (amd64) | Rust stable (`rustup`), `cargo-zigbuild`, `zig`, Docker |
+| Linux Raspberry Pi (aarch64/arm64) | Rust stable (`rustup`), `cargo-zigbuild`, `zig`, Docker |
+
+Install shared prerequisites:
+
+```bash
+rustup toolchain install stable
+rustup target add wasm32-wasip1
+cargo install cargo-zigbuild
+```
+
+Install zig:
+
+```bash
+# macOS
+brew install zig
+
+# Debian/Ubuntu (example)
+sudo apt-get update && sudo apt-get install -y zig
+```
+
+### Build locally
+
+Build all requested targets and local Docker images:
+
+```bash
+# macOS arm64 host: builds macos-arm64 + linux-amd64 + linux-arm64
+./scripts/build-release-assets.sh --tag local
+
+# Linux amd64 host: build linux amd64/arm64 only
+./scripts/build-release-assets.sh --platforms linux-amd64,linux-arm64 --tag local
+
+# Push Docker images to GHCR (default registry; after `docker login ghcr.io`)
+./scripts/build-release-assets.sh --platforms linux-amd64,linux-arm64 --tag v0.2.0 \
+  --push-docker --image-namespace <github-user-or-org>
+
+# Push Docker images to Docker Hub instead (optional override)
+./scripts/build-release-assets.sh --platforms linux-amd64,linux-arm64 --tag v0.2.0 \
+  --push-docker --registry dockerhub --image-namespace <dockerhub-namespace>
+```
+
+For maintainers publishing tag releases (not needed for end users), set these GitHub repository settings:
+
+- `IMAGE_REGISTRY` (Actions variable, optional; defaults to `ghcr`)
+- `IMAGE_NAMESPACE` (Actions variable, optional; defaults to `github.repository_owner`)
+- `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` (Actions secrets, only needed when `IMAGE_REGISTRY=dockerhub`)
+
+Artifacts are created in `dist/`:
+
+- `oxydra-<tag>-macos-arm64.tar.gz`
+- `oxydra-<tag>-linux-amd64.tar.gz`
+- `oxydra-<tag>-linux-arm64.tar.gz`
+- `SHA256SUMS`
+
+### Run from local build artifacts
+
+```bash
+mkdir -p ./dist/run
+tar -xzf ./dist/oxydra-local-macos-arm64.tar.gz -C ./dist/run   # or linux-amd64/linux-arm64 tarball
+./dist/run/runner --config .oxydra/runner.toml --user alice --insecure start
+./dist/run/oxydra-tui --gateway-endpoint ws://127.0.0.1:PORT/ws --user alice
+```
+
+### Run with local Docker images
+
+Local image tags are created as:
+
+- `oxydra-vm:<tag>-linux-amd64`
+- `oxydra-vm:<tag>-linux-arm64`
+- `shell-vm:<tag>-linux-amd64`
+- `shell-vm:<tag>-linux-arm64`
+
+Use the right tag in `.oxydra/runner.toml`:
+
+```toml
+[guest_images]
+oxydra_vm = "oxydra-vm:local-linux-arm64" # use linux-amd64 on x86_64 PCs
+shell_vm  = "shell-vm:local-linux-arm64"  # use linux-amd64 on x86_64 PCs
+```
+
+Then start normally:
+
+```bash
+cargo run -p runner -- --config .oxydra/runner.toml --user alice start
+```
+
+## Install from published releases and GHCR
+
+### 1) Install binaries from GitHub Releases
+
+1. Open the latest release at `https://github.com/<owner>/<repo>/releases` (replace with your repository path)
+2. Download the tarball for your platform:
+   - `oxydra-<tag>-macos-arm64.tar.gz` (macOS Apple Silicon)
+   - `oxydra-<tag>-linux-amd64.tar.gz` (Linux PC)
+   - `oxydra-<tag>-linux-arm64.tar.gz` (Raspberry Pi 64-bit / ARM64)
+3. Download `SHA256SUMS` and verify:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+```
+
+4. Extract and place binaries on `PATH`:
+
+```bash
+tar -xzf oxydra-<tag>-linux-amd64.tar.gz
+sudo install -m 0755 runner /usr/local/bin/runner
+sudo install -m 0755 oxydra-vm /usr/local/bin/oxydra-vm
+sudo install -m 0755 shell-daemon /usr/local/bin/shell-daemon
+sudo install -m 0755 oxydra-tui /usr/local/bin/oxydra-tui
+```
+
+### 2) Copy minimum config and set the published image refs
+
+```bash
+mkdir -p .oxydra/users
+cp examples/config/agent.toml .oxydra/agent.toml
+cp examples/config/runner.toml .oxydra/runner.toml
+cp examples/config/runner-user.toml .oxydra/users/alice.toml
+```
+
+Set bare-minimum values in `.oxydra/runner.toml`:
+
+```toml
+default_tier = "container"   # recommended; microvm is experimental
+
+[guest_images]
+oxydra_vm = "ghcr.io/<owner-or-org>/oxydra-vm:<tag>"
+shell_vm  = "ghcr.io/<owner-or-org>/shell-vm:<tag>"
+
+[users.alice] # replace "alice" if you want a different user ID
+config_path = "users/alice.toml"
+```
+
+Set bare-minimum provider selection in `.oxydra/agent.toml`:
+
+```toml
+[selection]
+provider = "openrouter"
+model = "z-ai/glm-4.5-air:free"
+
+[providers.registry.openrouter]
+catalog_provider="openrouter"
+provider_type = "openai"
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+Set your provider API key before start:
+
+```bash
+export OPENROUTER_API_KEY=your-key
+# or OPENAPI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY
+```
+
+Read the inline comments in the copied config files to review optional overrides (memory, runtime limits, mounts, channels, subagents etc.).
+
+### 3) (Optional) pre-pull published Docker images from GHCR
+
+The release workflow publishes multi-arch manifests for `linux/amd64` and `linux/arm64`:
+
+```bash
+docker pull ghcr.io/<owner-or-org>/oxydra-vm:<tag>
+docker pull ghcr.io/<owner-or-org>/shell-vm:<tag>
+```
+
+Pre-pulling is optional: the runner automatically pulls missing images on startup.
 
 ## Configuration
 

@@ -14,6 +14,8 @@ jobs:
     name: Build macos arm64
     runs-on: macos-latest
     timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +25,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-macos-${{ runner.os }}-arm64
 
       - name: Install wasm32-wasip1 target
         run: rustup target add wasm32-wasip1

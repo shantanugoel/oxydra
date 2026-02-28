@@ -10,10 +10,20 @@ permissions:
   contents: read
 
 jobs:
-  build-linux-amd64:
-    name: Build linux amd64
-    runs-on: ubuntu-latest
+  build-linux:
+    name: Build linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs_on: ubuntu-latest
+          - arch: arm64
+            runs_on: ubuntu-24.04-arm
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,29 +33,11 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-linux-${{ runner.os }}-${{ matrix.arch }}
 
       - name: Install wasm32-wasip1 target
         run: rustup target add wasm32-wasip1
 
-      - name: Build Linux amd64 binaries
-        run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
-
-  build-linux-arm64:
-    name: Build linux arm64
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install wasm32-wasip1 target
-        run: rustup target add wasm32-wasip1
-
-      - name: Build Linux arm64 binaries
+      - name: Build Linux binaries
         run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui

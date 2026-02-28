@@ -19,14 +19,25 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
-  build-linux-amd64:
-    name: Build linux amd64 artifacts + image
-    runs-on: ubuntu-latest
+  build-linux:
+    name: Build linux ${{ matrix.arch }} artifacts + image
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs_on: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runs_on: ubuntu-24.04-arm
+            platform: linux/arm64
     env:
       IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'ghcr' }}
       IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,6 +49,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-${{ runner.os }}-${{ matrix.arch }}
 
       - name: Install wasm32-wasip1 target
         run: rustup target add wasm32-wasip1
@@ -71,20 +84,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Linux amd64 binaries
+      - name: Build Linux binaries
         run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
 
-      - name: Package linux amd64 release artifact
+      - name: Package linux release artifact
         run: |
-          mkdir -p dist/linux-amd64
-          cp target/release/runner dist/linux-amd64/runner
-          cp target/release/oxydra-vm dist/linux-amd64/oxydra-vm
-          cp target/release/shell-daemon dist/linux-amd64/shell-daemon
-          cp target/release/oxydra-tui dist/linux-amd64/oxydra-tui
-          tar -C dist/linux-amd64 -czf "dist/oxydra-${RELEASE_TAG}-linux-amd64.tar.gz" runner oxydra-vm shell-daemon oxydra-tui
-          shasum -a 256 "dist/oxydra-${RELEASE_TAG}-linux-amd64.tar.gz" > dist/SHA256SUMS-linux-amd64
+          mkdir -p "dist/linux-${{ matrix.arch }}"
+          cp target/release/runner "dist/linux-${{ matrix.arch }}/runner"
+          cp target/release/oxydra-vm "dist/linux-${{ matrix.arch }}/oxydra-vm"
+          cp target/release/shell-daemon "dist/linux-${{ matrix.arch }}/shell-daemon"
+          cp target/release/oxydra-tui "dist/linux-${{ matrix.arch }}/oxydra-tui"
+          tar -C "dist/linux-${{ matrix.arch }}" -czf "dist/oxydra-${RELEASE_TAG}-linux-${{ matrix.arch }}.tar.gz" runner oxydra-vm shell-daemon oxydra-tui
+          shasum -a 256 "dist/oxydra-${RELEASE_TAG}-linux-${{ matrix.arch }}.tar.gz" > "dist/SHA256SUMS-linux-${{ matrix.arch }}"
 
-      - name: Build and push linux amd64 Docker images
+      - name: Build and push linux Docker images
         run: |
           if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
             IMAGE_PREFIX="ghcr.io/${IMAGE_NAMESPACE}"
@@ -94,45 +107,43 @@ jobs:
           OXYDRA_IMAGE="${IMAGE_PREFIX}/oxydra-vm"
           SHELL_IMAGE="${IMAGE_PREFIX}/shell-vm"
 
-          mkdir -p docker/staging/linux-amd64
-          cp target/release/oxydra-vm docker/staging/linux-amd64/oxydra-vm
-          cp target/release/shell-daemon docker/staging/linux-amd64/shell-daemon
+          mkdir -p "docker/staging/linux-${{ matrix.arch }}"
+          cp target/release/oxydra-vm "docker/staging/linux-${{ matrix.arch }}/oxydra-vm"
+          cp target/release/shell-daemon "docker/staging/linux-${{ matrix.arch }}/shell-daemon"
 
           docker build \
-            --platform linux/amd64 \
-            --build-arg "BINARY=docker/staging/linux-amd64/oxydra-vm" \
+            --platform "${{ matrix.platform }}" \
+            --build-arg "BINARY=docker/staging/linux-${{ matrix.arch }}/oxydra-vm" \
             --target oxydra-vm \
-            -t "${OXYDRA_IMAGE}:${RELEASE_TAG}-linux-amd64" \
+            -t "${OXYDRA_IMAGE}:${RELEASE_TAG}-linux-${{ matrix.arch }}" \
             -f docker/Dockerfile.prebuilt \
             .
 
           docker build \
-            --platform linux/amd64 \
-            --build-arg "BINARY=docker/staging/linux-amd64/shell-daemon" \
+            --platform "${{ matrix.platform }}" \
+            --build-arg "BINARY=docker/staging/linux-${{ matrix.arch }}/shell-daemon" \
             --target shell-vm \
-            -t "${SHELL_IMAGE}:${RELEASE_TAG}-linux-amd64" \
+            -t "${SHELL_IMAGE}:${RELEASE_TAG}-linux-${{ matrix.arch }}" \
             -f docker/Dockerfile.prebuilt \
             .
 
-          docker push "${OXYDRA_IMAGE}:${RELEASE_TAG}-linux-amd64"
-          docker push "${SHELL_IMAGE}:${RELEASE_TAG}-linux-amd64"
+          docker push "${OXYDRA_IMAGE}:${RELEASE_TAG}-linux-${{ matrix.arch }}"
+          docker push "${SHELL_IMAGE}:${RELEASE_TAG}-linux-${{ matrix.arch }}"
 
-      - name: Upload linux amd64 artifacts
+      - name: Upload linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux-amd64
+          name: release-linux-${{ matrix.arch }}
           path: |
-            dist/oxydra-${{ env.RELEASE_TAG }}-linux-amd64.tar.gz
-            dist/SHA256SUMS-linux-amd64
+            dist/oxydra-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
+            dist/SHA256SUMS-linux-${{ matrix.arch }}
 
-  build-linux-arm64:
-    name: Build linux arm64 artifacts + image
-    runs-on: ubuntu-24.04-arm
+  build-macos-arm64:
+    name: Build macos arm64 artifacts
+    runs-on: macos-latest
     timeout-minutes: 120
     env:
-      IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'ghcr' }}
-      IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -144,98 +155,37 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-${{ runner.os }}-arm64
 
       - name: Install wasm32-wasip1 target
         run: rustup target add wasm32-wasip1
 
-      - name: Resolve image namespace
-        run: |
-          if [[ -n "${IMAGE_NAMESPACE}" ]]; then
-            RESOLVED_NAMESPACE="${IMAGE_NAMESPACE}"
-          elif [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
-            RESOLVED_NAMESPACE="${GITHUB_REPOSITORY_OWNER}"
-          else
-            RESOLVED_NAMESPACE="${DOCKERHUB_USERNAME}"
-          fi
-          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
-            RESOLVED_NAMESPACE="$(echo "${RESOLVED_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
-          fi
-          echo "IMAGE_NAMESPACE=${RESOLVED_NAMESPACE}" >> "${GITHUB_ENV}"
-
-      - name: Log in to GHCR
-        if: env.IMAGE_REGISTRY == 'ghcr'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Docker Hub
-        if: env.IMAGE_REGISTRY == 'dockerhub'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build Linux arm64 binaries
+      - name: Build macOS binaries
         run: cargo build --release --bin runner --bin oxydra-vm --bin shell-daemon --bin oxydra-tui
 
-      - name: Package linux arm64 release artifact
+      - name: Package macOS release artifact
         run: |
-          mkdir -p dist/linux-arm64
-          cp target/release/runner dist/linux-arm64/runner
-          cp target/release/oxydra-vm dist/linux-arm64/oxydra-vm
-          cp target/release/shell-daemon dist/linux-arm64/shell-daemon
-          cp target/release/oxydra-tui dist/linux-arm64/oxydra-tui
-          tar -C dist/linux-arm64 -czf "dist/oxydra-${RELEASE_TAG}-linux-arm64.tar.gz" runner oxydra-vm shell-daemon oxydra-tui
-          shasum -a 256 "dist/oxydra-${RELEASE_TAG}-linux-arm64.tar.gz" > dist/SHA256SUMS-linux-arm64
+          mkdir -p dist/macos-arm64
+          cp target/release/runner dist/macos-arm64/runner
+          cp target/release/oxydra-vm dist/macos-arm64/oxydra-vm
+          cp target/release/shell-daemon dist/macos-arm64/shell-daemon
+          cp target/release/oxydra-tui dist/macos-arm64/oxydra-tui
+          tar -C dist/macos-arm64 -czf "dist/oxydra-${RELEASE_TAG}-macos-arm64.tar.gz" runner oxydra-vm shell-daemon oxydra-tui
+          shasum -a 256 "dist/oxydra-${RELEASE_TAG}-macos-arm64.tar.gz" > dist/SHA256SUMS-macos-arm64
 
-      - name: Build and push linux arm64 Docker images
-        run: |
-          if [[ "${IMAGE_REGISTRY}" == "ghcr" ]]; then
-            IMAGE_PREFIX="ghcr.io/${IMAGE_NAMESPACE}"
-          else
-            IMAGE_PREFIX="${IMAGE_NAMESPACE}"
-          fi
-          OXYDRA_IMAGE="${IMAGE_PREFIX}/oxydra-vm"
-          SHELL_IMAGE="${IMAGE_PREFIX}/shell-vm"
-
-          mkdir -p docker/staging/linux-arm64
-          cp target/release/oxydra-vm docker/staging/linux-arm64/oxydra-vm
-          cp target/release/shell-daemon docker/staging/linux-arm64/shell-daemon
-
-          docker build \
-            --platform linux/arm64 \
-            --build-arg "BINARY=docker/staging/linux-arm64/oxydra-vm" \
-            --target oxydra-vm \
-            -t "${OXYDRA_IMAGE}:${RELEASE_TAG}-linux-arm64" \
-            -f docker/Dockerfile.prebuilt \
-            .
-
-          docker build \
-            --platform linux/arm64 \
-            --build-arg "BINARY=docker/staging/linux-arm64/shell-daemon" \
-            --target shell-vm \
-            -t "${SHELL_IMAGE}:${RELEASE_TAG}-linux-arm64" \
-            -f docker/Dockerfile.prebuilt \
-            .
-
-          docker push "${OXYDRA_IMAGE}:${RELEASE_TAG}-linux-arm64"
-          docker push "${SHELL_IMAGE}:${RELEASE_TAG}-linux-arm64"
-
-      - name: Upload linux arm64 artifacts
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux-arm64
+          name: release-macos-arm64
           path: |
-            dist/oxydra-${{ env.RELEASE_TAG }}-linux-arm64.tar.gz
-            dist/SHA256SUMS-linux-arm64
+            dist/oxydra-${{ env.RELEASE_TAG }}-macos-arm64.tar.gz
+            dist/SHA256SUMS-macos-arm64
 
   publish-linux-manifests:
     name: Publish multi-arch image manifests
     needs:
-      - build-linux-amd64
-      - build-linux-arm64
+      - build-linux
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -295,38 +245,10 @@ jobs:
           docker manifest push "${OXYDRA_IMAGE}:${RELEASE_TAG}"
           docker manifest push "${SHELL_IMAGE}:${RELEASE_TAG}"
 
-  build-macos-arm64:
-    name: Build macos arm64 artifacts
-    runs-on: macos-14
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build macOS artifacts
-        run: ./scripts/build-release-assets.sh --platforms macos-arm64 --tag "${RELEASE_TAG}" --no-docker
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-macos-arm64
-          path: |
-            dist/oxydra-${{ env.RELEASE_TAG }}-macos-arm64.tar.gz
-            dist/SHA256SUMS
-
   create-release:
     name: Create GitHub release
     needs:
-      - build-linux-amd64
-      - build-linux-arm64
+      - build-linux
       - publish-linux-manifests
       - build-macos-arm64
     runs-on: ubuntu-latest
@@ -363,7 +285,7 @@ jobs:
           cp artifacts/linux-amd64/*.tar.gz release-assets/
           cp artifacts/linux-arm64/*.tar.gz release-assets/
           cp artifacts/macos/*.tar.gz release-assets/
-          cat artifacts/linux-amd64/SHA256SUMS-linux-amd64 artifacts/linux-arm64/SHA256SUMS-linux-arm64 artifacts/macos/SHA256SUMS | sort -u > release-assets/SHA256SUMS
+          cat artifacts/linux-amd64/SHA256SUMS-linux-amd64 artifacts/linux-arm64/SHA256SUMS-linux-arm64 artifacts/macos/SHA256SUMS-macos-arm64 | sort -u > release-assets/SHA256SUMS
 
       - name: Generate release summary
         run: |

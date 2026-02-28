@@ -51,8 +51,8 @@ MicroVM support is currently experimental; for most users, set the container tie
 default_tier = "container"
 
 [guest_images]
-oxydra_vm = "ghcr.io/<owner-or-org>/oxydra-vm:<tag>"
-shell_vm  = "ghcr.io/<owner-or-org>/shell-vm:<tag>"
+oxydra_vm = "ghcr.io/shantanugoel/oxydra-vm:<tag>"
+shell_vm  = "ghcr.io/shantanugoel/shell-vm:<tag>"
 
 [users.alice] # replace "alice" if you want a different user ID
 config_path = "users/alice.toml"

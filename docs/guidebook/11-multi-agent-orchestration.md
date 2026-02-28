@@ -1,5 +1,10 @@
 # Chapter 11: Multi-Agent Orchestration
 
+> **Status:** Mixed (partially implemented)
+> **Implemented:** Agent definitions, agent-specific model/provider routing, `delegate_to_agent` tool, delegation executor, output attachment propagation
+> **Remaining:** State graph engine, lane-based queueing, advanced session tree tracking
+> **Last verified against code:** 2026-02-28
+
 ## Overview
 
 Multi-agent orchestration extends Oxydra from a single-agent runtime into a network of specialized subagents coordinated by a master router. Instead of overloading one LLM context with coding, research, and communication tasks simultaneously, the system can delegate subtasks to purpose-built agents with their own system prompts, tool registries, security capability sets, and model selections.
@@ -94,7 +99,7 @@ State transitions are evaluated deterministically — the runtime checks guard c
 
 ### Lane-Based Queueing
 
-The gateway currently uses mutex-based rejection (a new turn is rejected if one is already active). Multi-agent orchestration upgrades this to lane-based queueing:
+The gateway currently uses semaphore-based FIFO queueing for per-user turn concurrency (default 10 concurrent, bounded queue). Multi-agent orchestration extends this with lane-based queueing:
 
 - Messages for the same user are queued sequentially in a dedicated processing lane (identified by `user_id` hash)
 - Messages for different users execute fully in parallel
@@ -143,7 +148,7 @@ Multi-agent orchestration builds on existing infrastructure:
 1. **`SubagentBrief` type** — defined in `types`, consumed by `runtime` and `gateway`
 2. **Subagent spawning** — `AgentRuntime` gets a `spawn_subagent()` method that constructs a child runtime with the brief's constraints
 3. **State graph engine** — a new module in `gateway` that evaluates declarative graph definitions
-4. **Lane-based queue** — replaces the mutex-based rejection in `gateway` session management
+4. **Lane-based queue** — extends the semaphore-based queueing in `gateway` with dedicated lanes for background tasks
 5. **Session tree tracking** — extends `UserSessionState` to maintain parent-child relationships
 
 The `AgentRuntime` and `CancellationToken` patterns are reused without modification. The gateway's WebSocket protocol gains new frame types for delegation status and subagent progress.
@@ -154,4 +159,4 @@ The `AgentRuntime` and `CancellationToken` patterns are reused without modificat
 - Subagents share the user's workspace and memory namespace but get isolated conversation contexts
 - Subagent tool registries are always subsets of the parent's tools — a subagent cannot escalate its own capabilities
 - Budget cascading is strict: the sum of all subagent budgets cannot exceed the parent's remaining budget
-- The OpenAI Responses API (`/v1/responses` with `previous_response_id` chaining) is particularly well-suited for subagent delegation — spawning a subagent with a fresh response chain provides clean context isolation without duplicating memory payloads. This provider is planned but not yet implemented (see Chapter 3 and Chapter 15, Gap 5)
+- The OpenAI Responses API (`/v1/responses` with `previous_response_id` chaining) is particularly well-suited for subagent delegation — spawning a subagent with a fresh response chain provides clean context isolation without duplicating memory payloads. This provider is implemented (see Chapter 3, Responses Provider section) and available for delegation routing via agent-specific `[selection]` overrides.

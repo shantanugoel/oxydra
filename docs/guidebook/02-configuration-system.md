@@ -1,5 +1,9 @@
 # Chapter 2: Configuration System
 
+> **Key code entrypoints:** `types/src/config.rs` (all config structs), `types/src/runner.rs` (runner config), `provider/src/lib.rs` (`resolve_api_key_for_entry()`), runtime bootstrap in `runner/src/bootstrap.rs` (figment loading)
+>
+> **Change-prone areas:** Provider registry entries (new providers/fields), scheduler config defaults, gateway session limits
+
 ## Overview
 
 Oxydra uses a deterministic, layered configuration system built on the `figment` crate. Every configuration value has a single, auditable source, and the system fails fast on invalid configuration at startup.

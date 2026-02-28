@@ -26,6 +26,24 @@ model    = "gpt-4o-mini"
 # Delegation (`delegate_to_agent`) uses the same override semantics, except
 # agents without a selection inherit the caller's current provider/model.
 
+# [agents.multimodal_looker]
+# system_prompt = "You are a multimodal looker, skilled at gathering and summarizing information from given media"
+# tools = ["file_read"]
+# max_turns = 12
+# 
+# [agents.multimodal_looker.selection]
+# provider = "gemini"
+# model = "gemini-3-flash-preview"
+# 
+# [agents.imager]
+# system_prompt = "You are a creative artist, skilled at generating and editing images based on user requests. You can create new images or modify existing ones to meet the user's needs."
+# tools = []
+# max_turns = 10
+# 
+# [agents.imager.selection]
+# provider = "gemini"
+# model = "gemini-3.1-flash-image-preview"
+
 # [agents.researcher]
 # system_prompt = "You are a research specialist focused on gathering and summarizing evidence."
 # tools = ["web_search", "web_fetch", "file_read"]

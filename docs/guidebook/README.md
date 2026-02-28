@@ -77,8 +77,23 @@ Add the following step before any `cargo build` or `cargo test` step:
 ## Conventions
 
 - **Chapters 1-10** describe the system as built. Code references point to actual implementations.
-- **Chapters 11-14** are mixed-status chapters: Chapter 12 and parts of Chapters 11/14 are implemented, while Chapters 13 and remaining sections are forward-looking.
+- **Chapters 11-14** are mixed-status chapters: Chapter 12 and parts of Chapters 11/14 are implemented, while Chapters 13 and remaining sections are forward-looking. Each of these chapters has a **status header** at the top indicating what is implemented vs. remaining.
 - **Chapter 15** tracks the phase-by-phase completion status, in-progress work, and open gaps.
+- **Status headers** — Mixed/planned chapters include a status block at the top with implementation status, last-verified date, and known gaps. When updating these chapters, keep the status header current.
+
+## Cross-Document Consistency
+
+The README (`README.md`) and this guidebook serve different audiences:
+
+| Topic | Canonical Source | Other docs should... |
+|-------|-----------------|---------------------|
+| End-user commands, setup paths | `README.md` | Link to README, not duplicate |
+| Runtime behavior defaults (queueing, limits, timeouts) | Guidebook chapter(s) | README references defaults but guidebook is authoritative |
+| Feature maturity (implemented/experimental/planned) | Guidebook chapter status headers + Chapter 15 | README uses consistent wording |
+| Provider/model support | Chapter 3 (Provider Layer) | README lists providers; chapter has implementation details |
+| Configuration options | Chapter 2 (Configuration System) | README shows minimal examples; chapter is exhaustive |
+
+**When making changes:** If a behavior default changes, update both the relevant guidebook chapter and the README. If a feature status changes, update the chapter status header and Chapter 15.
 
 ## Canonical Source
 

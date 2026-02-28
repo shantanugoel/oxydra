@@ -417,10 +417,9 @@ TurnCompleted { final_message, usage } → WebSocket → TUI
 
 ## Current Limitations
 
-- **Per-user concurrent turn limit:** Configurable via `max_concurrent_turns` (default: 3). When exceeded, new turns are rejected with an error frame rather than queued
-- **No external channels yet:** The Telegram adapter is implemented (see Chapter 12) including sender auth, channel session mapping, edit-message streaming, and command interception. It runs in-process alongside the gateway, calling the internal API directly. Future channels (Discord, Slack, WhatsApp) follow the same pattern.
-- **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
-- **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is planned for Phase 15
+- **Per-user concurrent turn limit:** Configurable via `max_concurrent_turns_per_user` (default: 10). When the limit is reached, new top-level turns queue fairly (bounded FIFO via Tokio `Semaphore`). When the queue itself is full (`max_sessions_per_user`, default 50), new turns are rejected with an error frame. Subagent turns execute under their parent turn's permit and do not consume queue slots.
+- **External channels:** The Telegram adapter is implemented (see Chapter 12) including sender auth, channel session mapping, edit-message streaming, and command interception. It runs in-process alongside the gateway, calling the internal API directly. Future channels (Discord, Slack, WhatsApp) follow the same pattern but are not yet implemented.
+- **No multi-agent routing:** The gateway currently routes to a single runtime instance per user; multi-agent delegation with subagent spawning is in progress (Phase 15)
 - **Scheduled notifications are origin-routed:** Notifications are delivered to the channel that created the schedule. If the user was in a TUI session and that session is no longer connected, the notification is lost (results persist in memory and can be retrieved via `schedule_runs`/`schedule_run_output` tools). External channels with registered `ProactiveSender`s (e.g. Telegram) can deliver notifications even when the user is offline.
 
 ## Inline Attachment Ingress Limits

@@ -1,5 +1,10 @@
 # Chapter 14: Productization
 
+> **Status:** Mixed
+> **Implemented:** Model catalog governance (models.dev-aligned, snapshot commands, caps overrides), session lifecycle controls, scheduler system
+> **Remaining:** MCP support, skill system, persona governance
+> **Last verified against code:** 2026-02-28
+
 ## Overview
 
 With the core runtime, isolation model, and channel infrastructure in place, remaining product surfaces promote backlog concerns into first-class, typed architecture. This chapter covers model catalog governance, explicit session lifecycle controls, scheduled execution, skill loading, persona governance, and MCP integration.
@@ -10,7 +15,7 @@ These capabilities share a common principle: they are **governed execution surfa
 
 ### Current State
 
-The model catalog is currently a pinned JSON snapshot (`models.json`) embedded at compile time. It contains 8 models across OpenAI and Anthropic with typed metadata: `ModelId`, `ProviderId`, capability flags (`supports_tools`, `supports_streaming`), token limits, and pricing.
+The model catalog is built on a three-tier resolution strategy: cached catalog (fetched from models.dev), auto-fetch on first use, and a compiled-in pinned snapshot (`pinned_model_catalog.json`) as fallback. The pinned snapshot contains 93 models across OpenAI, Anthropic, and Google with full models.dev-aligned metadata: capability flags (`tool_call`, `reasoning`, `structured_output`), token limits, pricing, modalities, and more. An Oxydra-specific `oxydra_caps_overrides.json` overlay provides additional capabilities not expressed by models.dev (e.g. streaming support, deprecation status).
 
 ### Evolution
 

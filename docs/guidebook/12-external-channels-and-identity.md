@@ -1,5 +1,10 @@
 # Chapter 12: External Channels and Identity
 
+> **Status:** Implemented
+> **Implemented:** Telegram adapter (long-polling, edit-message streaming, command interception), sender auth/audit, durable channel session mapping, forum-topic threading, multi-modal input/output, `send_media` tool, proactive notifications
+> **Remaining:** Discord, Slack, WhatsApp adapters (deferred)
+> **Last verified against code:** 2026-02-28
+
 ## Overview
 
 Oxydra supports external channel adapters (Telegram, and future Discord/Slack/WhatsApp) that run as in-process components inside the VM alongside the gateway. Each adapter calls the gateway's internal API directly — no WebSocket overhead.

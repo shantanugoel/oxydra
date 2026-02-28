@@ -8,6 +8,7 @@ A high-performance AI agent orchestrator written in Rust. Oxydra provides a modu
 
 - **Provider-agnostic LLM integration** — OpenAI, Anthropic, Google Gemini, and OpenAI Responses API with SSE streaming, automatic retries, and a dynamic model catalog (models.dev-aligned with Oxydra capability overlays)
 - **Multi Agent Orchestration** - Supports creating custom subagents with their own purpose and model selections that the orchestrator can delegate special tasks to
+- **Completely Async framework** - You can chat with your agent across multiple chats in parallel. E.g. you can create a telegram group with multiple topics, or open multiple TUI sessions and all will work in parallel simultaneously without blocking your agent
 - **Multi-modal input** — Users can send images, audio, video, PDFs, and documents from supported channels (Telegram); media is validated against model and provider capabilities then forwarded as inline attachments to the LLM
 - **Tool system** — `#[tool]` proc-macro for defining tools with automatic JSON Schema generation and safety tiers, plus path-hardened virtual workspace handling (`/shared`, `/tmp`, `/vault`) across file, vault, and media tools
 - **Agent runtime** — Turn-loop state machine with tool dispatch, self-correction, context budget management, cost limits, and a built-in autonomy protocol (plan → recall → execute → reflect → learn) with structured retry escalation

@@ -408,7 +408,6 @@ Artifacts are created in `dist/`:
 - `oxydra-<tag>-macos-arm64.tar.gz`
 - `oxydra-<tag>-linux-amd64.tar.gz`
 - `oxydra-<tag>-linux-arm64.tar.gz`
-- `SHA256SUMS`
 
 ### Run from Built Artifacts
 
@@ -452,13 +451,7 @@ Then start normally:
    - `oxydra-<tag>-macos-arm64.tar.gz` (macOS Apple Silicon)
    - `oxydra-<tag>-linux-amd64.tar.gz` (Linux PC)
    - `oxydra-<tag>-linux-arm64.tar.gz` (Raspberry Pi 64-bit / ARM64)
-3. Verify checksums:
-
-```bash
-shasum -a 256 -c SHA256SUMS
-```
-
-4. Extract and place binaries on `PATH`:
+3. Extract and place binaries on `PATH`:
 
 ```bash
 tar -xzf oxydra-<tag>-linux-amd64.tar.gz

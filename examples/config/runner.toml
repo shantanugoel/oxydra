@@ -16,8 +16,8 @@ default_tier = "micro_vm"
 # --- Guest VM images ---
 # OCI image references used when spawning guest VMs.
 [guest_images]
-oxydra_vm = "ghcr.io/shantanugoel/oxydra-vm:0.1.1"   # The agent runtime guest image
-shell_vm  = "ghcr.io/shantanugoel/shell-vm:0.1.1"    # The shell/browser sidecar image
+oxydra_vm = "ghcr.io/shantanugoel/oxydra-vm:0.1.2"   # The agent runtime guest image
+shell_vm  = "ghcr.io/shantanugoel/shell-vm:0.1.2"    # The shell/browser sidecar image
 
 # --- User registrations ---
 # Map of user IDs to their per-user config file paths.

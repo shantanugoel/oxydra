@@ -307,8 +307,8 @@ jobs:
           {
             echo "## Build and install instructions"
             echo
-            echo "- Build from source/local Docker images: https://github.com/${GITHUB_REPOSITORY}/blob/${CURRENT_TAG}/README.md#local-build-and-run-guide"
-            echo "- Install from GitHub releases + GHCR: https://github.com/${GITHUB_REPOSITORY}/blob/${CURRENT_TAG}/README.md#install-from-published-releases-and-ghcr"
+            echo "- Build from source/local Docker images: https://github.com/${GITHUB_REPOSITORY}/blob/${CURRENT_TAG}/README.md#part-3--use-latest-from-repository-and-contribute"
+            echo "- Install from GitHub releases + GHCR: https://github.com/${GITHUB_REPOSITORY}/blob/${CURRENT_TAG}/README.md#part-2--quick-start-install-from-releases"
             echo
             if [[ -n "${PREVIOUS_TAG}" ]]; then
               echo "## Changes since ${PREVIOUS_TAG}"

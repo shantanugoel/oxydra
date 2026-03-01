@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -290,6 +290,53 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
         .await
         .expect("sidecar-backed bash execution should succeed");
     assert_eq!(output, "ws5-sidecar");
+    assert!(availability.shell.is_ready());
+    assert!(availability.browser.is_ready());
+
+    server_task.abort();
+    let _ = fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bootstrap_runtime_tools_waits_for_sidecar_socket_before_disabling_shell() {
+    let socket_path = temp_socket_path("ws5-shell-daemon-delayed");
+    let _ = fs::remove_file(&socket_path);
+
+    let delayed_socket_path = socket_path.clone();
+    let server_task = tokio::spawn(async move {
+        sleep(Duration::from_millis(500)).await;
+        let listener = UnixListener::bind(&delayed_socket_path)
+            .expect("delayed test unix listener should bind socket path");
+        let server = ShellDaemonServer::default();
+        let _ = server.serve_unix_listener(listener).await;
+    });
+
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: "/tmp/oxydra-test".to_owned(),
+        sidecar_endpoint: Some(SidecarEndpoint {
+            transport: SidecarTransport::Unix,
+            address: socket_path.to_string_lossy().into_owned(),
+        }),
+        runtime_policy: None,
+        startup_status: None,
+        channels: None,
+    };
+    let RuntimeToolsBootstrap {
+        registry,
+        availability,
+    } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
+
+    let output = registry
+        .execute(
+            SHELL_EXEC_TOOL_NAME,
+            r#"{"command":"printf ws5-delayed-sidecar"}"#,
+        )
+        .await
+        .expect("sidecar-backed bash execution should succeed after delayed socket startup");
+    assert_eq!(output, "ws5-delayed-sidecar");
     assert!(availability.shell.is_ready());
     assert!(availability.browser.is_ready());
 

@@ -80,6 +80,9 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
 const VAULT_COPYTO_READ_OPERATION: &str = "vault_copyto_read";
 const VAULT_COPYTO_WRITE_OPERATION: &str = "vault_copyto_write";
+// Retry sidecar dial for up to 15s (every 250ms) during bootstrap. This is
+// long enough to absorb normal container start jitter, while still failing
+// fast when the sidecar is genuinely unavailable.
 const SIDECAR_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SIDECAR_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 static NEXT_VAULT_COPYTO_OPERATION_NUMBER: AtomicU64 = AtomicU64::new(0);

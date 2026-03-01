@@ -1615,14 +1615,23 @@ async fn launch_docker_container_async(
             if let Some(status) = progress.status
                 && !status.trim().is_empty()
             {
-                let detail = progress.id.filter(|value| !value.trim().is_empty());
-                info!(
-                    endpoint = %params.endpoint.label(),
-                    image = %params.image,
-                    status = %status,
-                    detail = detail.as_deref().unwrap_or(""),
-                    "docker image pull progress"
-                );
+                let progress_id = progress.id.filter(|value| !value.trim().is_empty());
+                if let Some(progress_id) = progress_id {
+                    info!(
+                        endpoint = %params.endpoint.label(),
+                        image = %params.image,
+                        status = %status,
+                        progress_id = %progress_id,
+                        "docker image pull progress"
+                    );
+                } else {
+                    info!(
+                        endpoint = %params.endpoint.label(),
+                        image = %params.image,
+                        status = %status,
+                        "docker image pull progress"
+                    );
+                }
             }
         }
         info!(

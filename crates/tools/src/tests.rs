@@ -300,12 +300,14 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
 #[cfg(unix)]
 #[tokio::test]
 async fn bootstrap_runtime_tools_waits_for_sidecar_socket_before_disabling_shell() {
+    const DELAYED_SIDECAR_BIND: Duration = Duration::from_millis(500);
     let socket_path = temp_socket_path("ws5-shell-daemon-delayed");
     let _ = fs::remove_file(&socket_path);
 
     let delayed_socket_path = socket_path.clone();
     let server_task = tokio::spawn(async move {
-        sleep(Duration::from_millis(500)).await;
+        // Delay sidecar bind to exercise bootstrap retry behavior.
+        sleep(DELAYED_SIDECAR_BIND).await;
         let listener = UnixListener::bind(&delayed_socket_path)
             .expect("delayed test unix listener should bind socket path");
         let server = ShellDaemonServer::default();

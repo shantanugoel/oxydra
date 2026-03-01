@@ -221,27 +221,6 @@ impl CrateSandboxBackend {
             let _ = delete_docker_sandbox_vm_sync(socket, name);
         };
 
-        if let Err(error) =
-            load_image_into_sandbox_vm(&request.guest_images.oxydra_vm, &vm_socket_str)
-        {
-            cleanup_delete(sandbox_socket_path, vm_info.vm_name);
-            return Err(error);
-        }
-
-        let runtime = match self.launch_docker_guest(
-            &docker_endpoint,
-            request,
-            "micro_vm",
-            RunnerGuestRole::OxydraVm,
-            &request.guest_images.oxydra_vm,
-        ) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                cleanup_delete(sandbox_socket_path, vm_info.vm_name);
-                return Err(error);
-            }
-        };
-
         let mut warnings = Vec::new();
         let mut degraded_reasons = Vec::new();
         let mut sidecar = None;
@@ -275,6 +254,33 @@ impl CrateSandboxBackend {
                 }
             }
         }
+
+        if let Err(error) =
+            load_image_into_sandbox_vm(&request.guest_images.oxydra_vm, &vm_socket_str)
+        {
+            if let Some(mut handle) = sidecar.take() {
+                let _ = handle.shutdown();
+            }
+            cleanup_delete(sandbox_socket_path, vm_info.vm_name);
+            return Err(error);
+        }
+
+        let runtime = match self.launch_docker_guest(
+            &docker_endpoint,
+            request,
+            "micro_vm",
+            RunnerGuestRole::OxydraVm,
+            &request.guest_images.oxydra_vm,
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if let Some(mut handle) = sidecar.take() {
+                    let _ = handle.shutdown();
+                }
+                cleanup_delete(sandbox_socket_path, vm_info.vm_name);
+                return Err(error);
+            }
+        };
 
         let sidecar_endpoint = sidecar.as_ref().map(|_| SidecarEndpoint {
             transport: SidecarTransport::Unix,
@@ -311,14 +317,6 @@ impl CrateSandboxBackend {
         request: &SandboxLaunchRequest,
     ) -> Result<SandboxLaunch, RunnerError> {
         let docker_endpoint = DockerEndpoint::Local;
-        let runtime = self.launch_docker_guest(
-            &docker_endpoint,
-            request,
-            "container",
-            RunnerGuestRole::OxydraVm,
-            &request.guest_images.oxydra_vm,
-        )?;
-
         let mut warnings = Vec::new();
         let mut degraded_reasons = Vec::new();
         let mut sidecar = None;
@@ -341,6 +339,22 @@ impl CrateSandboxBackend {
                 }
             }
         }
+
+        let runtime = match self.launch_docker_guest(
+            &docker_endpoint,
+            request,
+            "container",
+            RunnerGuestRole::OxydraVm,
+            &request.guest_images.oxydra_vm,
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if let Some(mut handle) = sidecar.take() {
+                    let _ = handle.shutdown();
+                }
+                return Err(error);
+            }
+        };
 
         let sidecar_endpoint = sidecar.as_ref().map(|_| SidecarEndpoint {
             transport: SidecarTransport::Unix,

@@ -112,7 +112,18 @@ impl AgentRuntime {
             _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
             timed = tokio::time::timeout(self.limits.turn_timeout, self.tool_registry.execute_with_context(name, &arg_str, tool_context)) => match timed {
                 Ok(output) => output.map_err(RuntimeError::from),
-                Err(_) => Err(RuntimeError::BudgetExceeded),
+                Err(_) => {
+                    let timeout = self.limits.turn_timeout;
+                    tracing::warn!(
+                        tool = name,
+                        timeout_ms = timeout.as_millis(),
+                        "tool execution exceeded turn timeout"
+                    );
+                    Err(RuntimeError::Tool(ToolError::ExecutionFailed {
+                        tool: name.to_string(),
+                        message: format!("tool execution timed out after {timeout:?}"),
+                    }))
+                }
             }
         }
     }

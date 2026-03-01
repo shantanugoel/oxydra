@@ -18,7 +18,7 @@ const FILE_WRITE_BYTES_OPERATION: &str = "file_write_bytes";
 const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 
 /// Default timeout for `attachment_save` operations in seconds.
-const DEFAULT_TIMEOUT_SECS: u64 = 40;
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Deserialize)]
 struct AttachmentSaveArgs {

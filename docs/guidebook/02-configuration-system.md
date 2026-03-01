@@ -343,17 +343,17 @@ Configures the `attachment_save` tool for persisting inbound user attachments:
 
 ```rust
 pub struct AttachmentSaveConfig {
-    pub timeout_secs: u64, // Default: 40
+    pub timeout_secs: u64, // Default: 60
 }
 ```
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `timeout_secs` | `40` | Timeout in seconds for `attachment_save` operations |
+| `timeout_secs` | `60` | Timeout in seconds for `attachment_save` operations |
 
 ```toml
 [tools.attachment_save]
-timeout_secs = 60   # Increase timeout for large files on slow storage
+timeout_secs = 90   # Increase timeout for large files on slow storage
 ```
 
 ### `ReliabilityConfig`

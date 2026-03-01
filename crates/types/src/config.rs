@@ -642,7 +642,7 @@ pub struct ToolsConfig {
 /// Configuration for the `attachment_save` tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentSaveConfig {
-    /// Timeout in seconds for save operations. Default: 40.
+    /// Timeout in seconds for save operations. Default: 60.
     #[serde(default = "default_attachment_save_timeout_secs")]
     pub timeout_secs: u64,
 }
@@ -656,7 +656,7 @@ impl Default for AttachmentSaveConfig {
 }
 
 fn default_attachment_save_timeout_secs() -> u64 {
-    40
+    60
 }
 
 /// Shell tool security policy configuration.

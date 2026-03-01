@@ -111,6 +111,7 @@ jitter          = false # Add randomized jitter to backoff
 # Azure OpenAI, or a local proxy).
 
 # --- Example: Google Gemini ---
+# For non-catalog or preview model IDs, set catalog.skip_catalog_validation = true.
 # [providers.registry.gemini]
 # provider_type = "gemini" # Configures the `type` of API to communicate upstream
 # api_key_env = "GEMINI_API_KEY"

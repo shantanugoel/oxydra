@@ -165,6 +165,30 @@ copy_or_download_config_template() {
   log "Downloaded template: ${destination}"
 }
 
+patch_runner_template() {
+  local runner_config="$1"
+  local patched="${runner_config}.patched"
+  [[ -f "$runner_config" ]] || return
+
+  awk -v tag="$TAG" '
+    /^[[:space:]]*workspace_root[[:space:]]*=/ {
+      print "workspace_root = \"workspaces\""
+      next
+    }
+    /^[[:space:]]*oxydra_vm[[:space:]]*=/ {
+      print "oxydra_vm = \"ghcr.io/shantanugoel/oxydra-vm:" tag "\""
+      next
+    }
+    /^[[:space:]]*shell_vm[[:space:]]*=/ {
+      print "shell_vm  = \"ghcr.io/shantanugoel/shell-vm:" tag "\""
+      next
+    }
+    { print }
+  ' "$runner_config" > "$patched"
+
+  mv "$patched" "$runner_config"
+}
+
 initialize_config_templates() {
   local base_dir="$1"
   local config_root="${base_dir}/.oxydra"
@@ -175,6 +199,7 @@ initialize_config_templates() {
   copy_or_download_config_template "agent.toml" "${config_root}/agent.toml"
   copy_or_download_config_template "runner.toml" "${config_root}/runner.toml"
   copy_or_download_config_template "runner-user.toml" "${users_dir}/alice.toml"
+  patch_runner_template "${config_root}/runner.toml"
 
   cat <<EOF
 [oxydra-install] Config templates are ready in ${config_root}
@@ -187,9 +212,9 @@ initialize_config_templates() {
   2) On Linux, ensure Docker is running and your user is in the docker group:
        sudo systemctl enable --now docker
        sudo usermod -aG docker \$USER && newgrp docker
-     The guest images are public on ghcr.io and pull without authentication.
-     If you see a 404 "manifest unknown" error, verify the tag in runner.toml
-     includes the "v" prefix (e.g. v${TAG}, not ${TAG#v}).
+      The guest images are public on ghcr.io and pull without authentication.
+      If you see a 404 "manifest unknown" error, verify the tag in runner.toml
+      includes the "v" prefix (e.g. ${TAG}, not ${TAG#v}).
   3) ${config_root}/agent.toml
      - set [selection].provider and [selection].model
      - ensure matching [providers.registry.<name>] api_key_env is correct

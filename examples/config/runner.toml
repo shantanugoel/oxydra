@@ -7,7 +7,7 @@
 
 # Root directory under which per-user workspace directories are created.
 # Each user gets <workspace_root>/<user_id>/{shared,tmp,vault}.
-workspace_root = ".oxydra/workspaces"
+workspace_root = "workspaces"
 
 # Default sandbox isolation tier for all users.
 # Options: "micro_vm" (strongest), "container", "process" (weakest, dev only)

@@ -18,6 +18,7 @@ pub(crate) enum ConfigType {
     User,
 }
 
+#[derive(Debug)]
 struct ConfigMigration {
     from_version: &'static str,
     to_version: &'static str,
@@ -103,9 +104,21 @@ pub(crate) fn migrate_config_file_if_needed(
         operation: "backup",
         source,
     })?;
-    fs::write(path, document.to_string()).map_err(|source| RunnerError::ConfigMigrationIo {
+
+    // Write migrated content to a temporary file in the same directory, then
+    // atomically rename it over the original. This avoids leaving a truncated
+    // config on disk if the process is interrupted mid-write.
+    let tmp_path = backup_path_for(path); // unique sibling path reused as temp
+    fs::write(&tmp_path, document.to_string()).map_err(|source| {
+        RunnerError::ConfigMigrationIo {
+            path: tmp_path.clone(),
+            operation: "write temp",
+            source,
+        }
+    })?;
+    fs::rename(&tmp_path, path).map_err(|source| RunnerError::ConfigMigrationIo {
         path: path.to_path_buf(),
-        operation: "write",
+        operation: "rename",
         source,
     })?;
 
@@ -159,12 +172,8 @@ fn parse_version_segments(version: &str) -> Option<Vec<u64>> {
 }
 
 fn is_older_version(version: &str, target: &str) -> Option<bool> {
-    let Some(version_segments) = parse_version_segments(version) else {
-        return None;
-    };
-    let Some(target_segments) = parse_version_segments(target) else {
-        return None;
-    };
+    let version_segments = parse_version_segments(version)?;
+    let target_segments = parse_version_segments(target)?;
 
     // Compare normalized numeric segments, padding shorter versions with zeros
     // so that "1.0" and "1.0.0" are treated equivalently.

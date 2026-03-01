@@ -142,7 +142,7 @@ fn global_and_user_configs_load_with_validation() {
 #[test]
 fn loading_legacy_runner_global_config_auto_migrates_and_creates_backup() {
     let root = temp_dir("global-config-migration");
-    let global_path = write_runner_config_fixture(&root, "container");
+    let global_path = write_legacy_runner_config_fixture(&root, "container");
 
     let config = load_runner_global_config(&global_path).expect("global config should load");
     assert_eq!(config.config_version, DEFAULT_RUNNER_CONFIG_VERSION);
@@ -859,6 +859,7 @@ fn write_runner_config_fixture(root: &Path, default_tier: &str) -> PathBuf {
         &path,
         format!(
             r#"
+config_version = "{DEFAULT_RUNNER_CONFIG_VERSION}"
 workspace_root = "workspaces"
 default_tier = "{default_tier}"
 
@@ -873,6 +874,32 @@ config_path = "users/alice.toml"
         .trim_start(),
     )
     .expect("runner config should be writable");
+    path
+}
+
+/// Writes a runner config fixture *without* `config_version` to simulate legacy files
+/// that need migration.
+fn write_legacy_runner_config_fixture(root: &Path, default_tier: &str) -> PathBuf {
+    let path = root.join("runner.toml");
+    fs::create_dir_all(root).expect("root should exist");
+    fs::write(
+        &path,
+        format!(
+            r#"
+workspace_root = "workspaces"
+default_tier = "{default_tier}"
+
+[guest_images]
+oxydra_vm = "oxydra-vm:test"
+shell_vm = "shell-vm:test"
+
+[users.alice]
+config_path = "users/alice.toml"
+"#
+        )
+        .trim_start(),
+    )
+    .expect("legacy runner config should be writable");
     path
 }
 

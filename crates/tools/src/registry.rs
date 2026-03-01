@@ -257,6 +257,7 @@ fn register_runtime_tools(
     registry.register(FILE_WRITE_TOOL_NAME, WriteTool::new(wasm_runner.clone()));
     registry.register(FILE_EDIT_TOOL_NAME, EditTool::new(wasm_runner.clone()));
     registry.register(FILE_DELETE_TOOL_NAME, DeleteTool::new(wasm_runner.clone()));
+    register_attachment_tools(registry, wasm_runner.clone());
     registry.register(WEB_FETCH_TOOL_NAME, WebFetchTool::new(wasm_runner.clone()));
     registry.register(
         WEB_SEARCH_TOOL_NAME,

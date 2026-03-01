@@ -14,8 +14,9 @@
 
 use std::{
     fs,
-    io::{self, Read},
-    path::Path,
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine;
@@ -84,6 +85,7 @@ fn dispatch(op: &str, args: &Value) -> GuestResult {
         "file_read" => file_read(args),
         "file_read_bytes" => file_read_bytes(args),
         "file_write" => file_write(args),
+        "file_write_bytes" => file_write_bytes(args),
         "file_edit" => file_edit(args),
         "file_delete" => file_delete(args),
         "file_list" => file_list(args),
@@ -104,6 +106,10 @@ fn required_string<'a>(args: &'a Value, field: &str, op: &str) -> Result<&'a str
 
 fn optional_string<'a>(args: &'a Value, field: &str) -> Option<&'a str> {
     args.get(field).and_then(Value::as_str)
+}
+
+fn optional_bool(args: &Value, field: &str) -> Option<bool> {
+    args.get(field).and_then(Value::as_bool)
 }
 
 fn file_read(args: &Value) -> GuestResult {
@@ -150,6 +156,33 @@ fn file_write(args: &Value) -> GuestResult {
     match fs::write(path, content.as_bytes()) {
         Ok(()) => GuestResult::ok(format!("wrote {} bytes to {path}", content.len())),
         Err(e) => GuestResult::err(format!("failed to write `{path}`: {e}")),
+    }
+}
+
+fn file_write_bytes(args: &Value) -> GuestResult {
+    let path = match required_string(args, "path", "file_write_bytes") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let content_base64 = match required_string(args, "content_base64", "file_write_bytes") {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let overwrite = optional_bool(args, "overwrite").unwrap_or(false);
+
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(content_base64.as_bytes())
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return GuestResult::err(format!(
+                "failed to decode `content_base64` for `{path}`: {error}"
+            ));
+        }
+    };
+
+    match write_bytes_with_overwrite_policy(path, &decoded, overwrite) {
+        Ok(()) => GuestResult::ok(format!("wrote {} bytes to {path}", decoded.len())),
+        Err(error) => GuestResult::err(error),
     }
 }
 
@@ -348,4 +381,61 @@ fn vault_copyto_write(args: &Value) -> GuestResult {
             "failed to write destination `{destination_path}`: {e}"
         )),
     }
+}
+
+fn write_bytes_with_overwrite_policy(
+    path: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<(), String> {
+    let target = Path::new(path);
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create directories for `{path}`: {error}"))?;
+    }
+
+    if overwrite {
+        write_bytes_atomic_replace(target, bytes)
+            .map_err(|error| format!("failed to write `{path}`: {error}"))
+    } else {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(target)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    format!("destination `{path}` already exists; set overwrite=true to replace it")
+                } else {
+                    format!("failed to create `{path}`: {error}")
+                }
+            })?;
+        file.write_all(bytes)
+            .map_err(|error| format!("failed to write `{path}`: {error}"))
+    }
+}
+
+fn write_bytes_atomic_replace(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp_path = atomic_temp_path(target);
+    fs::write(&temp_path, bytes)?;
+    match fs::rename(&temp_path, target) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
+}
+
+fn atomic_temp_path(target: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment.bin".to_owned());
+    target.with_file_name(format!(".{file_name}.oxydra-write-{nanos}.tmp"))
 }

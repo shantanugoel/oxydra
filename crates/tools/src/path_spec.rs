@@ -36,7 +36,7 @@ const VAULT_COPYTO_FIELDS: &[ToolPathField] = &[
 pub fn tool_path_fields(tool_name: &str) -> &'static [ToolPathField] {
     match tool_name {
         "file_read" | "file_search" | "file_list" | "send_media" => READ_ONLY_PATH_FIELD,
-        "file_write" | "file_edit" | "file_delete" => READ_WRITE_PATH_FIELD,
+        "file_write" | "file_edit" | "file_delete" | "attachment_save" => READ_WRITE_PATH_FIELD,
         "vault_copyto" => VAULT_COPYTO_FIELDS,
         _ => EMPTY_FIELDS,
     }
@@ -59,6 +59,13 @@ mod tests {
         assert_eq!(tool_path_fields("file_write")[0].field_name, "path");
         assert_eq!(
             tool_path_fields("file_write")[0].access_mode,
+            PathAccessMode::ReadWrite
+        );
+
+        assert_eq!(tool_path_fields("attachment_save").len(), 1);
+        assert_eq!(tool_path_fields("attachment_save")[0].field_name, "path");
+        assert_eq!(
+            tool_path_fields("attachment_save")[0].access_mode,
             PathAccessMode::ReadWrite
         );
 

@@ -288,6 +288,7 @@ impl AgentRuntime {
             event_sender: None,
             channel_id: None,
             channel_context_id: None,
+            inbound_attachments: None,
         };
         self.run_session_for_session_with_tool_context(
             session_id,

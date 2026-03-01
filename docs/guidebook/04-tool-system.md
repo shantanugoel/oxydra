@@ -102,6 +102,7 @@ This generates a hidden function `__tool_function_decl_file_read()` that builds 
 | `file_write` | `SideEffecting` | Creates or overwrites a file with content |
 | `file_edit` | `SideEffecting` | Replaces a specific text snippet in a file |
 | `file_delete` | `SideEffecting` | Deletes a file or directory |
+| `attachment_save` | `SideEffecting` | Saves an inbound user attachment from the current turn into `/shared` or `/tmp` |
 | `web_fetch` | `SideEffecting` | Fetches URL content (converts to Markdown/Text) |
 | `web_search` | `SideEffecting` | Performs web searches via configured providers |
 | `vault_copyto` | `SideEffecting` | Securely copies data from vault to shared/tmp workspace |

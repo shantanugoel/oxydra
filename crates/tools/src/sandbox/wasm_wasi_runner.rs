@@ -161,8 +161,8 @@ impl WasmWasiToolRunner {
         let mut args = arguments.clone();
 
         match tool_name {
-            "file_read" | "file_read_bytes" | "file_write" | "file_edit" | "file_delete"
-            | "file_search" => {
+            "file_read" | "file_read_bytes" | "file_write" | "file_write_bytes" | "file_edit"
+            | "file_delete" | "file_search" => {
                 if let Some(path) = arguments.get("path").and_then(Value::as_str) {
                     let guest_path = Self::translate_path_for_guest(path, mounts)?;
                     args["path"] = Value::String(guest_path);
@@ -349,7 +349,9 @@ fn expected_capability_profile(tool_name: &str) -> Option<WasmCapabilityProfile>
         "file_read" | "file_read_bytes" | "file_search" | "file_list" => {
             Some(WasmCapabilityProfile::FileReadOnly)
         }
-        "file_write" | "file_edit" | "file_delete" => Some(WasmCapabilityProfile::FileReadWrite),
+        "file_write" | "file_write_bytes" | "file_edit" | "file_delete" => {
+            Some(WasmCapabilityProfile::FileReadWrite)
+        }
         "web_fetch" | "web_search" => Some(WasmCapabilityProfile::Web),
         "vault_copyto_read" => Some(WasmCapabilityProfile::VaultReadStep),
         "vault_copyto_write" => Some(WasmCapabilityProfile::VaultWriteStep),
@@ -577,6 +579,72 @@ mod tests {
 
         assert!(result.output.contains("wrote"));
         assert_eq!(fs::read_to_string(&target).unwrap(), "written");
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn wasm_runner_file_write_bytes_honors_overwrite_flag() {
+        let workspace_root = unique_workspace("wasi-write-bytes");
+        let target = workspace_root.join(SHARED_DIR_NAME).join("output.bin");
+        let original = vec![1_u8, 2, 3];
+        let replacement = vec![9_u8, 8, 7, 6];
+        let encoded_original = base64::engine::general_purpose::STANDARD.encode(&original);
+        let encoded_replacement = base64::engine::general_purpose::STANDARD.encode(&replacement);
+
+        let runner = make_runner(&workspace_root);
+        runner
+            .invoke(
+                "file_write_bytes",
+                WasmCapabilityProfile::FileReadWrite,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content_base64": encoded_original
+                }),
+                None,
+            )
+            .await
+            .expect("initial binary write should succeed");
+
+        let denied = runner
+            .invoke(
+                "file_write_bytes",
+                WasmCapabilityProfile::FileReadWrite,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content_base64": encoded_replacement
+                }),
+                None,
+            )
+            .await
+            .expect_err("overwrite=false should reject existing destination");
+        assert!(matches!(
+            denied,
+            SandboxError::WasmInvocationFailed { tool, message, .. }
+                if tool == "file_write_bytes" && !message.is_empty()
+        ));
+        assert_eq!(
+            fs::read(&target).expect("target should remain readable"),
+            original
+        );
+
+        runner
+            .invoke(
+                "file_write_bytes",
+                WasmCapabilityProfile::FileReadWrite,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content_base64": base64::engine::general_purpose::STANDARD.encode(&replacement),
+                    "overwrite": true
+                }),
+                None,
+            )
+            .await
+            .expect("overwrite=true should replace binary file");
+        assert_eq!(
+            fs::read(&target).expect("overwritten file should remain readable"),
+            replacement
+        );
 
         let _ = fs::remove_dir_all(workspace_root);
     }

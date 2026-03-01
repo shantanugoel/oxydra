@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::ToolError;
 use crate::channel::ChannelCapabilities;
-use crate::model::{ModelId, ProviderId, StreamItem};
+use crate::model::{InlineMedia, ModelId, ProviderId, StreamItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +92,9 @@ pub struct ToolExecutionContext {
     /// - Telegram: "{chat_id}" or "{chat_id}:{thread_id}"
     /// - TUI: gateway `session_id`
     pub channel_context_id: Option<String>,
+    /// Inbound attachments from the current user turn for tools that need raw
+    /// bytes (for example `attachment_save`).
+    pub inbound_attachments: Option<Arc<Vec<InlineMedia>>>,
 }
 
 impl std::fmt::Debug for ToolExecutionContext {
@@ -107,6 +111,10 @@ impl std::fmt::Debug for ToolExecutionContext {
             )
             .field("channel_id", &self.channel_id)
             .field("channel_context_id", &self.channel_context_id)
+            .field(
+                "inbound_attachment_count",
+                &self.inbound_attachments.as_ref().map(|items| items.len()),
+            )
             .finish()
     }
 }

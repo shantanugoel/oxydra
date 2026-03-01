@@ -89,6 +89,53 @@ impl RuntimeGatewayTurnRunner {
     }
 }
 
+fn format_attachment_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    if bytes < 1024 {
+        format!("~{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("~{}KB", ((bytes as f64) / KB).round() as usize)
+    } else {
+        format!("~{:.1}MB", (bytes as f64) / MB)
+    }
+}
+
+fn attachment_prompt_addendum(attachments: &[InlineMedia]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let descriptors = attachments
+        .iter()
+        .enumerate()
+        .map(|(index, attachment)| {
+            format!(
+                "[{index}] {} ({})",
+                attachment.mime_type,
+                format_attachment_size(attachment.data.len())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let noun = if attachments.len() == 1 {
+        "attachment"
+    } else {
+        "attachments"
+    };
+    Some(format!(
+        "User sent {} {noun}: {descriptors}.\nUse attachment_save(index, path) to persist any of them to /shared or /tmp.",
+        attachments.len()
+    ))
+}
+
+fn augment_prompt_with_attachment_metadata(prompt: String, attachments: &[InlineMedia]) -> String {
+    match attachment_prompt_addendum(attachments) {
+        Some(addendum) if prompt.trim().is_empty() => addendum,
+        Some(addendum) => format!("{prompt}\n\n{addendum}"),
+        None => prompt,
+    }
+}
+
 #[async_trait]
 impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
     async fn run_turn(
@@ -111,6 +158,12 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
             channel_capabilities,
         } = origin;
         let effective_agent_name = agent_name.as_deref().unwrap_or("default");
+        let prompt = augment_prompt_with_attachment_metadata(prompt, &attachments);
+        let inbound_attachments = if attachments.is_empty() {
+            None
+        } else {
+            Some(Arc::new(attachments.clone()))
+        };
 
         let mut context = {
             let mut contexts = self.contexts.lock().await;
@@ -128,6 +181,7 @@ impl GatewayTurnRunner for RuntimeGatewayTurnRunner {
             event_sender: None,
             channel_id,
             channel_context_id,
+            inbound_attachments,
         };
 
         // Strip attachment bytes from older user messages to prevent unbounded
@@ -233,5 +287,41 @@ impl ScheduledTurnRunner for RuntimeGatewayTurnRunner {
             )
             .await?;
         Ok(response.message.content.unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attachment(mime_type: &str, size: usize) -> InlineMedia {
+        InlineMedia {
+            mime_type: mime_type.to_owned(),
+            data: vec![42; size],
+        }
+    }
+
+    #[test]
+    fn augment_prompt_with_attachment_metadata_is_noop_without_attachments() {
+        let prompt = "analyze this".to_owned();
+        assert_eq!(
+            augment_prompt_with_attachment_metadata(prompt.clone(), &[]),
+            prompt
+        );
+    }
+
+    #[test]
+    fn augment_prompt_with_attachment_metadata_appends_attachment_instructions() {
+        let prompt = augment_prompt_with_attachment_metadata(
+            "please inspect".to_owned(),
+            &[
+                attachment("image/jpeg", 245 * 1024),
+                attachment("application/pdf", 1200 * 1024),
+            ],
+        );
+        assert!(prompt.contains("User sent 2 attachments"));
+        assert!(prompt.contains("[0] image/jpeg"));
+        assert!(prompt.contains("[1] application/pdf"));
+        assert!(prompt.contains("attachment_save(index, path)"));
     }
 }

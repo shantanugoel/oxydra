@@ -562,6 +562,8 @@ Provider validates modality support, encodes in provider wire format
 LLM receives multi-modal input
 ```
 
+The same inbound `InlineMedia` payloads are also exposed to tools through `ToolExecutionContext.inbound_attachments` for the current turn only. This enables explicit persistence flows such as `attachment_save(index, path)` into `/shared` or `/tmp` without auto-writing files.
+
 ### Command Interception
 
 Commands (`/new`, `/sessions`, etc.) are only intercepted for text-only messages. Media messages with a caption starting with `/` are treated as normal media turns, not commands.

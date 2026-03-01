@@ -144,7 +144,7 @@ When a `SendTurn` frame arrives:
 2. The gateway locates the user's session
 3. If an active turn exists, the request is rejected with an error
 4. A `RuntimeGatewayTurnRunner` is created to bridge gateway and runtime
-5. The runner constructs a `Context` and a per-turn `ToolExecutionContext` (with user_id and session_id), then calls `AgentRuntime::run_session_for_session_with_stream_events`, passing the tool context as a parameter (not stored as shared state)
+5. The runner constructs a `Context` and a per-turn `ToolExecutionContext` (with user_id, session_id, and inbound turn attachments), then calls `AgentRuntime::run_session_for_session_with_stream_events`, passing the tool context as a parameter (not stored as shared state)
 6. Stream items from the runtime are forwarded according to type:
    - `StreamItem::Text(delta)` → published as an `AssistantDelta` frame
    - `StreamItem::Progress(event)` → published as a `TurnProgress` frame (channels display it however fits their UX; the TUI shows it in the input bar title)
@@ -444,3 +444,5 @@ pub struct UserTurnInput {
     pub attachments: Vec<InlineMedia>,
 }
 ```
+
+When attachments are present, the turn runner appends a short attachment metadata addendum (indices, MIME types, approximate sizes) to the user prompt so the model can explicitly call `attachment_save(index, path)` when it needs to persist inbound files.

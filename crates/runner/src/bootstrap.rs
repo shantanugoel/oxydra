@@ -973,7 +973,8 @@ fn build_system_prompt(
          - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
          When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
          always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
-         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`.{shell_note}{scheduler_note}{memory_note}{specialists_note}"
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`. \
+         If the current user turn includes attachments, use `attachment_save(index, path)` to persist them into `/shared` or `/tmp` before further processing.{shell_note}{scheduler_note}{memory_note}{specialists_note}"
     );
 
     // Look for a SYSTEM.md override/append file in the config search paths.

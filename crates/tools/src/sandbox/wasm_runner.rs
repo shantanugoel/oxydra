@@ -1,13 +1,14 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    io::Write,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -255,6 +256,7 @@ impl HostWasmToolRunner {
             "file_read" => self.file_read(arguments),
             "file_read_bytes" => self.file_read_bytes(arguments),
             "file_write" => self.file_write(arguments),
+            "file_write_bytes" => self.file_write_bytes(arguments),
             "file_edit" => self.file_edit(arguments),
             "file_delete" => self.file_delete(arguments),
             "file_list" => self.file_list(arguments),
@@ -292,7 +294,7 @@ impl HostWasmToolRunner {
                     .unwrap_or_else(|| self.mounts.shared.to_string_lossy().into_owned());
                 self.enforce_mounted_path(profile, &path, false)
             }
-            "file_write" | "file_edit" | "file_delete" => {
+            "file_write" | "file_write_bytes" | "file_edit" | "file_delete" => {
                 let path = required_string(arguments, "path", tool_name)?;
                 self.enforce_mounted_path(profile, &path, true)
             }
@@ -353,6 +355,17 @@ impl HostWasmToolRunner {
         fs::write(&path, content.as_bytes())
             .map_err(|error| format!("failed to write `{path}`: {error}"))?;
         Ok(format!("wrote {} bytes to {path}", content.len()))
+    }
+
+    fn file_write_bytes(&self, arguments: &Value) -> Result<String, String> {
+        let path = required_string(arguments, "path", "file_write_bytes")?;
+        let content_base64 = required_string(arguments, "content_base64", "file_write_bytes")?;
+        let overwrite = optional_bool(arguments, "overwrite").unwrap_or(false);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(content_base64.as_bytes())
+            .map_err(|error| format!("failed to decode `content_base64`: {error}"))?;
+        write_bytes_with_overwrite_policy(&path, &bytes, overwrite)?;
+        Ok(format!("wrote {} bytes to {path}", bytes.len()))
     }
 
     fn file_edit(&self, arguments: &Value) -> Result<String, String> {
@@ -504,6 +517,10 @@ fn optional_string(arguments: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn optional_bool(arguments: &Value, field: &str) -> Option<bool> {
+    arguments.get(field).and_then(Value::as_bool)
+}
+
 fn required_string(arguments: &Value, field: &str, tool_name: &str) -> Result<String, String> {
     arguments
         .get(field)
@@ -517,12 +534,75 @@ fn expected_capability_profile(tool_name: &str) -> Option<WasmCapabilityProfile>
         "file_read" | "file_read_bytes" | "file_search" | "file_list" => {
             Some(WasmCapabilityProfile::FileReadOnly)
         }
-        "file_write" | "file_edit" | "file_delete" => Some(WasmCapabilityProfile::FileReadWrite),
+        "file_write" | "file_write_bytes" | "file_edit" | "file_delete" => {
+            Some(WasmCapabilityProfile::FileReadWrite)
+        }
         "web_fetch" | "web_search" => Some(WasmCapabilityProfile::Web),
         "vault_copyto_read" => Some(WasmCapabilityProfile::VaultReadStep),
         "vault_copyto_write" => Some(WasmCapabilityProfile::VaultWriteStep),
         _ => None,
     }
+}
+
+fn write_bytes_with_overwrite_policy(
+    path: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<(), String> {
+    let target = Path::new(path);
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create directories for `{path}`: {error}"))?;
+    }
+
+    if overwrite {
+        write_bytes_atomic_replace(target, bytes)
+            .map_err(|error| format!("failed to write `{path}`: {error}"))?;
+    } else {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(target)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    format!("destination `{path}` already exists; set overwrite=true to replace it")
+                } else {
+                    format!("failed to create `{path}`: {error}")
+                }
+            })?;
+        file.write_all(bytes)
+            .map_err(|error| format!("failed to write `{path}`: {error}"))?;
+    }
+    Ok(())
+}
+
+fn write_bytes_atomic_replace(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp_path = atomic_temp_path(target);
+    fs::write(&temp_path, bytes)?;
+    match fs::rename(&temp_path, target) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
+}
+
+fn atomic_temp_path(target: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment.bin".to_owned());
+    target.with_file_name(format!(
+        ".{file_name}.oxydra-write-{}-{nanos}.tmp",
+        std::process::id()
+    ))
 }
 
 fn canonicalize_invocation_path(
@@ -957,6 +1037,72 @@ mod tests {
             .decode(result.output.as_bytes())
             .expect("base64 output should decode");
         assert_eq!(decoded, expected);
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn host_runner_file_write_bytes_honors_overwrite_flag() {
+        let workspace_root = unique_workspace("wasm-write-bytes");
+        let target = workspace_root.join(SHARED_DIR_NAME).join("output.bin");
+        let original = vec![1_u8, 2, 3];
+        let replacement = vec![9_u8, 8, 7, 6];
+        let encoded_original = base64::engine::general_purpose::STANDARD.encode(&original);
+        let encoded_replacement = base64::engine::general_purpose::STANDARD.encode(&replacement);
+
+        let runner = HostWasmToolRunner::for_bootstrap_workspace(&workspace_root);
+        runner
+            .invoke(
+                "file_write_bytes",
+                WasmCapabilityProfile::FileReadWrite,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content_base64": encoded_original
+                }),
+                None,
+            )
+            .await
+            .expect("initial binary write should succeed");
+
+        let denied = runner
+            .invoke(
+                "file_write_bytes",
+                WasmCapabilityProfile::FileReadWrite,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content_base64": encoded_replacement
+                }),
+                None,
+            )
+            .await
+            .expect_err("overwrite=false should reject existing destination");
+        assert!(matches!(
+            denied,
+            SandboxError::WasmInvocationFailed { tool, message, .. }
+                if tool == "file_write_bytes" && message.contains("already exists")
+        ));
+        assert_eq!(
+            fs::read(&target).expect("target should remain readable"),
+            original
+        );
+
+        runner
+            .invoke(
+                "file_write_bytes",
+                WasmCapabilityProfile::FileReadWrite,
+                &json!({
+                    "path": target.to_string_lossy(),
+                    "content_base64": base64::engine::general_purpose::STANDARD.encode(&replacement),
+                    "overwrite": true
+                }),
+                None,
+            )
+            .await
+            .expect("overwrite=true should replace the file atomically");
+        assert_eq!(
+            fs::read(&target).expect("overwritten file should remain readable"),
+            replacement
+        );
 
         let _ = fs::remove_dir_all(workspace_root);
     }

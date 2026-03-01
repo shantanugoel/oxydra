@@ -152,6 +152,7 @@ impl types::DelegationExecutor for RuntimeDelegationExecutor {
             event_sender: None,
             channel_id: None,
             channel_context_id: None,
+            inbound_attachments: None,
         };
         let response = self
             .runtime

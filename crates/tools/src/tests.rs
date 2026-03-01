@@ -562,6 +562,7 @@ async fn bootstrap_registry_exposes_runtime_tool_surface_only() {
         FILE_WRITE_TOOL_NAME.to_owned(),
         FILE_EDIT_TOOL_NAME.to_owned(),
         FILE_DELETE_TOOL_NAME.to_owned(),
+        ATTACHMENT_SAVE_TOOL_NAME.to_owned(),
         WEB_FETCH_TOOL_NAME.to_owned(),
         WEB_SEARCH_TOOL_NAME.to_owned(),
         VAULT_COPYTO_TOOL_NAME.to_owned(),
@@ -741,6 +742,7 @@ mod memory_tool_tests {
             event_sender: None,
             channel_id: None,
             channel_context_id: None,
+            inbound_attachments: None,
         }
     }
 

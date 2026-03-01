@@ -329,7 +329,7 @@ async fn bootstrap_runtime_tools_waits_for_sidecar_socket_before_disabling_shell
     let RuntimeToolsBootstrap {
         registry,
         availability,
-    } = bootstrap_runtime_tools(Some(&bootstrap), None).await;
+    } = bootstrap_runtime_tools(Some(&bootstrap), None, None).await;
 
     let output = registry
         .execute(

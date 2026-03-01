@@ -1004,8 +1004,8 @@ mod tests {
 
     #[test]
     fn parse_cli_args_accepts_check_update_subcommand() {
-        let args = CliArgs::try_parse_from(["runner", "check-update"])
-            .expect("check-update should parse");
+        let args =
+            CliArgs::try_parse_from(["runner", "check-update"]).expect("check-update should parse");
         assert_eq!(
             args.command,
             Some(CliCommand::CheckUpdate { pre_release: false })

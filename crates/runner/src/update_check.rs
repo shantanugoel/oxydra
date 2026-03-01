@@ -13,8 +13,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use types::RunnerGuestImages;
 
-const GITHUB_RELEASES_URL: &str =
-    "https://api.github.com/repos/shantanugoel/oxydra/releases";
+const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/shantanugoel/oxydra/releases";
 
 const USER_AGENT: &str = concat!("oxydra-runner/", env!("CARGO_PKG_VERSION"));
 

@@ -280,18 +280,19 @@ fn handle_check_update(include_prerelease: bool, config_path: &Path) -> Result<(
     // Binary-vs-config image tag mismatch check (best-effort; load config
     // only if it exists so the command works without a runner.toml too).
     if config_path.exists()
-        && let Ok(runner) = Runner::from_global_config_path(config_path) {
-            let mismatches =
-                update_check::check_image_tag_mismatches(&runner.global_config().guest_images);
-            for m in &mismatches {
-                eprintln!(
-                    "Warning: Binary version ({}) does not match guest image tag ({}) \
+        && let Ok(runner) = Runner::from_global_config_path(config_path)
+    {
+        let mismatches =
+            update_check::check_image_tag_mismatches(&runner.global_config().guest_images);
+        for m in &mismatches {
+            eprintln!(
+                "Warning: Binary version ({}) does not match guest image tag ({}) \
                      in runner.toml field `{}` (image: {}).\n  \
                      Update [guest_images] tags or re-run install-release.sh.",
-                    m.binary_version, m.image_tag, m.field, m.image_ref,
-                );
-            }
+                m.binary_version, m.image_tag, m.field, m.image_ref,
+            );
         }
+    }
 
     Ok(())
 }
@@ -348,13 +349,14 @@ fn server_start(runner: &Runner, user_id: &str, args: &CliArgs) -> Result<(), Cl
     // A separate thread performs the check to avoid blocking the main path.
     std::thread::spawn(|| {
         if let Some(outcome) = update_check::run_check(true, false)
-            && outcome.update_available {
-                eprintln!(
-                    "[oxydra] Update available: v{} (current: v{}). \
+            && outcome.update_available
+        {
+            eprintln!(
+                "[oxydra] Update available: v{} (current: v{}). \
                      Run `runner check-update` for details.",
-                    outcome.latest_version, outcome.current_version,
-                );
-            }
+                outcome.latest_version, outcome.current_version,
+            );
+        }
     });
 
     let extra_env = parse_extra_env_vars(&args.env_vars, args.env_file.as_deref())?;

@@ -117,10 +117,11 @@ fn fetch_latest_tag(include_prerelease: bool) -> Option<String> {
 pub fn latest_tag(use_cache: bool, include_prerelease: bool) -> Option<String> {
     if use_cache
         && let Some(cache) = load_cache()
-            && cache_is_fresh(&cache) {
-                tracing::debug!("using cached update-check result");
-                return Some(cache.latest_tag);
-            }
+        && cache_is_fresh(&cache)
+    {
+        tracing::debug!("using cached update-check result");
+        return Some(cache.latest_tag);
+    }
 
     let tag = fetch_latest_tag(include_prerelease)?;
     save_cache(&tag);

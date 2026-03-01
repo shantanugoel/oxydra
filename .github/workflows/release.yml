@@ -14,6 +14,7 @@ on:
 permissions:
   contents: read
   packages: write
+  models: read
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -266,6 +267,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      models: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -299,10 +301,85 @@ jobs:
           cp artifacts/macos/*.tar.gz release-assets/
           cat artifacts/linux-amd64/SHA256SUMS-linux-amd64 artifacts/linux-arm64/SHA256SUMS-linux-arm64 artifacts/macos/SHA256SUMS-macos-arm64 | sort -u > release-assets/SHA256SUMS
 
+      - name: Find previous release tag
+        id: prev-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_TAG="${RELEASE_TAG}"
+          # Find the most recent published release that isn't the current one
+          PREVIOUS_TAG=$(gh release list --limit 50 --json tagName,isDraft \
+            --jq "[.[] | select(.tagName != \"${CURRENT_TAG}\" and .isDraft == false)] | .[0].tagName // empty")
+
+          if [[ -z "${PREVIOUS_TAG}" ]]; then
+            # Fall back to previous git tag if no release found
+            PREVIOUS_TAG="$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n1 || true)"
+          fi
+
+          echo "previous_tag=${PREVIOUS_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "Previous release: ${PREVIOUS_TAG:-'(none, first release)'}"
+
+      - name: Gather changelog context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_TAG="${RELEASE_TAG}"
+          PREVIOUS_TAG="${{ steps.prev-release.outputs.previous_tag }}"
+
+          if [[ -n "${PREVIOUS_TAG}" ]]; then
+            RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
+          else
+            RANGE="${CURRENT_TAG}"
+          fi
+
+          {
+            echo "Project: oxydra (AI agent runtime/framework)"
+            echo "Release: ${CURRENT_TAG} (previous: ${PREVIOUS_TAG:-none})"
+            echo ""
+            echo "=== COMMITS ==="
+            git log --format='--- commit %h ---%nmessage: %s%n%b' --stat=80 "${RANGE}" | head -2000
+            echo ""
+            echo "=== PULL REQUEST DETAILS ==="
+            SEEN_PRS=""
+            while IFS= read -r line; do
+              PR_NUM=$(echo "${line}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+              if [[ -n "${PR_NUM}" ]] && ! echo "${SEEN_PRS}" | grep -qw "${PR_NUM}"; then
+                SEEN_PRS="${SEEN_PRS} ${PR_NUM}"
+                echo "--- PR #${PR_NUM} ---"
+                gh pr view "${PR_NUM}" --json title,body,labels \
+                  --jq '"title: \(.title)\nlabels: \([.labels[].name] | join(", "))\nbody: \(.body // "no description")"' 2>/dev/null \
+                  | head -50 || echo "(could not fetch)"
+                echo ""
+              fi
+            done < <(git log --format='%s' "${RANGE}")
+          } > changelog-context.txt
+
+          # Truncate to ~30KB to stay within model token limits
+          if [[ $(wc -c < changelog-context.txt) -gt 30000 ]]; then
+            head -c 30000 changelog-context.txt > changelog-truncated.txt
+            echo -e "\n... (truncated due to size)" >> changelog-truncated.txt
+            mv changelog-truncated.txt changelog-context.txt
+          fi
+
+          echo "Context file size: $(wc -c < changelog-context.txt) bytes"
+
+      - name: Generate AI changelog
+        id: ai-changelog
+        continue-on-error: true
+        uses: actions/ai-inference@v1
+        with:
+          prompt-file: '.github/prompts/changelog.prompt.yml'
+          input: |
+            previous_tag: ${{ steps.prev-release.outputs.previous_tag || 'initial release' }}
+            current_tag: ${{ env.RELEASE_TAG }}
+          file_input: |
+            commit_data: changelog-context.txt
+
       - name: Generate release summary
         run: |
           CURRENT_TAG="${RELEASE_TAG}"
-          PREVIOUS_TAG="$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n1 || true)"
+          PREVIOUS_TAG="${{ steps.prev-release.outputs.previous_tag }}"
+          AI_RESPONSE_FILE="${{ steps.ai-changelog.outputs.response-file }}"
 
           {
             echo "## Build and install instructions"
@@ -310,13 +387,32 @@ jobs:
             echo "- Build from source/local Docker images: https://github.com/${GITHUB_REPOSITORY}/blob/${CURRENT_TAG}/README.md#part-3--use-latest-from-repository-and-contribute"
             echo "- Install from GitHub releases + GHCR: https://github.com/${GITHUB_REPOSITORY}/blob/${CURRENT_TAG}/README.md#part-2--quick-start-install-from-releases"
             echo
-            if [[ -n "${PREVIOUS_TAG}" ]]; then
-              echo "## Changes since ${PREVIOUS_TAG}"
-              git log --pretty='- %s (%h)' "${PREVIOUS_TAG}..${CURRENT_TAG}"
+            if [[ -n "${AI_RESPONSE_FILE}" && -f "${AI_RESPONSE_FILE}" && -s "${AI_RESPONSE_FILE}" ]]; then
+              echo "## What's Changed"
+              echo
+              cat "${AI_RESPONSE_FILE}"
             else
-              echo "## Changes"
-              git log --pretty='- %s (%h)' "${CURRENT_TAG}" | head -n 200
+              echo "## Changes${PREVIOUS_TAG:+ since ${PREVIOUS_TAG}}"
+              echo
+              echo "_Automated changelog generation was not available for this release._"
+              echo
+              if [[ -n "${PREVIOUS_TAG}" ]]; then
+                git log --pretty='- %s (%h)' "${PREVIOUS_TAG}..${CURRENT_TAG}"
+              else
+                git log --pretty='- %s (%h)' "${CURRENT_TAG}" | head -n 200
+              fi
             fi
+            echo
+            echo "<details>"
+            echo "<summary>Full commit history${PREVIOUS_TAG:+ since ${PREVIOUS_TAG}}</summary>"
+            echo
+            if [[ -n "${PREVIOUS_TAG}" ]]; then
+              git log --pretty='- \`%h\` %s' "${PREVIOUS_TAG}..${CURRENT_TAG}"
+            else
+              git log --pretty='- \`%h\` %s' "${CURRENT_TAG}" | head -n 200
+            fi
+            echo
+            echo "</details>"
           } > release-notes.md
 
       - name: Create release

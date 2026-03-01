@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use types::AttachmentSaveConfig;
 
 pub struct ToolRegistry {
     tools: BTreeMap<String, Box<dyn Tool>>,
@@ -32,7 +33,7 @@ impl ToolRegistry {
 
     pub fn register_core_tools(&mut self) {
         let wasm_runner = default_wasm_runner();
-        register_runtime_tools(self, wasm_runner, BashTool::default());
+        register_runtime_tools(self, wasm_runner, BashTool::default(), None);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
@@ -185,11 +186,17 @@ pub struct RuntimeToolsBootstrap {
 pub async fn bootstrap_runtime_tools(
     bootstrap: Option<&RunnerBootstrapEnvelope>,
     shell_config: Option<&ShellConfig>,
+    attachment_save_config: Option<&AttachmentSaveConfig>,
 ) -> RuntimeToolsBootstrap {
     let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
     let wasm_runner = runtime_wasm_runner(bootstrap);
     let mut registry = ToolRegistry::default();
-    register_runtime_tools(&mut registry, wasm_runner, bash_tool);
+    register_runtime_tools(
+        &mut registry,
+        wasm_runner,
+        bash_tool,
+        attachment_save_config,
+    );
     registry.set_security_policy(Arc::new(workspace_security_policy(bootstrap, shell_config)));
     let availability = ToolAvailability {
         shell: shell_status,
@@ -250,6 +257,7 @@ fn register_runtime_tools(
     registry: &mut ToolRegistry,
     wasm_runner: Arc<dyn WasmToolRunner>,
     shell_tool: BashTool,
+    attachment_save_config: Option<&AttachmentSaveConfig>,
 ) {
     registry.register(FILE_READ_TOOL_NAME, ReadTool::new(wasm_runner.clone()));
     registry.register(FILE_SEARCH_TOOL_NAME, SearchTool::new(wasm_runner.clone()));
@@ -257,7 +265,9 @@ fn register_runtime_tools(
     registry.register(FILE_WRITE_TOOL_NAME, WriteTool::new(wasm_runner.clone()));
     registry.register(FILE_EDIT_TOOL_NAME, EditTool::new(wasm_runner.clone()));
     registry.register(FILE_DELETE_TOOL_NAME, DeleteTool::new(wasm_runner.clone()));
-    register_attachment_tools(registry, wasm_runner.clone());
+    let attachment_timeout =
+        attachment_save_config.map(|cfg| std::time::Duration::from_secs(cfg.timeout_secs));
+    register_attachment_tools(registry, wasm_runner.clone(), attachment_timeout);
     registry.register(WEB_FETCH_TOOL_NAME, WebFetchTool::new(wasm_runner.clone()));
     registry.register(
         WEB_SEARCH_TOOL_NAME,

@@ -13,6 +13,13 @@ use crate::{
 pub const ATTACHMENT_SAVE_TOOL_NAME: &str = "attachment_save";
 const FILE_WRITE_BYTES_OPERATION: &str = "file_write_bytes";
 
+/// Default maximum attachment size in bytes (50 MiB). Provides defense-in-depth
+/// on top of gateway/channel-level attachment limits.
+const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+
+/// Default timeout for `attachment_save` operations in seconds.
+const DEFAULT_TIMEOUT_SECS: u64 = 40;
+
 #[derive(Debug, Deserialize)]
 struct AttachmentSaveArgs {
     index: usize,
@@ -24,11 +31,22 @@ struct AttachmentSaveArgs {
 #[derive(Clone)]
 pub struct AttachmentSaveTool {
     runner: Arc<dyn WasmToolRunner>,
+    timeout: Duration,
+    max_attachment_bytes: usize,
 }
 
 impl AttachmentSaveTool {
     pub fn new(runner: Arc<dyn WasmToolRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -100,9 +118,19 @@ impl Tool for AttachmentSaveTool {
             )
         })?;
 
+        if attachment.data.len() > self.max_attachment_bytes {
+            return Err(execution_failed(
+                ATTACHMENT_SAVE_TOOL_NAME,
+                format!(
+                    "attachment size ({} bytes) exceeds maximum allowed ({} bytes)",
+                    attachment.data.len(),
+                    self.max_attachment_bytes
+                ),
+            ));
+        }
+
         let encoded = base64::engine::general_purpose::STANDARD.encode(attachment.data.as_slice());
-        let result = self
-            .runner
+        self.runner
             .invoke(
                 FILE_WRITE_BYTES_OPERATION,
                 WasmCapabilityProfile::FileReadWrite,
@@ -127,13 +155,12 @@ impl Tool for AttachmentSaveTool {
             "mime_type": attachment.mime_type,
             "bytes_written": attachment.data.len(),
             "source_index": request.index,
-            "result": result.output,
         })
         .to_string())
     }
 
     fn timeout(&self) -> Duration {
-        Duration::from_secs(20)
+        self.timeout
     }
 
     fn safety_tier(&self) -> SafetyTier {
@@ -144,8 +171,13 @@ impl Tool for AttachmentSaveTool {
 pub fn register_attachment_tools(
     registry: &mut crate::ToolRegistry,
     runner: Arc<dyn WasmToolRunner>,
+    timeout: Option<Duration>,
 ) {
-    registry.register(ATTACHMENT_SAVE_TOOL_NAME, AttachmentSaveTool::new(runner));
+    let mut tool = AttachmentSaveTool::new(runner);
+    if let Some(timeout) = timeout {
+        tool = tool.with_timeout(timeout);
+    }
+    registry.register(ATTACHMENT_SAVE_TOOL_NAME, tool);
 }
 
 #[cfg(test)]
@@ -314,6 +346,128 @@ mod tests {
             fs::read(&target_path).expect("overwritten file should be readable"),
             vec![9_u8, 8, 7]
         );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn attachment_save_rejects_empty_attachment_vec() {
+        let workspace = temp_workspace_root("empty-vec");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+        let tool = AttachmentSaveTool::new(runner);
+        let context = test_context(Some(vec![]));
+        let path = shared_path(&workspace, "unused.bin");
+
+        let error = tool
+            .execute(&json!({ "index": 0, "path": path }).to_string(), &context)
+            .await
+            .expect_err("empty attachment vec should fail");
+        assert!(matches!(
+            error,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == ATTACHMENT_SAVE_TOOL_NAME && message.contains("no inbound attachments")
+        ));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn attachment_save_rejects_path_to_vault() {
+        let workspace = temp_workspace_root("vault-reject");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+        let tool = AttachmentSaveTool::new(runner);
+        let context = test_context(Some(vec![inline_attachment("image/png", &[1, 2, 3])]));
+        let vault_path = workspace
+            .join("vault")
+            .join("evil.bin")
+            .to_string_lossy()
+            .to_string();
+
+        let error = tool
+            .execute(
+                &json!({ "index": 0, "path": vault_path }).to_string(),
+                &context,
+            )
+            .await
+            .expect_err("vault path should be rejected");
+        assert!(matches!(error, ToolError::ExecutionFailed { .. }));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn attachment_save_rejects_path_outside_workspace() {
+        let workspace = temp_workspace_root("escape-reject");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+        let tool = AttachmentSaveTool::new(runner);
+        let context = test_context(Some(vec![inline_attachment("image/png", &[1, 2, 3])]));
+        let escape_path = workspace
+            .join("shared")
+            .join("../../etc/passwd")
+            .to_string_lossy()
+            .to_string();
+
+        let error = tool
+            .execute(
+                &json!({ "index": 0, "path": escape_path }).to_string(),
+                &context,
+            )
+            .await
+            .expect_err("path traversal should be rejected");
+        assert!(matches!(error, ToolError::ExecutionFailed { .. }));
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn attachment_save_creates_parent_directories() {
+        let workspace = temp_workspace_root("mkdir-parents");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+        let tool = AttachmentSaveTool::new(runner);
+        let expected = vec![42_u8, 43, 44];
+        let context = test_context(Some(vec![inline_attachment("image/gif", &expected)]));
+        let path = workspace
+            .join("shared")
+            .join("nested")
+            .join("deep")
+            .join("file.bin")
+            .to_string_lossy()
+            .to_string();
+
+        let output = tool
+            .execute(&json!({ "index": 0, "path": path }).to_string(), &context)
+            .await
+            .expect("attachment_save with nested dirs should succeed");
+        let payload: Value = serde_json::from_str(&output).expect("tool output should be JSON");
+        let written = fs::read(payload["path"].as_str().expect("path should be a string"))
+            .expect("saved file should be readable");
+        assert_eq!(written, expected);
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn attachment_save_rejects_oversized_attachment() {
+        let workspace = temp_workspace_root("oversize");
+        let runner = Arc::new(HostWasmToolRunner::for_bootstrap_workspace(&workspace));
+        let mut tool = AttachmentSaveTool::new(runner);
+        // Set a small limit for testing purposes
+        tool.max_attachment_bytes = 10;
+        let context = test_context(Some(vec![inline_attachment(
+            "application/octet-stream",
+            &[0_u8; 20],
+        )]));
+        let path = shared_path(&workspace, "big.bin");
+
+        let error = tool
+            .execute(&json!({ "index": 0, "path": path }).to_string(), &context)
+            .await
+            .expect_err("oversized attachment should fail");
+        assert!(matches!(
+            error,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == ATTACHMENT_SAVE_TOOL_NAME && message.contains("exceeds maximum")
+        ));
 
         let _ = fs::remove_dir_all(workspace);
     }

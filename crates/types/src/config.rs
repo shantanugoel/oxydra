@@ -635,6 +635,28 @@ pub struct ToolsConfig {
     pub web_search: Option<WebSearchConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_save: Option<AttachmentSaveConfig>,
+}
+
+/// Configuration for the `attachment_save` tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentSaveConfig {
+    /// Timeout in seconds for save operations. Default: 40.
+    #[serde(default = "default_attachment_save_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for AttachmentSaveConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_attachment_save_timeout_secs(),
+        }
+    }
+}
+
+fn default_attachment_save_timeout_secs() -> u64 {
+    40
 }
 
 /// Shell tool security policy configuration.

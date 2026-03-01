@@ -239,6 +239,7 @@ Controls tool-specific behavior:
 pub struct ToolsConfig {
     pub web_search: Option<WebSearchConfig>,
     pub shell: Option<ShellConfig>,
+    pub attachment_save: Option<AttachmentSaveConfig>,
 }
 ```
 
@@ -335,6 +336,25 @@ pub struct ShellConfig {
 | `env_keys` | (none) | Environment variable names to forward into the shell-vm container. API keys from the agent config are **not** forwarded to the shell by default — only keys listed here are. Additionally, CLI `--env` / `--env-file` entries with a `SHELL_` prefix are forwarded with the prefix stripped (e.g. `SHELL_NPM_TOKEN` → `NPM_TOKEN`). |
 
 Glob patterns support `*` as prefix, suffix, or both: `npm*` matches `npm`, `npmrc`; `*test*` matches `pytest`, `testing`.
+
+### `AttachmentSaveConfig`
+
+Configures the `attachment_save` tool for persisting inbound user attachments:
+
+```rust
+pub struct AttachmentSaveConfig {
+    pub timeout_secs: u64, // Default: 40
+}
+```
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `timeout_secs` | `40` | Timeout in seconds for `attachment_save` operations |
+
+```toml
+[tools.attachment_save]
+timeout_secs = 60   # Increase timeout for large files on slow storage
+```
 
 ### `ReliabilityConfig`
 

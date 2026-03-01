@@ -155,6 +155,11 @@ jitter          = false # Add randomized jitter to backoff
 # # Multiple entries:
 # # egress_allowlist = ["localhost:8888", "192.168.1.50:9000"]
 
+# --- Attachment save configuration ---
+# Configure the attachment_save tool for persisting inbound user attachments.
+# [tools.attachment_save]
+# timeout_secs = 40   # Timeout in seconds for save operations (default: 40)
+
 # --- Shell command allowlist ---
 # Configure which commands the LLM is allowed to execute via shell_exec.
 # By default, a built-in allowlist of ~30 common commands is used.

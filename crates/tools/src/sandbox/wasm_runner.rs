@@ -591,6 +591,8 @@ fn write_bytes_atomic_replace(target: &Path, bytes: &[u8]) -> std::io::Result<()
 }
 
 fn atomic_temp_path(target: &Path) -> PathBuf {
+    // Note: mirror of `atomic_temp_path` in crates/wasm-guest/src/main.rs.
+    // Keep changes in sync between both copies.
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

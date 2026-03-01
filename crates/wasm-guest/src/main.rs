@@ -429,6 +429,10 @@ fn write_bytes_atomic_replace(target: &Path, bytes: &[u8]) -> std::io::Result<()
 }
 
 fn atomic_temp_path(target: &Path) -> PathBuf {
+    // Note: mirror of `atomic_temp_path` in crates/tools/src/sandbox/wasm_runner.rs.
+    // Keep changes in sync between both copies. The WASM guest cannot share code
+    // with the host runner because they target different compilation targets
+    // (wasm32-wasip1 vs native).
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -437,5 +441,8 @@ fn atomic_temp_path(target: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "attachment.bin".to_owned());
-    target.with_file_name(format!(".{file_name}.oxydra-write-{nanos}.tmp"))
+    // WASI does not support std::process::id() (panics). The guest runs as a
+    // single-shot process per invocation so there is no concurrent PID collision
+    // risk within a single guest. Use 0 as a fixed placeholder instead.
+    target.with_file_name(format!(".{file_name}.oxydra-write-0-{nanos}.tmp"))
 }

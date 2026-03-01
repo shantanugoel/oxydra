@@ -1574,40 +1574,71 @@ async fn launch_docker_container_async(
 
     // Pull the image if it doesn't exist locally.
     if docker.inspect_image(&params.image).await.is_err() {
+        info!(
+            endpoint = %params.endpoint.label(),
+            image = %params.image,
+            container = %params.container_name,
+            role = %params.role.as_label(),
+            "docker image not found locally; pulling image"
+        );
         let (from_image, tag) = match params.image.rsplit_once(':') {
             Some((img, tag)) => (img, tag),
             None => (params.image.as_str(), "latest"),
         };
-        docker
-            .create_image(
-                Some(
-                    CreateImageOptionsBuilder::new()
-                        .from_image(from_image)
-                        .tag(tag)
-                        .build(),
-                ),
-                None,
-                None,
-            )
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|source| {
-                if is_not_found_error(&source) {
-                    RunnerError::DockerOperation {
-                        endpoint: params.endpoint.label(),
-                        operation: "pull_image",
-                        target: params.image.clone(),
-                        message: pull_image_not_found_message(&params.image),
-                    }
-                } else {
-                    docker_operation_error(
-                        &params.endpoint,
-                        "pull_image",
-                        &params.container_name,
-                        source,
-                    )
+        let mut pull_stream = docker.create_image(
+            Some(
+                CreateImageOptionsBuilder::new()
+                    .from_image(from_image)
+                    .tag(tag)
+                    .build(),
+            ),
+            None,
+            None,
+        );
+        while let Some(progress) = pull_stream.try_next().await.map_err(|source| {
+            if is_not_found_error(&source) {
+                RunnerError::DockerOperation {
+                    endpoint: params.endpoint.label(),
+                    operation: "pull_image",
+                    target: params.image.clone(),
+                    message: pull_image_not_found_message(&params.image),
                 }
-            })?;
+            } else {
+                docker_operation_error(
+                    &params.endpoint,
+                    "pull_image",
+                    &params.container_name,
+                    source,
+                )
+            }
+        })? {
+            if let Some(status) = progress.status
+                && !status.trim().is_empty()
+            {
+                let progress_id = progress.id.filter(|value| !value.trim().is_empty());
+                if let Some(progress_id) = progress_id {
+                    info!(
+                        endpoint = %params.endpoint.label(),
+                        image = %params.image,
+                        status = %status,
+                        progress_id = %progress_id,
+                        "docker image pull progress"
+                    );
+                } else {
+                    info!(
+                        endpoint = %params.endpoint.label(),
+                        image = %params.image,
+                        status = %status,
+                        "docker image pull progress"
+                    );
+                }
+            }
+        }
+        info!(
+            endpoint = %params.endpoint.label(),
+            image = %params.image,
+            "docker image pull complete"
+        );
     }
 
     // Compute entrypoint/cmd before binds consumes workspace paths.

@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
+use tokio::time::{Instant, sleep};
 use types::{
     FunctionDecl, RunnerBootstrapEnvelope, SafetyTier, SandboxTier, ShellConfig, ShellOutputStream,
     SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode, StartupStatusReport, Tool,
@@ -79,6 +80,11 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
 const VAULT_COPYTO_READ_OPERATION: &str = "vault_copyto_read";
 const VAULT_COPYTO_WRITE_OPERATION: &str = "vault_copyto_write";
+// Retry sidecar dial for up to 15s (every 250ms) during bootstrap. This is
+// long enough to absorb normal container start jitter, while still failing
+// fast when the sidecar is genuinely unavailable.
+const SIDECAR_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const SIDECAR_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 static NEXT_VAULT_COPYTO_OPERATION_NUMBER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -923,13 +929,29 @@ async fn bootstrap_bash_tool(
 async fn connect_sidecar_bash_tool(endpoint: SidecarEndpoint) -> (BashTool, SessionStatus) {
     match endpoint.transport {
         SidecarTransport::Vsock => {
-            let session =
-                VsockShellSession::connect(Some(endpoint), ShellSessionConfig::default()).await;
-            let status = session.status().clone();
-            if status.is_ready() {
-                (BashTool::from_shell_session(Box::new(session)), status)
-            } else {
-                (BashTool::from_status(status.clone()), status)
+            let deadline = Instant::now() + SIDECAR_CONNECT_TIMEOUT;
+            loop {
+                let session = VsockShellSession::connect(
+                    Some(endpoint.clone()),
+                    ShellSessionConfig::default(),
+                )
+                .await;
+                let status = session.status().clone();
+                if status.is_ready() {
+                    return (BashTool::from_shell_session(Box::new(session)), status);
+                }
+                if matches!(
+                    status,
+                    SessionStatus::Unavailable(SessionUnavailable {
+                        reason: SessionUnavailableReason::ConnectionFailed,
+                        ..
+                    })
+                ) && Instant::now() < deadline
+                {
+                    sleep(SIDECAR_CONNECT_RETRY_INTERVAL).await;
+                    continue;
+                }
+                return (BashTool::from_status(status.clone()), status);
             }
         }
         SidecarTransport::Unix => connect_unix_sidecar_bash_tool(endpoint).await,
@@ -952,35 +974,42 @@ async fn connect_unix_sidecar_bash_tool(endpoint: SidecarEndpoint) -> (BashTool,
         }
     };
 
-    match UnixStream::connect(&socket_path).await {
-        Ok(stream) => match VsockShellSession::connect_with_stream(
-            stream,
-            SidecarTransport::Unix,
-            endpoint.address.clone(),
-            ShellSessionConfig::default(),
-        )
-        .await
-        {
-            Ok(session) => {
-                let status = session.status().clone();
-                (BashTool::from_shell_session(Box::new(session)), status)
-            }
+    let deadline = Instant::now() + SIDECAR_CONNECT_TIMEOUT;
+    loop {
+        match UnixStream::connect(&socket_path).await {
+            Ok(stream) => match VsockShellSession::connect_with_stream(
+                stream,
+                SidecarTransport::Unix,
+                endpoint.address.clone(),
+                ShellSessionConfig::default(),
+            )
+            .await
+            {
+                Ok(session) => {
+                    let status = session.status().clone();
+                    return (BashTool::from_shell_session(Box::new(session)), status);
+                }
+                Err(error) => {
+                    let status = unavailable_status(
+                        SessionUnavailableReason::ProtocolError,
+                        format!(
+                            "failed to initialize shell session over unix sidecar transport: {error}"
+                        ),
+                    );
+                    return (BashTool::from_status(status.clone()), status);
+                }
+            },
             Err(error) => {
+                if Instant::now() < deadline {
+                    sleep(SIDECAR_CONNECT_RETRY_INTERVAL).await;
+                    continue;
+                }
                 let status = unavailable_status(
-                    SessionUnavailableReason::ProtocolError,
-                    format!(
-                        "failed to initialize shell session over unix sidecar transport: {error}"
-                    ),
+                    SessionUnavailableReason::ConnectionFailed,
+                    format!("failed to connect to unix sidecar socket `{socket_path}`: {error}"),
                 );
-                (BashTool::from_status(status.clone()), status)
+                return (BashTool::from_status(status.clone()), status);
             }
-        },
-        Err(error) => {
-            let status = unavailable_status(
-                SessionUnavailableReason::ConnectionFailed,
-                format!("failed to connect to unix sidecar socket `{socket_path}`: {error}"),
-            );
-            (BashTool::from_status(status.clone()), status)
         }
     }
 }

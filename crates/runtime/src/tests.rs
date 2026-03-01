@@ -1935,22 +1935,28 @@ async fn run_session_errors_when_provider_stage_times_out() {
 }
 
 #[tokio::test]
-async fn run_session_errors_when_tool_stage_times_out() {
+async fn run_session_injects_tool_timeout_error_when_tool_stage_times_out() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
     let provider = FakeProvider::new(
         provider_id.clone(),
         test_catalog(provider_id.clone(), model_id.clone(), true),
-        vec![ProviderStep::Stream(vec![
-            Ok(StreamItem::ToolCallDelta(ToolCallDelta {
-                index: 0,
-                id: Some("call_1".to_owned()),
-                name: Some("slow_tool".to_owned()),
-                arguments: Some("{}".to_owned()),
-                metadata: None,
-            })),
-            Ok(StreamItem::FinishReason("tool_calls".to_owned())),
-        ])],
+        vec![
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".to_owned()),
+                    name: Some("slow_tool".to_owned()),
+                    arguments: Some("{}".to_owned()),
+                    metadata: None,
+                })),
+                Ok(StreamItem::FinishReason("tool_calls".to_owned())),
+            ]),
+            ProviderStep::Stream(vec![
+                Ok(StreamItem::Text("after timeout".to_owned())),
+                Ok(StreamItem::FinishReason("stop".to_owned())),
+            ]),
+        ],
     );
 
     let mut tools = ToolRegistry::default();
@@ -1967,11 +1973,18 @@ async fn run_session_errors_when_tool_stage_times_out() {
     );
     let mut context = test_context(provider_id, model_id);
 
-    let error = runtime
+    let response = runtime
         .run_session(&mut context, &CancellationToken::new())
         .await
-        .expect_err("tool stage should respect runtime timeout");
-    assert!(matches!(error, types::RuntimeError::BudgetExceeded));
+        .expect("tool timeout should be injected as a tool error message");
+    assert_eq!(response.message.content.as_deref(), Some("after timeout"));
+    let tool_message = context
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .and_then(|message| message.content.as_deref())
+        .expect("tool error message should be recorded");
+    assert!(tool_message.contains("tool execution timed out"));
 }
 
 #[tokio::test]

@@ -158,7 +158,7 @@ jitter          = false # Add randomized jitter to backoff
 # --- Attachment save configuration ---
 # Configure the attachment_save tool for persisting inbound user attachments.
 # [tools.attachment_save]
-# timeout_secs = 40   # Timeout in seconds for save operations (default: 40)
+# timeout_secs = 60   # Timeout in seconds for save operations (default: 60)
 
 # --- Shell command allowlist ---
 # Configure which commands the LLM is allowed to execute via shell_exec.

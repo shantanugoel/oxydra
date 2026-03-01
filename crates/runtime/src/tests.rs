@@ -205,6 +205,11 @@ impl Tool for MockReadTool {
 #[derive(Debug, Clone, Copy)]
 struct SlowTool;
 
+const SLOW_TOOL_DELAY_MS: u64 = 200;
+// Keep the assertion slightly below the sequential lower bound (2x delay).
+const SLOW_TOOL_PARALLEL_MARGIN_MS: u64 = 20;
+const SLOW_TOOL_PARALLEL_MAX_MS: u64 = (SLOW_TOOL_DELAY_MS * 2) - SLOW_TOOL_PARALLEL_MARGIN_MS;
+
 #[async_trait]
 impl Tool for SlowTool {
     fn schema(&self) -> FunctionDecl {
@@ -220,7 +225,7 @@ impl Tool for SlowTool {
         _args: &str,
         _context: &ToolExecutionContext,
     ) -> Result<String, ToolError> {
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(SLOW_TOOL_DELAY_MS)).await;
         Ok("done".to_owned())
     }
 
@@ -1754,10 +1759,10 @@ async fn run_session_executes_readonly_tools_in_parallel() {
         .unwrap();
     let elapsed = start.elapsed();
 
-    // SlowTool sleeps for 200ms. Two sequential would take > 400ms.
-    // Parallel should take ~200ms. We give it some buffer for setup/teardown.
+    // SlowTool sleeps for SLOW_TOOL_DELAY_MS. Two sequential runs take roughly 2x that.
+    // Keep a small buffer under the sequential lower bound so this still checks parallelism.
     assert!(
-        elapsed < Duration::from_millis(380),
+        elapsed < Duration::from_millis(SLOW_TOOL_PARALLEL_MAX_MS),
         "Took {:?}, not parallel!",
         elapsed
     );

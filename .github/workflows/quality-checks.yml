@@ -47,6 +47,7 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Run phase 5 tests
         run: cargo nextest run -p types -p provider -p tools -p tools-macros -p runtime -- --skip live_openai_smoke_normalizes_response
+      # Runner tests now pass under nextest parallel scheduling; keep default parallelism enabled.
       - name: Run runner tests
         run: cargo nextest run -p runner
       - name: Run provider snapshot test

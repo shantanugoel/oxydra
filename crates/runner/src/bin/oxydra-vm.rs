@@ -22,7 +22,12 @@ const DEFAULT_GATEWAY_BIND_ADDRESS: &str = "127.0.0.1:0";
 const GATEWAY_ENDPOINT_MARKER_FILE: &str = "gateway-endpoint";
 
 #[derive(Debug, Clone, Parser, PartialEq, Eq)]
-#[command(name = "oxydra-vm", about = "Oxydra VM process runtime")]
+#[command(
+    name = "oxydra-vm",
+    about = "Oxydra VM process runtime",
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("OXYDRA_GIT_HASH"), ")")
+)]
 struct OxydraVmArgs {
     #[arg(long = "user-id")]
     user_id: String,

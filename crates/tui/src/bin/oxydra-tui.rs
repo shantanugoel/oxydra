@@ -23,7 +23,12 @@ use uuid::Uuid;
 
 /// Interactive terminal client for Oxydra.
 #[derive(Parser, Debug)]
-#[command(name = "oxydra-tui", about = "Oxydra interactive TUI client")]
+#[command(
+    name = "oxydra-tui",
+    about = "Oxydra interactive TUI client",
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("OXYDRA_GIT_HASH"), ")")
+)]
 struct Cli {
     /// WebSocket URL of the gateway (e.g. ws://127.0.0.1:9090/ws).
     /// When omitted, the runner discovery mechanism is used (not yet wired).

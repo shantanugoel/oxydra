@@ -1,3 +1,5 @@
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     io,

@@ -5,7 +5,12 @@ use shell_daemon::ShellDaemonServer;
 use tokio::net::UnixListener;
 
 #[derive(Debug, Parser)]
-#[command(name = "shell-daemon", about = "Oxydra shell daemon sidecar")]
+#[command(
+    name = "shell-daemon",
+    about = "Oxydra shell daemon sidecar",
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("OXYDRA_GIT_HASH"), ")")
+)]
 struct Args {
     #[arg(long = "socket")]
     socket: PathBuf,

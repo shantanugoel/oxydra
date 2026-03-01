@@ -1,3 +1,5 @@
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 mod app;
 mod channel_adapter;
 mod event_loop;

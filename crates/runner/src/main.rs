@@ -48,7 +48,12 @@ enum CatalogAction {
 }
 
 #[derive(Debug, Clone, Parser, PartialEq, Eq)]
-#[command(name = "runner", about = "Oxydra runner control CLI")]
+#[command(
+    name = "runner",
+    about = "Oxydra runner control CLI",
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("OXYDRA_GIT_HASH"), ")")
+)]
 struct CliArgs {
     #[arg(short = 'c', long = "config", default_value = DEFAULT_RUNNER_CONFIG_PATH)]
     config_path: PathBuf,

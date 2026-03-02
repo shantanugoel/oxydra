@@ -228,6 +228,7 @@ function app() {
     connected: false,
     loading: false,
     saving: false,
+    sidebarOpen: false,
     meta: {},
     onboarding: { needs_setup: false, checks: {} },
     statusUsers: [],
@@ -305,6 +306,7 @@ function app() {
     route() {
       const hash = window.location.hash.slice(1) || '/';
       this.currentPage = ROUTES[hash] || 'dashboard';
+      this.sidebarOpen = false;
       this.onPageChange();
     },
 

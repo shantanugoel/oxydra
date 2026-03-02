@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Oxydra Web Configurator</title>
   <link rel="stylesheet" href="/css/style.css">
+  <script defer src="/js/form-renderer.js"></script>
+  <script defer src="/js/section-renderer.js"></script>
+  <script defer src="/js/collection-editor.js"></script>
   <script defer src="/js/onboarding.js"></script>
   <script defer src="/js/control.js"></script>
   <script defer src="/js/logs.js"></script>
@@ -12,19 +15,33 @@
   <script defer src="/js/vendor/alpine.min.js"></script>
 </head>
 <body x-data="app()">
-  <div class="layout">
+  <div class="layout" :class="{ 'sidebar-open': sidebarOpen }">
+    <!-- Mobile header with hamburger menu -->
+    <div class="mobile-header">
+      <button class="hamburger-btn" @click="sidebarOpen = !sidebarOpen" aria-label="Toggle navigation">
+        <span class="hamburger-line"></span>
+        <span class="hamburger-line"></span>
+        <span class="hamburger-line"></span>
+      </button>
+      <span class="mobile-logo">Oxydra</span>
+      <span class="version" x-text="meta.version || ''" style="opacity:0.7;font-size:0.76rem"></span>
+    </div>
+
+    <!-- Backdrop for mobile sidebar overlay -->
+    <div class="sidebar-backdrop" @click="sidebarOpen = false"></div>
+
     <nav class="sidebar">
       <div class="sidebar-header">
         <h1 class="logo">Oxydra</h1>
         <span class="version" x-text="meta.version || ''"></span>
       </div>
       <ul class="nav-links">
-        <li><a href="#/" :class="{ active: currentPage === 'dashboard' }">Dashboard</a></li>
-        <li><a href="#/config/agent" :class="{ active: currentPage === 'config-agent' }">Agent Config</a></li>
-        <li><a href="#/config/runner" :class="{ active: currentPage === 'config-runner' }">Runner Config</a></li>
-        <li><a href="#/config/users" :class="{ active: currentPage === 'config-users' }">Users</a></li>
-        <li><a href="#/control" :class="{ active: currentPage === 'control' }">Control</a></li>
-        <li><a href="#/logs" :class="{ active: currentPage === 'logs' }">Logs</a></li>
+        <li><a href="#/" :class="{ active: currentPage === 'dashboard' }" @click="sidebarOpen = false">Dashboard</a></li>
+        <li><a href="#/config/agent" :class="{ active: currentPage === 'config-agent' }" @click="sidebarOpen = false">Agent Config</a></li>
+        <li><a href="#/config/runner" :class="{ active: currentPage === 'config-runner' }" @click="sidebarOpen = false">Runner Config</a></li>
+        <li><a href="#/config/users" :class="{ active: currentPage === 'config-users' }" @click="sidebarOpen = false">Users</a></li>
+        <li><a href="#/control" :class="{ active: currentPage === 'control' }" @click="sidebarOpen = false">Control</a></li>
+        <li><a href="#/logs" :class="{ active: currentPage === 'logs' }" @click="sidebarOpen = false">Logs</a></li>
       </ul>
       <div class="sidebar-footer">
         <div class="status-dot" :class="{ connected: connected }"></div>

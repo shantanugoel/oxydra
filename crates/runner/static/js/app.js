@@ -6,6 +6,7 @@ const ROUTES = {
   '/config/agent': 'config-agent',
   '/config/runner': 'config-runner',
   '/config/users': 'config-users',
+  '/control': 'control',
   '/logs': 'logs',
   '/setup': 'setup',
 };
@@ -246,9 +247,43 @@ function app() {
       config_path: '',
     },
     onboardingWizard: onboardingFactory(),
+    controlState: window.OxydraControl?.createControlState
+      ? window.OxydraControl.createControlState()
+      : { busyByUser: {} },
+    logsState: window.OxydraLogs?.createLogsState
+      ? window.OxydraLogs.createLogsState()
+      : {
+        userId: '',
+        role: 'runtime',
+        stream: 'both',
+        tail: 200,
+        format: 'json',
+        autoRefresh: true,
+        entries: [],
+        warnings: [],
+        truncated: false,
+        loading: false,
+      },
 
     async init() {
       window.addEventListener('hashchange', () => this.route());
+      this._controlPollTimer = window.setInterval(() => {
+        if (document.visibilityState !== 'visible' || this.currentPage !== 'control') {
+          return;
+        }
+        this.loadStatus().catch((error) => this.showToast(error.message, 'error'));
+      }, 5000);
+      this._logsPollTimer = window.setInterval(() => {
+        if (
+          document.visibilityState !== 'visible'
+          || this.currentPage !== 'logs'
+          || !this.logsState.autoRefresh
+          || !this.logsState.userId
+        ) {
+          return;
+        }
+        this.refreshLogs().catch((error) => this.showToast(error.message, 'error'));
+      }, 2000);
       await this.refreshCoreData();
       this.route();
     },
@@ -283,6 +318,10 @@ function app() {
           await this.loadRunnerConfig();
         } else if (this.currentPage === 'config-users') {
           await this.loadUsersPage();
+        } else if (this.currentPage === 'control') {
+          await this.loadControlPage();
+        } else if (this.currentPage === 'logs') {
+          await this.loadLogsPage();
         } else if (this.currentPage === 'setup') {
           this.seedOnboardingWizard();
         }
@@ -353,6 +392,138 @@ function app() {
 
     findUserStatus(userId) {
       return this.statusUsers.find((entry) => entry.user_id === userId);
+    },
+
+    isUserRunning(userId) {
+      const status = this.findUserStatus(userId);
+      return Boolean(status && status.daemon_running);
+    },
+
+    controlUserBusy(userId) {
+      if (window.OxydraControl?.isUserBusy) {
+        return window.OxydraControl.isUserBusy(this.controlState, userId);
+      }
+      return Boolean(this.controlState.busyByUser[userId]);
+    },
+
+    setControlUserBusy(userId, busy) {
+      if (window.OxydraControl?.setUserBusy) {
+        window.OxydraControl.setUserBusy(this.controlState, userId, busy);
+        return;
+      }
+      this.controlState.busyByUser[userId] = Boolean(busy);
+    },
+
+    async loadControlPage() {
+      await this.loadUsers();
+      await this.loadStatus();
+    },
+
+    async runControlAction(userId, action) {
+      if (!userId || this.controlUserBusy(userId)) {
+        return;
+      }
+      this.setControlUserBusy(userId, true);
+      try {
+        await api(`/control/${encodeURIComponent(userId)}/${action}`, {
+          method: 'POST',
+          body: {},
+        });
+        await this.loadStatus();
+        this.showToast(`User ${userId}: ${action} completed.`, 'success');
+      } catch (error) {
+        this.showToast(error.message, 'error');
+      } finally {
+        this.setControlUserBusy(userId, false);
+      }
+    },
+
+    async loadLogsPage() {
+      await this.loadUsers();
+      await this.loadStatus();
+      const hasSelectedUser = this.userList.some((user) => user.user_id === this.logsState.userId);
+      if (!hasSelectedUser) {
+        this.logsState.userId = this.userList[0]?.user_id || '';
+      }
+      if (!this.logsState.userId) {
+        this.logsState.entries = [];
+        this.logsState.warnings = [];
+        this.logsState.truncated = false;
+        return;
+      }
+      await this.refreshLogs();
+    },
+
+    async setLogsUser(userId) {
+      this.logsState.userId = userId;
+      await this.refreshLogs();
+    },
+
+    logEntryLevel(entry) {
+      if (window.OxydraLogs?.inferLevel) {
+        return window.OxydraLogs.inferLevel(entry);
+      }
+      const message = String(entry?.message || '').toLowerCase();
+      if (message.includes('error')) return 'error';
+      if (message.includes('warn')) return 'warn';
+      if (message.includes('debug')) return 'debug';
+      if (message.includes('trace')) return 'trace';
+      return 'info';
+    },
+
+    logEntryText(entry) {
+      if (window.OxydraLogs?.toTextLine) {
+        return window.OxydraLogs.toTextLine(entry);
+      }
+      const ts = entry?.timestamp || '-';
+      return `${ts} [${entry.source || 'process_file'}][${entry.role}][${entry.stream}] ${entry.message || ''}`;
+    },
+
+    decorateLogEntries(entries) {
+      return (entries || []).map((entry) => ({
+        ...entry,
+        _level: this.logEntryLevel(entry),
+        _text: this.logEntryText(entry),
+      }));
+    },
+
+    async refreshLogs() {
+      if (!this.logsState.userId) {
+        return;
+      }
+      this.logsState.loading = true;
+      try {
+        const params = new URLSearchParams({
+          role: this.logsState.role,
+          stream: this.logsState.stream,
+          tail: String(this.logsState.tail || 200),
+          format: this.logsState.format || 'json',
+        });
+        const data = await api(`/logs/${encodeURIComponent(this.logsState.userId)}?${params.toString()}`);
+        this.logsState.entries = this.decorateLogEntries(data.entries);
+        this.logsState.warnings = data.warnings || [];
+        this.logsState.truncated = Boolean(data.truncated);
+      } catch (error) {
+        this.showToast(error.message, 'error');
+      } finally {
+        this.logsState.loading = false;
+      }
+    },
+
+    async copyLogsToClipboard() {
+      const text = this.logsState.entries
+        .map((entry) => entry._text || this.logEntryText(entry))
+        .join('\n');
+      if (!text) {
+        this.showToast('No log lines to copy.', 'info');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        this.showToast('Copied logs to clipboard.', 'success');
+      } catch {
+        this.showToast('Clipboard copy failed.', 'error');
+      }
     },
 
     updateTextField(editor, field, nextValue) {

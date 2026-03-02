@@ -372,6 +372,72 @@ select.text-input:focus {
   margin-top: 20px;
 }
 
+.logs-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.logs-controls label span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.logs-meta {
+  margin: 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logs-output {
+  background: #0f1724;
+  border: 1px solid #1f2b40;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px;
+  max-height: 460px;
+  overflow: auto;
+  font-family: Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.log-line {
+  color: #d9e6ff;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-error {
+  color: #ffd4d4;
+}
+
+.log-warn {
+  color: #ffe6b3;
+}
+
+.log-info {
+  color: #d9e6ff;
+}
+
+.log-debug,
+.log-trace {
+  color: #b6c6e5;
+}
+
+.warnings-list {
+  margin-top: 10px;
+  padding-left: 18px;
+}
+
+.warning-item {
+  color: var(--warning);
+  margin: 4px 0;
+}
+
 .banner {
   display: flex;
   align-items: center;

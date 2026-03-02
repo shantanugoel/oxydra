@@ -1,5 +1,7 @@
 mod config_read;
 mod config_write;
+mod control;
+mod logs;
 mod masking;
 mod middleware;
 mod onboarding;
@@ -54,7 +56,7 @@ pub async fn run_web_server(
         .to_owned();
 
     let web_state = Arc::new(WebState::new(global_config, config_path, bind.clone()));
-    let app = build_router(web_state);
+    let app = build_router(web_state.clone());
 
     let listener = TcpListener::bind(&bind)
         .await
@@ -67,7 +69,7 @@ pub async fn run_web_server(
     eprintln!("Oxydra Web Configurator running at http://{bind}");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(web_state))
         .await?;
 
     tracing::info!("web configurator shut down");
@@ -115,6 +117,14 @@ fn build_router(state: Arc<WebState>) -> Router {
         // Phase 2: status endpoints
         .route("/status", get(status::get_status))
         .route("/status/{user_id}", get(status::get_user_status))
+        // Phase 4: lifecycle control + logs
+        .route("/control/{user_id}/start", post(control::start_user_daemon))
+        .route("/control/{user_id}/stop", post(control::stop_user_daemon))
+        .route(
+            "/control/{user_id}/restart",
+            post(control::restart_user_daemon),
+        )
+        .route("/logs/{user_id}", get(logs::get_logs))
         // Phase 2: onboarding
         .route("/onboarding/status", get(onboarding::get_onboarding_status));
 
@@ -149,11 +159,19 @@ async fn meta_handler(State(state): State<Arc<WebState>>) -> response::ApiRespon
     })
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(state: Arc<WebState>) {
     tokio::signal::ctrl_c()
         .await
         .expect("failed to install Ctrl+C handler");
-    tracing::info!("received shutdown signal");
+    let tracked_daemons = state.spawned_daemon_pids_snapshot();
+    if tracked_daemons.is_empty() {
+        tracing::info!("received shutdown signal");
+    } else {
+        tracing::warn!(
+            tracked_daemons = ?tracked_daemons,
+            "received shutdown signal; leaving tracked daemons running"
+        );
+    }
 }
 
 #[cfg(test)]

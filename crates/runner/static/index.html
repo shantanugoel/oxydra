@@ -6,6 +6,8 @@
   <title>Oxydra Web Configurator</title>
   <link rel="stylesheet" href="/css/style.css">
   <script defer src="/js/onboarding.js"></script>
+  <script defer src="/js/control.js"></script>
+  <script defer src="/js/logs.js"></script>
   <script defer src="/js/app.js"></script>
   <script defer src="/js/vendor/alpine.min.js"></script>
 </head>
@@ -21,6 +23,7 @@
         <li><a href="#/config/agent" :class="{ active: currentPage === 'config-agent' }">Agent Config</a></li>
         <li><a href="#/config/runner" :class="{ active: currentPage === 'config-runner' }">Runner Config</a></li>
         <li><a href="#/config/users" :class="{ active: currentPage === 'config-users' }">Users</a></li>
+        <li><a href="#/control" :class="{ active: currentPage === 'control' }">Control</a></li>
         <li><a href="#/logs" :class="{ active: currentPage === 'logs' }">Logs</a></li>
       </ul>
       <div class="sidebar-footer">
@@ -278,7 +281,106 @@
 
       <div x-show="currentPage === 'logs'" x-cloak>
         <h2>Logs</h2>
-        <p class="text-muted">Log viewing lands in Phase 4. Config save and lifecycle status are available now.</p>
+        <div class="card">
+          <div class="card-body logs-controls">
+            <label>
+              <span>User</span>
+              <select class="text-input" :value="logsState.userId" @change="setLogsUser($event.target.value)">
+                <template x-for="user in userList" :key="user.user_id">
+                  <option :value="user.user_id" x-text="user.user_id"></option>
+                </template>
+              </select>
+            </label>
+            <label>
+              <span>Role</span>
+              <select class="text-input" :value="logsState.role" @change="logsState.role = $event.target.value; refreshLogs()">
+                <option value="runtime">runtime</option>
+                <option value="sidecar">sidecar</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <label>
+              <span>Stream</span>
+              <select class="text-input" :value="logsState.stream" @change="logsState.stream = $event.target.value; refreshLogs()">
+                <option value="stdout">stdout</option>
+                <option value="stderr">stderr</option>
+                <option value="both">both</option>
+              </select>
+            </label>
+            <label>
+              <span>Tail</span>
+              <input type="number" class="text-input" min="1" max="1000"
+                     :value="logsState.tail"
+                     @change="logsState.tail = Number($event.target.value) || 200; refreshLogs()">
+            </label>
+            <label class="switch-row">
+              <input type="checkbox" :checked="logsState.autoRefresh" @change="logsState.autoRefresh = $event.target.checked">
+              <span>Auto-refresh</span>
+            </label>
+            <div class="actions-row">
+              <button class="btn btn-muted" :disabled="logsState.loading" @click="refreshLogs()">Refresh</button>
+              <button class="btn btn-primary" :disabled="logsState.entries.length === 0" @click="copyLogsToClipboard()">Copy to Clipboard</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="logs-meta">
+          <span class="badge" :class="logsState.loading ? 'badge-muted' : 'badge-success'" x-text="logsState.loading ? 'Loading' : 'Ready'"></span>
+          <span class="text-muted" x-show="logsState.truncated">Output truncated by server limits.</span>
+        </div>
+
+        <div class="logs-output" x-show="logsState.entries.length > 0">
+          <template x-for="(entry, index) in logsState.entries" :key="`${entry.timestamp || 'na'}-${entry.role}-${entry.stream}-${index}`">
+            <div class="log-line" :class="`log-${entry._level || logEntryLevel(entry)}`" x-text="entry._text || logEntryText(entry)"></div>
+          </template>
+        </div>
+
+        <div class="empty-state" x-show="!logsState.loading && logsState.entries.length === 0">
+          No logs available for the selected filters.
+        </div>
+
+        <ul class="warnings-list" x-show="logsState.warnings.length > 0">
+          <template x-for="warning in logsState.warnings" :key="warning">
+            <li class="warning-item" x-text="warning"></li>
+          </template>
+        </ul>
+      </div>
+
+      <div x-show="currentPage === 'control'" x-cloak>
+        <h2>Control Panel</h2>
+        <div class="empty-state" x-show="userList.length === 0">No users registered yet.</div>
+        <table x-show="userList.length > 0" class="data-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="user in userList" :key="user.user_id">
+              <tr>
+                <td x-text="user.user_id"></td>
+                <td>
+                  <span class="badge" :class="isUserRunning(user.user_id) ? 'badge-success' : 'badge-muted'"
+                        x-text="isUserRunning(user.user_id) ? 'Running' : 'Stopped'"></span>
+                </td>
+                <td class="table-actions">
+                  <button class="btn btn-primary"
+                          :disabled="controlUserBusy(user.user_id) || isUserRunning(user.user_id)"
+                          @click="runControlAction(user.user_id, 'start')">Start</button>
+                  <button class="btn btn-muted"
+                          :disabled="controlUserBusy(user.user_id) || !isUserRunning(user.user_id)"
+                          @click="runControlAction(user.user_id, 'stop')">Stop</button>
+                  <button class="btn btn-muted"
+                          :disabled="controlUserBusy(user.user_id) || !isUserRunning(user.user_id)"
+                          @click="runControlAction(user.user_id, 'restart')">Restart</button>
+                  <span class="text-muted" x-show="controlUserBusy(user.user_id)">Working…</span>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
       </div>
 
       <div x-show="currentPage === 'setup'" x-cloak>

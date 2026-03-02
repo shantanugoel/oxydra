@@ -714,13 +714,15 @@ Alpine.js is vendored (downloaded and placed in `static/js/vendor/alpine.min.js`
 
 ---
 
-### Phase 4: Lifecycle Control + Logs
+### Phase 4: Lifecycle Control + Logs ✅
+
+**Status:** Complete
 
 **Goal:** The web UI can start/stop/restart daemons and view logs.
 
 **Steps:**
 
-1. **Create `runner/src/web/control.rs`** — Lifecycle endpoints:
+1. ✅ **Create `runner/src/web/control.rs`** — Lifecycle endpoints:
    - `POST /api/v1/control/{user_id}/start` — Uses `Runner::start_user()` to launch daemon. Waits for gateway endpoint (with 30s timeout). Returns startup info.
    - `POST /api/v1/control/{user_id}/stop` — Sends `ShutdownUser` via control socket. Waits for socket removal (with 10s timeout).
    - `POST /api/v1/control/{user_id}/restart` — Stop (if running) then start.
@@ -729,36 +731,36 @@ Alpine.js is vendored (downloaded and placed in `static/js/vendor/alpine.min.js`
 
    **Decision: Use the spawn approach.** The web server spawns `runner start --user <id>` as a child process (detached). Lifecycle management goes through the control socket. This avoids the web server needing to hold daemon state, and means `runner web` can be stopped/restarted without killing running daemons.
 
-2. **Create `runner/src/web/logs.rs`** — Log endpoints:
+2. ✅ **Create `runner/src/web/logs.rs`** — Log endpoints:
    - `GET /api/v1/logs/{user_id}` — Proxy to daemon control socket using `RunnerControl::Logs(request)`. If daemon not running, try to read log files directly from the workspace logs directory.
    - Query params: `role`, `stream`, `tail`, `since`, `format`.
    - Response uses the existing `RunnerControlLogsResponse` format.
 
-3. **Build Control Panel page** (`static/js/control.js`):
+3. ✅ **Build Control Panel page** (`static/js/control.js`):
    - Start/Stop/Restart buttons per user.
    - Status polling (every 5 seconds when page is visible).
    - Button states reflect daemon status (disable "Start" when running, etc.).
    - Spinner during operations, toast on success/failure.
 
-4. **Build Logs page** (`static/js/logs.js`):
+4. ✅ **Build Logs page** (`static/js/logs.js`):
    - User selector dropdown.
    - Log output area with monospace font, colored by log level.
    - "Auto-refresh" toggle that polls every 2 seconds.
    - Filter controls for role, stream, tail count.
    - "Copy to clipboard" button.
 
-5. **Wire daemon lifecycle into web state**:
+5. ✅ **Wire daemon lifecycle into web state**:
    - Track spawned daemon child process PIDs in `WebState` for cleanup on web server shutdown.
    - On web server shutdown (Ctrl+C), log a warning but do NOT kill running daemons (they're independent processes).
 
 **Verification gate:**
-- Start/Stop/Restart from the web UI works.
-- Logs are displayed with correct formatting.
-- Auto-refresh shows new log entries.
-- Starting an already-running daemon returns appropriate error.
-- Stopping a stopped daemon returns appropriate error.
-- Web server shutdown doesn't kill running daemons.
-- All tests pass, no clippy warnings.
+- ✅ Start/Stop/Restart from the web UI works.
+- ✅ Logs are displayed with correct formatting.
+- ✅ Auto-refresh shows new log entries.
+- ✅ Starting an already-running daemon returns appropriate error.
+- ✅ Stopping a stopped daemon returns appropriate error.
+- ✅ Web server shutdown doesn't kill running daemons.
+- ✅ All tests pass, no clippy warnings.
 
 ---
 
@@ -902,8 +904,8 @@ All new dependencies use the latest stable release at implementation time. Add w
 - [ ] Config editors allow editing and saving with validation.
 - [ ] Saved configs preserve TOML comments and formatting.
 - [ ] Backups are created before each write.
-- [ ] Start/Stop/Restart buttons work from the web UI.
-- [ ] Logs are viewable from the web UI with filtering.
+- [x] Start/Stop/Restart buttons work from the web UI.
+- [x] Logs are viewable from the web UI with filtering.
 - [ ] Auth middleware blocks unauthenticated requests when token auth is enabled.
 - [ ] Host header validation blocks cross-origin requests.
 - [ ] Secret masking prevents API key leakage.

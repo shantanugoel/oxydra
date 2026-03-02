@@ -2453,7 +2453,7 @@ fn spawn_docker_log_capture(
 
 /// Read the last `max_lines` from a log file, optionally filtering lines
 /// that are newer than `since`. Returns `(lines, was_truncated)`.
-fn read_log_file_tail(
+pub(crate) fn read_log_file_tail(
     path: &Path,
     max_lines: usize,
     since: Option<&str>,
@@ -2555,7 +2555,7 @@ fn system_time_to_rfc3339(t: std::time::SystemTime) -> String {
 
 /// Extract an RFC 3339-ish timestamp from the beginning of a log line.
 /// Docker `--timestamps` prepends lines like `2026-03-01T10:55:12.123456789Z `.
-fn extract_timestamp(line: &str) -> Option<String> {
+pub(crate) fn extract_timestamp(line: &str) -> Option<String> {
     // Look for an ISO 8601 / RFC 3339 prefix: at least "YYYY-MM-DDTHH:MM:SS".
     if line.len() >= 19
         && line.as_bytes()[4] == b'-'
@@ -2572,7 +2572,7 @@ fn extract_timestamp(line: &str) -> Option<String> {
 }
 
 /// Strip a leading timestamp (if any) from a log line, returning the message.
-fn strip_timestamp(line: &str) -> String {
+pub(crate) fn strip_timestamp(line: &str) -> String {
     if line.len() >= 19
         && line.as_bytes()[4] == b'-'
         && line.as_bytes()[7] == b'-'

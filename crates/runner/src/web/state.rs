@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use types::RunnerGlobalConfig;
 
@@ -18,6 +19,10 @@ pub struct WebState {
     allowed_hosts: BTreeSet<String>,
     /// Resolved bearer token when token auth mode is enabled.
     auth_token: Option<String>,
+    /// Path to the runner executable used for detached lifecycle spawns.
+    runner_executable: PathBuf,
+    /// PIDs of daemon processes spawned via web lifecycle endpoints.
+    spawned_daemon_pids: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl WebState {
@@ -38,6 +43,10 @@ impl WebState {
         };
         let allowed_hosts = allowed_host_values(&bind_address);
         let auth_token = global_config.web.resolve_auth_token();
+        let runner_executable = std::env::var_os("OXYDRA_WEB_RUNNER_EXECUTABLE")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| PathBuf::from("runner"));
         Self {
             global_config,
             config_path,
@@ -45,6 +54,8 @@ impl WebState {
             bind_address,
             allowed_hosts,
             auth_token,
+            runner_executable,
+            spawned_daemon_pids: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -89,6 +100,42 @@ impl WebState {
     /// Returns the resolved web bearer token (if token auth is enabled).
     pub fn auth_token(&self) -> Option<&str> {
         self.auth_token.as_deref()
+    }
+
+    /// Returns the executable path used to spawn detached `runner start` daemons.
+    pub fn runner_executable(&self) -> &Path {
+        &self.runner_executable
+    }
+
+    /// Record a daemon PID for a user started by the web control API.
+    pub fn record_spawned_daemon_pid(&self, user_id: &str, pid: u32) {
+        if let Ok(mut tracked) = self.spawned_daemon_pids.lock() {
+            tracked.insert(user_id.to_owned(), pid);
+        }
+    }
+
+    /// Remove and return any tracked daemon PID for the given user.
+    pub fn remove_spawned_daemon_pid(&self, user_id: &str) -> Option<u32> {
+        self.spawned_daemon_pids
+            .lock()
+            .ok()
+            .and_then(|mut tracked| tracked.remove(user_id))
+    }
+
+    /// Snapshot tracked daemon PIDs for shutdown logging.
+    pub fn spawned_daemon_pids_snapshot(&self) -> Vec<(String, u32)> {
+        let mut pairs = self
+            .spawned_daemon_pids
+            .lock()
+            .map(|tracked| {
+                tracked
+                    .iter()
+                    .map(|(user_id, pid)| (user_id.clone(), *pid))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
     }
 
     /// Compute the control socket path for a user daemon.

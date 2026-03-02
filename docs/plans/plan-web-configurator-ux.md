@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Planned
+- **State:** In Progress (Phase 1 complete)
 - **Issue:** Follow-up to [#7](https://github.com/shantanugoel/oxydra/issues/7)
 - **Scope:** `runner` crate (backend API + frontend static files)
 - **Prerequisite:** Web configurator V1 complete (plan-web-configurator.md)
@@ -387,13 +387,15 @@ Each sender binding is a card with:
 
 ## Implementation Phases
 
-### Phase 1: Backend — Schema Metadata & Catalog Endpoints
+### Phase 1: Backend — Schema Metadata & Catalog Endpoints ✅
 
 **Goal:** Backend serves all metadata the frontend needs for smart forms.
 
+**Status:** Complete
+
 **Steps:**
 
-1. **Create `runner/src/web/schema.rs`** — Schema metadata endpoint:
+1. ✅ **Create `runner/src/web/schema.rs`** — Schema metadata endpoint:
    - Define `ConfigSchema`, `SchemaSection`, `SchemaField` structs with all metadata (label, description, input_type, default, constraints, enum_options, dynamic_source, `nullable`).
    - Implement `build_agent_schema()`, `build_runner_schema()`, `build_user_schema()` with a **hybrid strategy**: auto-derive structural/default/enum metadata from Rust types and overlay manually-authored UX metadata.
    - Build `dynamic_sources` including:
@@ -410,22 +412,22 @@ Each sender binding is a card with:
      - `safesearch_levels`: 0, 1, 2
    - `GET /api/v1/meta/schema` handler that returns the complete schema.
 
-2. **Create `runner/src/web/catalog_api.rs`** — Catalog endpoints:
+2. ✅ **Create `runner/src/web/catalog_api.rs`** — Catalog endpoints:
    - `GET /api/v1/catalog` — Loads model catalog (cache → pinned), returns providers with their models. Only returns fields relevant to the UI (id, name, family, reasoning, tool_call, attachment, modalities, cost, limit).
    - `GET /api/v1/catalog/status` — Returns: source (cache path or "pinned"), last_modified (file mtime if cached), provider_count, model_count.
    - `POST /api/v1/catalog/refresh` — Calls `catalog::run_fetch()` (spawned on blocking pool since it uses reqwest::blocking). Returns updated catalog summary. Accepts optional `{ "pinned": bool }` body.
 
-3. **Wire new routes in `web/mod.rs`**:
+3. ✅ **Wire new routes in `web/mod.rs`**:
    - Add the 4 new endpoints to the router.
 
-4. **Add tool names source of truth** — Expose a helper in `tools`/`runner` that returns canonical tool names from actual tool declarations (not a duplicated hardcoded list in the web module). The `tools` crate already defines constants like `FILE_READ_TOOL_NAME`, `WEB_SEARCH_TOOL_NAME`, etc. — collect these into a single function so the schema endpoint and tool registration stay in sync.
+4. ✅ **Add tool names source of truth** — Expose a helper in `tools`/`runner` that returns canonical tool names from actual tool declarations (not a duplicated hardcoded list in the web module). The `tools` crate already defines constants like `FILE_READ_TOOL_NAME`, `WEB_SEARCH_TOOL_NAME`, etc. — collect these into a single function so the schema endpoint and tool registration stay in sync.
 
 **Verification gate:**
-- `GET /api/v1/meta/schema` returns complete field metadata for all 3 config types.
-- `GET /api/v1/catalog` returns provider/model data.
-- `POST /api/v1/catalog/refresh` successfully fetches and caches a new catalog.
-- Dynamic sources include current registered providers and all tool names.
-- All existing tests pass, no clippy warnings.
+- ✅ `GET /api/v1/meta/schema` returns complete field metadata for all 3 config types.
+- ✅ `GET /api/v1/catalog` returns provider/model data.
+- ✅ `POST /api/v1/catalog/refresh` successfully fetches and caches a new catalog.
+- ✅ Dynamic sources include current registered providers and all tool names.
+- ✅ All existing tests pass, no clippy warnings.
 
 ---
 

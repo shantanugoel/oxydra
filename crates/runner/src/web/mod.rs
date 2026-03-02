@@ -1,3 +1,4 @@
+mod catalog_api;
 mod config_read;
 mod config_write;
 mod control;
@@ -6,6 +7,7 @@ mod masking;
 mod middleware;
 mod onboarding;
 mod response;
+mod schema;
 mod state;
 mod static_files;
 mod status;
@@ -79,6 +81,12 @@ pub async fn run_web_server(
 pub fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/meta", get(meta_handler))
+        // Schema metadata endpoint
+        .route("/meta/schema", get(schema::get_config_schema))
+        // Model catalog endpoints
+        .route("/catalog", get(catalog_api::get_catalog))
+        .route("/catalog/status", get(catalog_api::get_catalog_status))
+        .route("/catalog/refresh", post(catalog_api::refresh_catalog))
         // Phase 2 + 3: config read/write endpoints
         .route(
             "/config/runner",

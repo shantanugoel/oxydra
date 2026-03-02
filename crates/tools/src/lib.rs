@@ -80,6 +80,42 @@ pub const VAULT_COPYTO_TOOL_NAME: &str = "vault_copyto";
 pub const SHELL_EXEC_TOOL_NAME: &str = "shell_exec";
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
+/// Returns the canonical list of all tool names defined in this crate.
+///
+/// This is the single source of truth for tool name enumeration. The web
+/// configurator schema endpoint uses it so the frontend stays in sync with
+/// actual registered tools.
+pub fn canonical_tool_names() -> Vec<&'static str> {
+    vec![
+        FILE_READ_TOOL_NAME,
+        FILE_SEARCH_TOOL_NAME,
+        FILE_LIST_TOOL_NAME,
+        FILE_WRITE_TOOL_NAME,
+        FILE_EDIT_TOOL_NAME,
+        FILE_DELETE_TOOL_NAME,
+        WEB_FETCH_TOOL_NAME,
+        WEB_SEARCH_TOOL_NAME,
+        VAULT_COPYTO_TOOL_NAME,
+        SHELL_EXEC_TOOL_NAME,
+        ATTACHMENT_SAVE_TOOL_NAME,
+        SEND_MEDIA_TOOL_NAME,
+        MEMORY_SEARCH_TOOL_NAME,
+        MEMORY_SAVE_TOOL_NAME,
+        MEMORY_UPDATE_TOOL_NAME,
+        MEMORY_DELETE_TOOL_NAME,
+        SCHEDULE_CREATE_TOOL_NAME,
+        SCHEDULE_SEARCH_TOOL_NAME,
+        SCHEDULE_EDIT_TOOL_NAME,
+        SCHEDULE_DELETE_TOOL_NAME,
+        SCHEDULE_RUNS_TOOL_NAME,
+        SCHEDULE_RUN_OUTPUT_TOOL_NAME,
+        SCRATCHPAD_READ_TOOL_NAME,
+        SCRATCHPAD_WRITE_TOOL_NAME,
+        SCRATCHPAD_CLEAR_TOOL_NAME,
+        delegation_tools::DELEGATE_TO_AGENT_TOOL_NAME,
+    ]
+}
+
 const VAULT_COPYTO_READ_OPERATION: &str = "vault_copyto_read";
 const VAULT_COPYTO_WRITE_OPERATION: &str = "vault_copyto_write";
 // Retry sidecar dial for up to 15s (every 250ms) during bootstrap. This is

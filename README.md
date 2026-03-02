@@ -92,6 +92,9 @@ Defaults:
 Useful variants:
 
 ```bash
+# Preview upgrade actions without changing anything
+curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --dry-run
+
 # Install latest release (no pin)
 curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash
 
@@ -106,9 +109,6 @@ curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/in
 
 # Non-interactive upgrade (auto-confirm prompts)
 curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --yes
-
-# Preview upgrade actions without changing anything
-curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --dry-run
 
 # Skip Docker pre-pull after install
 curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --no-pull

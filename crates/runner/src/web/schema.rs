@@ -783,8 +783,7 @@ fn agent_agents_section() -> SchemaSection {
         group: Some("custom_agent_definitions".into()),
         group_label: Some("Custom Agent Definitions".into()),
         group_description: Some(
-            "Define named agent variants with their own model, prompt, and tool settings"
-                .into(),
+            "Define named agent variants with their own model, prompt, and tool settings".into(),
         ),
         always_expanded: true,
         fields: vec![

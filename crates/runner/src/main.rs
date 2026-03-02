@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use runner::{
     GATEWAY_ENDPOINT_MARKER_FILE, Runner, RunnerControlTransportError, RunnerError,
     RunnerStartRequest, RunnerTuiConnectRequest, catalog::CatalogError, send_control_to_daemon,
+    web,
 };
 use thiserror::Error;
 use types::{
@@ -62,6 +63,12 @@ enum CliCommand {
         /// Include pre-release versions in the check
         #[arg(long)]
         pre_release: bool,
+    },
+    /// Start the web configurator dashboard
+    Web {
+        /// Override the bind address (e.g. 127.0.0.1:9400)
+        #[arg(long)]
+        bind: Option<String>,
     },
 }
 
@@ -142,6 +149,8 @@ enum CliError {
     GatewayEndpointTimeout { path: PathBuf, timeout_secs: u64 },
     #[error("invalid --env value `{value}`: expected KEY=VALUE format")]
     InvalidEnvVar { value: String },
+    #[error("web server error: {0}")]
+    WebServer(#[from] runner::web::WebServerError),
     #[error("failed to read --env-file `{path}`: {source}")]
     EnvFileRead {
         path: PathBuf,
@@ -200,6 +209,9 @@ fn run() -> Result<(), CliError> {
         }
         Some(CliCommand::CheckUpdate { pre_release }) => {
             return handle_check_update(*pre_release, &args.config_path);
+        }
+        Some(CliCommand::Web { bind }) => {
+            return handle_web(&args.config_path, bind.clone());
         }
         None => {}
     }
@@ -271,6 +283,18 @@ fn run() -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+fn handle_web(config_path: &Path, bind_override: Option<String>) -> Result<(), CliError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| RunnerError::AsyncRuntimeInit { source })?;
+    rt.block_on(async {
+        web::run_web_server(config_path, bind_override)
+            .await
+            .map_err(CliError::from)
+    })
 }
 
 fn handle_catalog_action(action: CatalogAction) -> Result<(), CliError> {

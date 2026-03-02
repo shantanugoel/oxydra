@@ -49,6 +49,7 @@ mod backend;
 pub mod bootstrap;
 pub mod catalog;
 mod config_migration;
+pub mod web;
 
 pub use bootstrap::{
     BootstrapError, CliOverrides, VmBootstrapRuntime, bootstrap_vm_runtime,
@@ -3105,22 +3106,29 @@ pub fn send_control_to_daemon(
         .enable_all()
         .build()
         .map_err(RunnerControlTransportError::Transport)?;
-    rt.block_on(async {
-        let mut stream = tokio::net::UnixStream::connect(control_socket_path)
-            .await
-            .map_err(RunnerControlTransportError::Transport)?;
-        let payload = serde_json::to_vec(request)?;
-        write_runner_control_frame(&mut stream, &payload).await?;
-        let response_frame = read_runner_control_frame(&mut stream)
-            .await?
-            .ok_or_else(|| {
-                RunnerControlTransportError::Transport(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "daemon closed connection without sending a response",
-                ))
-            })?;
-        serde_json::from_slice(&response_frame).map_err(RunnerControlTransportError::Serialization)
-    })
+    rt.block_on(send_control_to_daemon_async(control_socket_path, request))
+}
+
+/// Async version of [`send_control_to_daemon`] for use inside an existing
+/// tokio runtime (e.g. the web server).
+pub async fn send_control_to_daemon_async(
+    control_socket_path: &Path,
+    request: &RunnerControl,
+) -> Result<RunnerControlResponse, RunnerControlTransportError> {
+    let mut stream = tokio::net::UnixStream::connect(control_socket_path)
+        .await
+        .map_err(RunnerControlTransportError::Transport)?;
+    let payload = serde_json::to_vec(request)?;
+    write_runner_control_frame(&mut stream, &payload).await?;
+    let response_frame = read_runner_control_frame(&mut stream)
+        .await?
+        .ok_or_else(|| {
+            RunnerControlTransportError::Transport(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "daemon closed connection without sending a response",
+            ))
+        })?;
+    serde_json::from_slice(&response_frame).map_err(RunnerControlTransportError::Serialization)
 }
 
 fn validate_user_id(user_id: &str) -> Result<&str, RunnerError> {

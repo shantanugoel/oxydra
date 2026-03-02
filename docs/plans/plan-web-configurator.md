@@ -554,72 +554,76 @@ Alpine.js is vendored (downloaded and placed in `static/js/vendor/alpine.min.js`
 
 ## Implementation Phases
 
-### Phase 1: Types + Web Server Bootstrap
+### Phase 1: Types + Web Server Bootstrap ✅
+
+**Status:** Complete
 
 **Goal:** `runner web` starts an HTTP server that serves a blank SPA and health endpoint.
 
 **Steps:**
 
-1. **Add `WebConfig` to `RunnerGlobalConfig`** (in `types/src/runner.rs`):
+1. ✅ **Add `WebConfig` to `RunnerGlobalConfig`** (in `types/src/runner.rs`):
    - Add `WebConfig` struct with `enabled`, `bind`, `auth_mode`, `auth_token_env`, `auth_token` fields.
    - Add `#[serde(default)]` field `pub web: WebConfig` to `RunnerGlobalConfig`.
    - Add validation: parse bind address, validate auth_mode consistency (if token mode, at least one token source must be set).
    - Update default config version if needed.
    - Run config migration if the field is added to existing runner.toml files (no-op: serde defaults handle it).
 
-2. **Add `web` CLI subcommand** (in `runner/src/main.rs`):
+2. ✅ **Add `web` CLI subcommand** (in `runner/src/main.rs`):
    - Add `Web { #[arg(long)] bind: Option<String> }` variant to `CliCommand`.
    - Wire up to a new `handle_web()` function.
 
-3. **Create `runner/src/web/mod.rs`** — Axum router:
+3. ✅ **Create `runner/src/web/mod.rs`** — Axum router:
    - Health check at `GET /api/v1/meta` returning version info.
    - Static file serving for embedded assets.
    - Server startup with graceful shutdown on Ctrl+C.
 
-4. **Create `runner/src/web/state.rs`** — `WebState`:
+4. ✅ **Create `runner/src/web/state.rs`** — `WebState`:
    - Holds: `RunnerGlobalConfig`, config file path, resolved workspace root.
    - Constructed from the same `Runner::from_global_config_path()` used by the CLI.
 
-5. **Create `runner/src/web/static_files.rs`** — `rust-embed` integration:
+5. ✅ **Create `runner/src/web/static_files.rs`** — `rust-embed` integration:
    - Serve embedded static files with MIME type detection.
    - Fallback to `index.html` for SPA routing.
 
-6. **Create minimal `static/index.html`** — SPA shell:
+6. ✅ **Create minimal `static/index.html`** — SPA shell:
    - Load Alpine.js from vendored file.
    - Show "Oxydra Web Configurator" heading and navigation skeleton.
 
-7. **Add new dependencies to `runner/Cargo.toml`**:
+7. ✅ **Add new dependencies to `runner/Cargo.toml`**:
    - `rust-embed` (latest) with `interpolate-folder-path` feature.
    - `mime_guess` (latest) for content-type detection.
    - `tower-http` is NOT needed (auth/cors handled manually in middleware).
 
 **Verification gate:**
-- `runner web` starts and `http://127.0.0.1:9400` shows the SPA shell.
-- `GET /api/v1/meta` returns JSON with version info.
-- Existing runner CLI commands (`start`, `stop`, `status`, etc.) are unaffected.
-- All tests pass, no clippy warnings.
+- ✅ `runner web` starts and `http://127.0.0.1:9400` shows the SPA shell.
+- ✅ `GET /api/v1/meta` returns JSON with version info.
+- ✅ Existing runner CLI commands (`start`, `stop`, `status`, etc.) are unaffected.
+- ✅ All tests pass, no clippy warnings.
 
 ---
 
-### Phase 2: Config Read Endpoints + Dashboard
+### Phase 2: Config Read Endpoints + Dashboard ✅
+
+**Status:** Complete
 
 **Goal:** The web UI can display current configuration and system status.
 
 **Steps:**
 
-1. **Create `runner/src/web/masking.rs`** — Secret masking:
+1. ✅ **Create `runner/src/web/masking.rs`** — Secret masking:
    - `mask_agent_config(config: &AgentConfig) -> serde_json::Value` — serializes to JSON, then walks the tree and masks known secret paths.
    - `mask_runner_config(config: &RunnerGlobalConfig) -> serde_json::Value` — same for runner config.
    - `mask_user_config(config: &RunnerUserConfig) -> serde_json::Value` — same for user config.
    - Uses a const list of secret paths: `["providers.registry.*.api_key", "memory.auth_token", "web.auth_token", "credential_refs.*"]`.
 
-2. **Create `runner/src/web/response.rs`** — API envelope:
+2. ✅ **Create `runner/src/web/response.rs`** — API envelope:
    - `ApiResponse<T>` struct with `data`, `meta` fields.
    - `ApiError` struct with `code`, `message`, `details` fields.
    - `impl IntoResponse` for both.
    - Request ID generation (short random hex string per request).
 
-3. **Create `runner/src/web/config_read.rs`** — Read endpoints:
+3. ✅ **Create `runner/src/web/config_read.rs`** — Read endpoints:
    - `GET /api/v1/config/runner` — Load and return masked runner config.
    - `GET /api/v1/config/agent` — Load and return masked agent config from workspace dir.
    - `GET /api/v1/config/users` — List registered users with summary.
@@ -627,28 +631,28 @@ Alpine.js is vendored (downloaded and placed in `static/js/vendor/alpine.min.js`
    - `GET /api/v1/config/agent/effective` — Attempt to load the full figment-merged agent config (from all layers). If daemon is running, also include runtime values.
    - Each response includes `file_exists`, `file_path`, and `has_daemon_running` flags.
 
-4. **Create `runner/src/web/status.rs`** — Status endpoints:
+4. ✅ **Create `runner/src/web/status.rs`** — Status endpoints:
    - `GET /api/v1/status` — For each registered user, check if control socket exists and is responsive. Return aggregated status.
    - `GET /api/v1/status/{user_id}` — If daemon running, proxy health check to control socket. If not, return `daemon_not_running`.
 
-5. **Create `runner/src/web/onboarding.rs`** — First-run detection:
+5. ✅ **Create `runner/src/web/onboarding.rs`** — First-run detection:
    - `GET /api/v1/onboarding/status` — Check: does runner.toml exist? Are any users registered? Does agent.toml exist? Is at least one provider configured with a key (or key env var that resolves)?
    - Return `{ "needs_setup": bool, "checks": { "runner_config": bool, "has_users": bool, "agent_config": bool, "has_provider": bool } }`.
 
-6. **Build Dashboard page** (`static/js/dashboard.js`):
+6. ✅ **Build Dashboard page** (`static/js/app.js` — integrated into the SPA shell):
    - Fetch `/api/v1/status` and `/api/v1/onboarding/status` on load.
    - Render user status cards, meta info, onboarding banner.
 
-7. **Build Config viewer pages** (`static/js/config-editor.js`):
+7. ✅ **Build Config viewer pages** (`static/js/app.js` — integrated into the SPA shell):
    - Reusable component that renders a config object as a structured form (read-only in this phase).
    - Sections are collapsible. Secrets are masked with reveal toggle.
    - Used for Agent, Runner, and User config pages.
 
 **Verification gate:**
-- Dashboard shows registered users and their daemon status.
-- Config pages display current configuration with masked secrets.
-- Missing config files show defaults with "file not found" indicator.
-- All tests pass, no clippy warnings.
+- ✅ Dashboard shows registered users and their daemon status.
+- ✅ Config pages display current configuration with masked secrets.
+- ✅ Missing config files show defaults with "file not found" indicator.
+- ✅ All tests pass, no clippy warnings.
 
 ---
 

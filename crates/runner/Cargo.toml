@@ -37,3 +37,9 @@ tracing = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 semver = "1"
 types = { path = "../types" }
+rust-embed = "8.11.0"
+mime_guess = "2.0.5"
+
+[dev-dependencies]
+tempfile = "3.26.0"
+tower = { version = "0.5.3", features = ["util"] }

@@ -8,6 +8,7 @@ pub const DEFAULT_OXYDRA_VM_IMAGE: &str = "oxydra-vm:latest";
 pub const DEFAULT_SHELL_VM_IMAGE: &str = "shell-vm:latest";
 pub const DEFAULT_RUNNER_CONFIG_VERSION: &str = "1.0.1";
 pub const SUPPORTED_RUNNER_CONFIG_MAJOR_VERSION: u64 = 1;
+pub const DEFAULT_WEB_BIND: &str = "127.0.0.1:9400";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +31,8 @@ pub struct RunnerGlobalConfig {
     pub default_tier: SandboxTier,
     #[serde(default)]
     pub guest_images: RunnerGuestImages,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 impl Default for RunnerGlobalConfig {
@@ -40,6 +43,7 @@ impl Default for RunnerGlobalConfig {
             users: BTreeMap::new(),
             default_tier: SandboxTier::default(),
             guest_images: RunnerGuestImages::default(),
+            web: WebConfig::default(),
         }
     }
 }
@@ -53,6 +57,7 @@ impl RunnerGlobalConfig {
         }
 
         self.guest_images.validate()?;
+        self.web.validate()?;
 
         for (user_id, registration) in &self.users {
             if user_id.trim().is_empty() {
@@ -68,6 +73,108 @@ impl RunnerGlobalConfig {
         Ok(())
     }
 }
+
+// ── Web Configurator Types ──────────────────────────────────────────────────
+
+/// Authentication mode for the web configurator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAuthMode {
+    /// No authentication required (safe when bound to loopback only).
+    #[default]
+    Disabled,
+    /// Bearer token authentication.
+    Token,
+}
+
+/// Configuration for the embedded web configurator (`runner web`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebConfig {
+    /// Whether the web configurator is enabled.
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+    /// Address to bind the HTTP server to.
+    #[serde(default = "default_web_bind")]
+    pub bind: String,
+    /// Authentication mode.
+    #[serde(default)]
+    pub auth_mode: WebAuthMode,
+    /// Environment variable name containing the bearer token (when `auth_mode = "token"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token_env: Option<String>,
+    /// Inline bearer token (when `auth_mode = "token"`). Prefer `auth_token_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_enabled(),
+            bind: default_web_bind(),
+            auth_mode: WebAuthMode::default(),
+            auth_token_env: None,
+            auth_token: None,
+        }
+    }
+}
+
+impl WebConfig {
+    pub fn validate(&self) -> Result<(), RunnerConfigError> {
+        // Validate bind address is parseable as a socket address.
+        if self.bind.parse::<std::net::SocketAddr>().is_err() {
+            return Err(RunnerConfigError::InvalidWebBind {
+                bind: self.bind.clone(),
+            });
+        }
+
+        // When token auth is enabled, at least one token source must be configured.
+        if self.auth_mode == WebAuthMode::Token {
+            let has_env = self
+                .auth_token_env
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty());
+            let has_inline = self
+                .auth_token
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty());
+            if !has_env && !has_inline {
+                return Err(RunnerConfigError::WebTokenAuthMissingSource);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve the effective bearer token from environment or inline config.
+    /// Returns `None` when auth is disabled or no token is available.
+    pub fn resolve_auth_token(&self) -> Option<String> {
+        if self.auth_mode != WebAuthMode::Token {
+            return None;
+        }
+        // Prefer env var over inline.
+        if let Some(ref env_name) = self.auth_token_env
+            && let Ok(value) = std::env::var(env_name)
+            && !value.trim().is_empty()
+        {
+            return Some(value);
+        }
+        self.auth_token
+            .as_ref()
+            .filter(|v| !v.trim().is_empty())
+            .cloned()
+    }
+}
+
+fn default_web_enabled() -> bool {
+    true
+}
+
+fn default_web_bind() -> String {
+    DEFAULT_WEB_BIND.to_owned()
+}
+
+// ── End Web Configurator Types ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerUserRegistration {
@@ -411,6 +518,10 @@ pub enum RunnerConfigError {
     InvalidCredentialRefKey,
     #[error("runner credential reference value for key `{key}` must not be empty")]
     InvalidCredentialRefValue { key: String },
+    #[error("runner web bind address `{bind}` is not a valid socket address")]
+    InvalidWebBind { bind: String },
+    #[error("runner web auth_mode is \"token\" but neither auth_token_env nor auth_token is set")]
+    WebTokenAuthMissingSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

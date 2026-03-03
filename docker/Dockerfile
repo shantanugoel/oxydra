@@ -50,6 +50,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
     chmod +x /usr/local/bin/pinchtab
 
 COPY --from=builder /build/target/*/release/shell-daemon /usr/local/bin/shell-daemon
+COPY docker/chromium-wrapper.sh /usr/local/bin/chromium-wrapper
+RUN chmod +x /usr/local/bin/chromium-wrapper
 COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

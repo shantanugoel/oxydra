@@ -172,7 +172,15 @@ pub struct VaultCopyToTool {
 
 pub struct BashTool {
     backend: BashBackend,
+    command_timeout: Duration,
 }
+
+/// Default shell command timeout when not overridden by [`ShellConfig`].
+///
+/// 60 seconds gives long-running operations (downloads, compilation, browser
+/// tasks) enough room while still providing a safety net against runaway
+/// commands.
+pub const DEFAULT_SHELL_COMMAND_TIMEOUT_SECS: u64 = 60;
 
 enum BashBackend {
     Host,
@@ -361,19 +369,28 @@ impl BashTool {
     pub fn host() -> Self {
         Self {
             backend: BashBackend::Host,
+            command_timeout: Duration::from_secs(DEFAULT_SHELL_COMMAND_TIMEOUT_SECS),
         }
     }
 
     pub fn from_shell_session(session: Box<dyn ShellSession>) -> Self {
         Self {
             backend: BashBackend::Session(Arc::new(Mutex::new(session))),
+            command_timeout: Duration::from_secs(DEFAULT_SHELL_COMMAND_TIMEOUT_SECS),
         }
     }
 
     fn from_status(status: SessionStatus) -> Self {
         Self {
             backend: BashBackend::Disabled(status),
+            command_timeout: Duration::from_secs(DEFAULT_SHELL_COMMAND_TIMEOUT_SECS),
         }
+    }
+
+    /// Override the command timeout. Returns `self` for chaining.
+    pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
+        self.command_timeout = timeout;
+        self
     }
 }
 
@@ -852,7 +869,7 @@ impl Tool for BashTool {
     }
 
     fn timeout(&self) -> Duration {
-        Duration::from_secs(30)
+        self.command_timeout
     }
 
     fn safety_tier(&self) -> SafetyTier {

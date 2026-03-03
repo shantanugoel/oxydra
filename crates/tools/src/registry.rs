@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use super::*;
 use types::AttachmentSaveConfig;
@@ -189,6 +189,16 @@ pub async fn bootstrap_runtime_tools(
     attachment_save_config: Option<&AttachmentSaveConfig>,
 ) -> RuntimeToolsBootstrap {
     let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
+
+    // Apply the configurable command timeout from ShellConfig.  Falls back to
+    // DEFAULT_SHELL_COMMAND_TIMEOUT_SECS when no explicit value is set so the
+    // behaviour is consistent even when the shell config is absent.
+    let command_timeout = shell_config
+        .and_then(|c| c.command_timeout_secs)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_SHELL_COMMAND_TIMEOUT_SECS));
+    let bash_tool = bash_tool.with_command_timeout(command_timeout);
+
     let wasm_runner = runtime_wasm_runner(bootstrap);
     let mut registry = ToolRegistry::default();
     register_runtime_tools(

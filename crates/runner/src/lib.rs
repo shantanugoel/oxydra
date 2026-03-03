@@ -1889,8 +1889,12 @@ async fn launch_docker_container_async(
         RunnerGuestRole::ShellVm => {
             // ShellVm uses virtual container paths (e.g., /shared, /tmp),
             // so the socket path is relative to the container namespace.
+            // The entrypoint script starts Pinchtab (when BROWSER_ENABLED=true),
+            // runs the crash-recovery watchdog, and then starts shell-daemon as
+            // a child — keeping the script alive as PID 1 so the browser
+            // background processes are not orphaned.
             (
-                vec!["/usr/local/bin/shell-daemon".to_owned()],
+                vec!["/usr/local/bin/entrypoint.sh".to_owned()],
                 vec!["--socket".to_owned(), "/ipc/shell-daemon.sock".to_owned()],
             )
         }
@@ -2932,7 +2936,15 @@ fn generate_bridge_token() -> String {
 }
 
 /// Builds environment variables for the shell-vm container when browser is
-/// enabled. Returns `(shell_vm_env_vars, pinchtab_url, bridge_token)`.
+/// enabled. Returns `(shell_vm_env_vars, pinchtab_url)`.
+///
+/// `CHROME_BINARY` is set to the chromium wrapper script
+/// (`/usr/local/bin/chromium-wrapper`) rather than the bare chromium binary.
+/// The wrapper unconditionally passes the container-stability flags
+/// (`--no-sandbox`, `--disable-dev-shm-usage`, `--disable-gpu`, etc.) to
+/// Chromium, which is more reliable than setting `CHROME_FLAGS` — whose
+/// handling has had bugs in some Pinchtab versions that caused the flags to be
+/// ignored.
 fn build_browser_env(port: u16, bridge_token: &str) -> (Vec<String>, String) {
     let pinchtab_url = format!("http://127.0.0.1:{port}");
     let env_vars = vec![
@@ -2942,9 +2954,10 @@ fn build_browser_env(port: u16, bridge_token: &str) -> (Vec<String>, String) {
         format!("BRIDGE_TOKEN={bridge_token}"),
         "BRIDGE_HEADLESS=true".to_owned(),
         "BRIDGE_STEALTH=light".to_owned(),
-        format!("BRIDGE_STATE_DIR=/shared/.pinchtab"),
-        "CHROME_BINARY=/usr/bin/chromium".to_owned(),
-        "CHROME_FLAGS=--no-sandbox".to_owned(),
+        "BRIDGE_STATE_DIR=/shared/.pinchtab".to_owned(),
+        // Point Pinchtab at the wrapper script so stability flags are always
+        // applied regardless of how Pinchtab handles CHROME_FLAGS internally.
+        "CHROME_BINARY=/usr/local/bin/chromium-wrapper".to_owned(),
     ];
     (env_vars, pinchtab_url)
 }

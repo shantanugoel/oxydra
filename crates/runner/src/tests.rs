@@ -2226,8 +2226,12 @@ fn build_browser_env_returns_expected_vars() {
     assert!(env_vars.contains(&"BRIDGE_BIND=127.0.0.1".to_owned()));
     assert!(env_vars.contains(&"BRIDGE_TOKEN=test-token-abc".to_owned()));
     assert!(env_vars.contains(&"BRIDGE_HEADLESS=true".to_owned()));
-    assert!(env_vars.contains(&"CHROME_BINARY=/usr/bin/chromium".to_owned()));
-    assert!(env_vars.contains(&"CHROME_FLAGS=--no-sandbox".to_owned()));
+    // The wrapper script is used so that stability flags are always forwarded
+    // to Chromium regardless of how Pinchtab handles CHROME_FLAGS internally.
+    assert!(env_vars.contains(&"CHROME_BINARY=/usr/local/bin/chromium-wrapper".to_owned()));
+    // CHROME_FLAGS is intentionally not set: it is unreliable in some Pinchtab
+    // versions and all necessary flags are baked into the chromium wrapper.
+    assert!(!env_vars.iter().any(|v| v.starts_with("CHROME_FLAGS=")));
 }
 
 #[test]
@@ -2270,6 +2274,7 @@ fn apply_browser_shell_overlay_preserves_existing_deny_and_replace_defaults() {
         replace_defaults: Some(true),
         allow_operators: Some(false),
         env_keys: Some(vec!["MY_KEY".to_owned()]),
+        command_timeout_secs: None,
     };
     super::apply_browser_shell_overlay(&mut config);
 

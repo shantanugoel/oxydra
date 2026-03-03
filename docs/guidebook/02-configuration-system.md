@@ -315,15 +315,16 @@ pub struct SchedulerConfig {
 
 ### `ShellConfig`
 
-Configures the shell command allowlist and operator policy:
+Configures the shell command allowlist, operator policy, and execution timeout:
 
 ```rust
 pub struct ShellConfig {
-    pub allow: Option<Vec<String>>,       // Commands to add (supports glob patterns)
-    pub deny: Option<Vec<String>>,        // Commands to remove (supports glob patterns)
-    pub replace_defaults: Option<bool>,   // Replace default allowlist entirely (default: false)
-    pub allow_operators: Option<bool>,    // Allow shell operators &&, ||, | etc. (default: true)
-    pub env_keys: Option<Vec<String>>,    // Env var names to forward into the shell container
+    pub allow: Option<Vec<String>>,              // Commands to add (supports glob patterns)
+    pub deny: Option<Vec<String>>,               // Commands to remove (supports glob patterns)
+    pub replace_defaults: Option<bool>,          // Replace default allowlist entirely (default: false)
+    pub allow_operators: Option<bool>,           // Allow shell operators &&, ||, | etc. (default: true)
+    pub env_keys: Option<Vec<String>>,           // Env var names to forward into the shell container
+    pub command_timeout_secs: Option<u64>,       // Max seconds per shell command (default: 60)
 }
 ```
 
@@ -334,6 +335,7 @@ pub struct ShellConfig {
 | `replace_defaults` | `false` | If `true`, `allow` replaces the built-in defaults entirely |
 | `allow_operators` | `true` | If `true`, shell operators (`&&`, `\|\|`, `\|`, `;`, `>`, `<`, etc.) are permitted |
 | `env_keys` | (none) | Environment variable names to forward into the shell-vm container. API keys from the agent config are **not** forwarded to the shell by default — only keys listed here are. Additionally, CLI `--env` / `--env-file` entries with a `SHELL_` prefix are forwarded with the prefix stripped (e.g. `SHELL_NPM_TOKEN` → `NPM_TOKEN`). |
+| `command_timeout_secs` | `60` | Maximum number of seconds a single shell command may run before being killed with a timeout error. Increase for long-running commands (large downloads, compilation, extended browser automation sequences). |
 
 Glob patterns support `*` as prefix, suffix, or both: `npm*` matches `npm`, `npmrc`; `*test*` matches `pytest`, `testing`.
 
@@ -571,6 +573,7 @@ provider_type = "anthropic"
 # replace_defaults = false
 # allow_operators = true
 # env_keys = ["NPM_TOKEN", "GH_TOKEN"]  # Forward these env vars into the shell container
+# command_timeout_secs = 60             # Max seconds per command (default: 60)
 
 # --- Scheduler ---
 # Enable and configure the scheduler for automated recurring/one-off tasks.

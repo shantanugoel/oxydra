@@ -558,6 +558,7 @@ mod tests {
                 replace_defaults: None,
                 allow_operators: Some(false),
                 env_keys: None,
+            command_timeout_secs: None,
             }));
 
         let deny = policy.enforce(
@@ -747,6 +748,7 @@ mod tests {
             replace_defaults: None,
             allow_operators: None,
             env_keys: None,
+            command_timeout_secs: None,
         };
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
             .with_shell_config(Some(&config));
@@ -789,6 +791,7 @@ mod tests {
             replace_defaults: None,
             allow_operators: None,
             env_keys: None,
+            command_timeout_secs: None,
         };
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
             .with_shell_config(Some(&config));
@@ -820,6 +823,7 @@ mod tests {
             replace_defaults: Some(true),
             allow_operators: None,
             env_keys: None,
+            command_timeout_secs: None,
         };
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
             .with_shell_config(Some(&config));
@@ -855,6 +859,7 @@ mod tests {
             replace_defaults: None,
             allow_operators: None,
             env_keys: None,
+            command_timeout_secs: None,
         };
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
             .with_shell_config(Some(&config));
@@ -885,6 +890,7 @@ mod tests {
             replace_defaults: None,
             allow_operators: Some(true),
             env_keys: None,
+            command_timeout_secs: None,
         };
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
             .with_shell_config(Some(&config));
@@ -970,6 +976,7 @@ mod tests {
             replace_defaults: None,
             allow_operators: Some(true),
             env_keys: None,
+            command_timeout_secs: None,
         };
         let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
             .with_shell_config(Some(&config));

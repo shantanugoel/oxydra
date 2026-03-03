@@ -349,31 +349,26 @@ Browser provisioning is skipped entirely in `Process` tier — the browser tool 
 
 ### Entrypoint Script
 
-The shell-vm container uses a launcher script (`docker/shell-vm-entrypoint.sh`) as its entrypoint instead of running `shell-daemon` directly:
+The shell-vm container uses a launcher script (`docker/shell-vm-entrypoint.sh`) as its entrypoint instead of running `shell-daemon` directly. It performs five steps:
 
-```sh
-#!/bin/sh
-if [ "${BROWSER_ENABLED}" = "true" ]; then
-    # Clean Chrome singleton locks from previous crashes
-    find "${BRIDGE_STATE_DIR:-/shared/.pinchtab}/profiles" \
-        -name "SingletonLock" -delete 2>/dev/null || true
+1. **Cleans Chrome singleton locks** left by any previous crash.
+2. **Starts Pinchtab** and waits up to 60 s for the `/health` endpoint to respond.
+3. **Pre-warms Chrome** — sends a `POST /navigate` with `about:blank` to force Chrome initialisation before the LLM ever makes a browser request, eliminating first-request startup latency.
+4. **Launches a crash-recovery watchdog** as a background subshell that polls Pinchtab health every 60 s; if the endpoint stops responding it kills the old process, cleans singleton locks, and restarts Pinchtab.
+5. **Starts shell-daemon** as a background process (not via `exec`) and then `wait`s for it.
 
-    /usr/local/bin/pinchtab &
-    PINCHTAB_PID=$!
+**Critical: `exec` is NOT used for shell-daemon.** Using `exec` would replace the entrypoint shell (PID 1) with shell-daemon. When the entrypoint shell (PID 1) is replaced via `exec`, the background Pinchtab and watchdog processes are orphaned and killed by the kernel in this container environment. Instead, the entrypoint shell stays alive as PID 1, runs shell-daemon as a child process, and `wait`s for it. All children (Pinchtab, watchdog, shell-daemon) remain alive as children of PID 1 (the entrypoint shell) for the container's lifetime. When shell-daemon exits, the `wait` returns, the script exits with shell-daemon's exit code, and the container terminates.
 
-    # Wait for Pinchtab to become healthy (up to 30s)
-    HEALTH_URL="http://${BRIDGE_BIND:-127.0.0.1}:${BRIDGE_PORT:-9867}/health"
-    RETRIES=0; MAX_RETRIES=30
-    while [ $RETRIES -lt $MAX_RETRIES ]; do
-        curl -sf -o /dev/null "$HEALTH_URL" 2>/dev/null && break
-        kill -0 $PINCHTAB_PID 2>/dev/null || break  # exit early if Pinchtab crashed
-        RETRIES=$((RETRIES + 1)); sleep 1
-    done
-fi
-exec /usr/local/bin/shell-daemon "$@"
-```
+`shell_exec` remains fully functional even if the browser component fails to start or requires a restart.
 
-The script cleans up Chrome singleton lock files left by crashes in previous sessions, starts Pinchtab as a background process, waits for the `/health` endpoint to respond (up to 30 seconds), then execs `shell-daemon` — so `shell-daemon` becomes PID 1 and `shell_exec` remains fully functional even if browser fails to start.
+**Key design constraints (learned from earlier attempts at crash recovery):**
+- No `exec` for shell-daemon — `exec` kills background children in this container environment; `wait` is used instead.
+- No external restart script — complex scripts introduced race conditions and platform-specific breakage.
+- No `set -e` in the entrypoint — health-check polls and pre-warmup curl can return non-zero without being fatal; `|| true` guards are used explicitly.
+- 60 s watchdog poll interval — avoids false-positive restarts during transient load.
+- Singleton lock cleanup before restart — prevents Chrome from refusing to start because a stale lock is present.
+- PID tracked inside the watchdog subshell — no shared files or global state needed.
+- Watchdog always launched — regardless of whether Pinchtab was healthy at startup, so an initially-failing Pinchtab can recover.
 
 ### Port Allocation
 
@@ -406,14 +401,22 @@ The runner forwards these variables into the shell-vm container when browser is 
 | `BRIDGE_TOKEN` | Generated hex token | Auth enforcement |
 | `BRIDGE_HEADLESS` | Config-derived | Default headless mode |
 | `BRIDGE_STATE_DIR` | `"/shared/.pinchtab"` | Profile / state storage |
-| `CHROME_BINARY` | `"/usr/bin/chromium"` | Chrome executable |
-| `CHROME_FLAGS` | `"--no-sandbox"` | Required for containerized Chrome |
+| `CHROME_BINARY` | `"/usr/local/bin/chromium-wrapper"` | Chromium wrapper (see below) |
 
-The runner also forwards `PINCHTAB_URL` (`http://127.0.0.1:<port>`) and `BRIDGE_TOKEN` into the **oxydra-vm** environment, so the skill's `{{PINCHTAB_URL}}` template placeholder is resolved and `$BRIDGE_TOKEN` is available in the shell.
+`CHROME_FLAGS` is **not** set. Some Pinchtab versions pass this env var to Chromium incorrectly (using an empty flag name in the chromedp allocator, producing a malformed argument). Instead, all container-stability flags are baked into the chromium wrapper so they are applied unconditionally.
 
-### Health Check
+#### Chromium Stability Wrapper
 
-The runner polls `GET /health` on the Pinchtab port after starting the container (30s timeout, 1s polling interval). On success, `browser_available = true` is set in `StartupStatusReport`. On timeout or crash, `browser_available = false` is set and a warning is logged — the shell sidecar remains fully functional. Critically, `PINCHTAB_URL` is only added to the oxydra-vm environment when the health check succeeds; this ensures the Browser Automation skill does not activate when Pinchtab is down.
+`docker/chromium-wrapper.sh` is a thin shell wrapper installed at `/usr/local/bin/chromium-wrapper` in the shell-vm image. Pinchtab is pointed at it via `CHROME_BINARY`. The wrapper always passes:
+
+| Flag | Reason |
+|---|---|
+| `--no-sandbox` | Required: containers have no user-namespace sandboxing |
+| `--disable-dev-shm-usage` | Required: `/dev/shm` defaults to 64 MB in Docker, which is too small for Chrome's IPC shared memory; this redirects to `/tmp` |
+| `--disable-gpu` | Headless containers have no GPU; avoids GPU-related crashes |
+| `--disable-software-rasterizer` | The software rasterizer is slow and can OOM-crash on constrained devices (e.g. Raspberry Pi) |
+
+Using a wrapper rather than `CHROME_FLAGS` guarantees these flags are always forwarded regardless of Pinchtab version or how it parses the environment variable.
 
 ### Shell Policy Overlay
 
@@ -446,11 +449,13 @@ RUN ARCH=$(dpkg --print-architecture) && \
       -o /usr/local/bin/pinchtab && \
     chmod +x /usr/local/bin/pinchtab
 
+COPY docker/chromium-wrapper.sh /usr/local/bin/chromium-wrapper
+RUN chmod +x /usr/local/bin/chromium-wrapper
 COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
-`dpkg --print-architecture` resolves to `amd64` or `arm64`, so the correct Pinchtab binary is fetched for the build target. `curl` and `jq` are installed at image build time (not just allowed by the shell policy) because the entrypoint health check script itself needs `curl`.
+`dpkg --print-architecture` resolves to `amd64` or `arm64`, so the correct Pinchtab binary is fetched for the build target. `curl` and `jq` are installed at image build time (not just allowed by the shell policy) because the entrypoint health check script itself needs `curl`. The `chromium-wrapper.sh` is installed alongside to ensure Chromium always starts with the required container-stability flags.
 
 ## Platform-Specific Backends
 

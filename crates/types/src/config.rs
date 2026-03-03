@@ -706,6 +706,14 @@ pub struct ShellConfig {
     /// (e.g. `SHELL_NPM_TOKEN` becomes `NPM_TOKEN`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_keys: Option<Vec<String>>,
+    /// Maximum number of seconds a single shell command is allowed to run.
+    /// Commands that exceed this limit are killed and return a timeout error.
+    ///
+    /// Default: 60 seconds. Set to a higher value for long-running commands
+    /// such as large file downloads, compilation steps, or extended browser
+    /// automation sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_timeout_secs: Option<u64>,
 }
 
 impl Default for ShellConfig {
@@ -716,6 +724,7 @@ impl Default for ShellConfig {
             replace_defaults: Some(false),
             allow_operators: Some(true),
             env_keys: None,
+            command_timeout_secs: None, // uses DEFAULT_SHELL_COMMAND_TIMEOUT_SECS
         }
     }
 }
@@ -1252,6 +1261,7 @@ mod tests {
                 replace_defaults: Some(false),
                 allow_operators: Some(true),
                 env_keys: None,
+                command_timeout_secs: None,
             })
         );
     }

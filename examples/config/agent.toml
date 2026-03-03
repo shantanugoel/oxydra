@@ -172,6 +172,7 @@ jitter          = false # Add randomized jitter to backoff
 # replace_defaults = false            # If true, `allow` replaces the built-in fallback list entirely
 # allow_operators = true              # Default: allow shell operators (&&, ||, |, etc.)
 # env_keys = ["NPM_TOKEN", "GH_TOKEN"]  # Env vars to forward into the shell container
+# command_timeout_secs = 60          # Max seconds per shell command (default: 60)
 # Note: API keys from the agent config are NOT forwarded to the shell.
 # Use env_keys for shell-specific secrets. CLI --env entries prefixed
 # with SHELL_ are also forwarded with the prefix stripped

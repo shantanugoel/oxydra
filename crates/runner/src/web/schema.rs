@@ -1029,7 +1029,9 @@ fn agent_tools_shell_section() -> SchemaSection {
     SchemaSection {
         description: Some(
             "Shell command execution security policy. The default config allows all \
-             commands (`*`) and operators; use this section to restrict or customize it."
+             commands (`*`) and operators; use this section to restrict or customize it. \
+             Note: shell and browser tool access can be enabled/disabled per-user under \
+             User Config → Behavior Overrides."
                 .into(),
         ),
         group: Some("tools".into()),

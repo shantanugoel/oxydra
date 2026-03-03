@@ -152,9 +152,11 @@ pub fn evaluate_activation<'a>(
                 SkillActivation::Manual => false,
                 SkillActivation::Auto => {
                     // All required tools must be ready (not just registered).
-                    let tools_ready = skill.metadata.requires.iter().all(|tool_name| {
-                        is_tool_ready(tool_name, availability)
-                    });
+                    let tools_ready = skill
+                        .metadata
+                        .requires
+                        .iter()
+                        .all(|tool_name| is_tool_ready(tool_name, availability));
 
                     // All env vars must be present.
                     let env_present = skill
@@ -224,10 +226,7 @@ pub fn load_and_render_skills(
 ) -> String {
     let skills = discover_skills(system_dir, user_dir, workspace_dir);
     let active = evaluate_activation(&skills, availability, env);
-    let rendered: Vec<RenderedSkill> = active
-        .into_iter()
-        .map(|s| render_skill(s, env))
-        .collect();
+    let rendered: Vec<RenderedSkill> = active.into_iter().map(|s| render_skill(s, env)).collect();
     format_skills_prompt(&rendered)
 }
 
@@ -262,22 +261,17 @@ fn is_tool_ready(tool_name: &str, availability: &ToolAvailability) -> bool {
 /// Parse a single `.md` file into a [`Skill`], validating frontmatter and
 /// enforcing the token cap.
 fn parse_skill_file(path: &Path) -> Result<Skill, SkillLoadError> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|err| SkillLoadError::Io(path.to_path_buf(), err))?;
+    let raw =
+        std::fs::read_to_string(path).map_err(|err| SkillLoadError::Io(path.to_path_buf(), err))?;
 
     let matter = Matter::<YAML>::new();
     let parsed = matter
         .parse::<SkillMetadata>(&raw)
         .map_err(|err| SkillLoadError::Parse(path.to_path_buf(), err.to_string()))?;
 
-    let metadata: SkillMetadata = parsed
-        .data
-        .ok_or_else(|| {
-            SkillLoadError::Parse(
-                path.to_path_buf(),
-                "missing YAML frontmatter".to_owned(),
-            )
-        })?;
+    let metadata: SkillMetadata = parsed.data.ok_or_else(|| {
+        SkillLoadError::Parse(path.to_path_buf(), "missing YAML frontmatter".to_owned())
+    })?;
 
     let content = parsed.content;
 
@@ -532,9 +526,7 @@ Body.
         let tmp = temp_dir("token-cap");
         // 3000 tokens * 4 chars/token = 12000 chars. Add 1 more to exceed.
         let body = "x".repeat(MAX_SKILL_TOKENS * CHARS_PER_TOKEN + CHARS_PER_TOKEN);
-        let content = format!(
-            "---\nname: big\ndescription: Too big\n---\n\n{body}"
-        );
+        let content = format!("---\nname: big\ndescription: Too big\n---\n\n{body}");
         write_skill(tmp.path(), "big.md", &content);
 
         let path = tmp.path().join(SKILLS_SUBDIR).join("big.md");
@@ -550,9 +542,7 @@ Body.
         let tmp = temp_dir("at-cap");
         // Exactly at the cap should be fine.
         let body = "x".repeat(MAX_SKILL_TOKENS * CHARS_PER_TOKEN);
-        let content = format!(
-            "---\nname: exact\ndescription: Exactly at cap\n---\n\n{body}"
-        );
+        let content = format!("---\nname: exact\ndescription: Exactly at cap\n---\n\n{body}");
         write_skill(tmp.path(), "exact.md", &content);
 
         let path = tmp.path().join(SKILLS_SUBDIR).join("exact.md");
@@ -728,7 +718,10 @@ Body.
         // registry (which the skill system does not check — it only checks
         // ToolAvailability readiness).
         let active = evaluate_activation(&skills, &unavailable_availability(), &env);
-        assert!(active.is_empty(), "skill should not activate when shell is unavailable");
+        assert!(
+            active.is_empty(),
+            "skill should not activate when shell is unavailable"
+        );
     }
 
     #[test]
@@ -844,13 +837,8 @@ Browser content.
         let mut env = HashMap::new();
         env.insert("MY_URL".to_owned(), "http://localhost:9867".to_owned());
 
-        let result = load_and_render_skills(
-            sys.path(),
-            None,
-            ws.path(),
-            &ready_availability(),
-            &env,
-        );
+        let result =
+            load_and_render_skills(sys.path(), None, ws.path(), &ready_availability(), &env);
 
         // always-skill and test-skill should be active; manual-skill should not.
         assert!(result.contains("Always Active"));

@@ -2184,10 +2184,7 @@ fn find_available_port_returns_some_port_in_range() {
 #[test]
 fn generate_bridge_token_produces_hex_string() {
     let token = super::generate_bridge_token();
-    assert!(
-        !token.is_empty(),
-        "token should not be empty"
-    );
+    assert!(!token.is_empty(), "token should not be empty");
     assert!(
         token.len() >= 32,
         "token should be at least 32 characters, got {}",
@@ -2247,7 +2244,10 @@ fn apply_browser_shell_overlay_does_not_duplicate_existing_commands() {
     assert_eq!(curl_count, 1, "curl should not be duplicated");
     assert!(allow.contains(&"jq".to_owned()));
     assert!(allow.contains(&"sleep".to_owned()));
-    assert!(allow.contains(&"git".to_owned()), "existing entries preserved");
+    assert!(
+        allow.contains(&"git".to_owned()),
+        "existing entries preserved"
+    );
 }
 
 #[test]
@@ -2283,8 +2283,7 @@ fn copy_skill_reference_files_copies_to_target() {
 
     let shared_dir = temp_dir("skill-ref-shared");
 
-    super::copy_skill_reference_files(&source_root, &shared_dir)
-        .expect("copy should succeed");
+    super::copy_skill_reference_files(&source_root, &shared_dir).expect("copy should succeed");
 
     let target = shared_dir
         .join(super::SKILL_REFS_DIR)
@@ -2329,9 +2328,7 @@ fn copy_skill_reference_files_skips_folders_without_references() {
         .expect("should succeed with no references to copy");
 
     // The target directory for this skill should not exist.
-    let target = shared_dir
-        .join(super::SKILL_REFS_DIR)
-        .join("SimpleSkill");
+    let target = shared_dir.join(super::SKILL_REFS_DIR).join("SimpleSkill");
     assert!(!target.exists());
 
     let _ = fs::remove_dir_all(source_root);
@@ -2371,7 +2368,9 @@ fn browser_config_in_bootstrap_envelope_round_trips() {
     let decoded = RunnerBootstrapEnvelope::from_length_prefixed_json(&encoded)
         .expect("envelope with browser_config should decode");
     assert_eq!(decoded, envelope);
-    let bc = decoded.browser_config.expect("browser_config should be present");
+    let bc = decoded
+        .browser_config
+        .expect("browser_config should be present");
     assert_eq!(bc.pinchtab_base_url, "http://127.0.0.1:9867");
     assert_eq!(bc.bridge_token.as_deref(), Some("test-token-123"));
 }

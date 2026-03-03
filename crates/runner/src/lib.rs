@@ -35,14 +35,15 @@ use tokio_tungstenite::{
 use tools::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use tracing::{info, warn};
 use types::{
-    BootstrapEnvelopeError, BrowserToolConfig, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame, GatewayClientHello,
-    GatewayHealthCheck, GatewayServerFrame, LogRole, LogSource, LogStream, RunnerBootstrapEnvelope,
-    RunnerConfigError, RunnerControl, RunnerControlError, RunnerControlErrorCode,
-    RunnerControlHealthStatus, RunnerControlLogsRequest, RunnerControlLogsResponse,
-    RunnerControlResponse, RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages,
-    RunnerLogEntry, RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits,
-    RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration, SandboxTier, SidecarEndpoint,
-    SidecarTransport, StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport,
+    BootstrapEnvelopeError, BrowserToolConfig, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame,
+    GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, LogRole, LogSource, LogStream,
+    RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl, RunnerControlError,
+    RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlLogsRequest,
+    RunnerControlLogsResponse, RunnerControlResponse, RunnerControlShutdownStatus,
+    RunnerGlobalConfig, RunnerGuestImages, RunnerLogEntry, RunnerMountPaths,
+    RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig,
+    RunnerUserRegistration, SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReason,
+    StartupDegradedReasonCode, StartupStatusReport,
 };
 
 mod backend;
@@ -236,8 +237,7 @@ impl Runner {
             match find_available_port() {
                 Some(port) => {
                     let bridge_token = generate_bridge_token();
-                    let (browser_shell_env, pinchtab_url) =
-                        build_browser_env(port, &bridge_token);
+                    let (browser_shell_env, pinchtab_url) = build_browser_env(port, &bridge_token);
 
                     // Shell-vm env: Pinchtab process config + auth token.
                     shell_env.extend(browser_shell_env);
@@ -265,9 +265,8 @@ impl Runner {
                         )
                         .ok()
                     });
-                    let mut shell_config = agent_config
-                        .and_then(|c| c.tools.shell)
-                        .unwrap_or_default();
+                    let mut shell_config =
+                        agent_config.and_then(|c| c.tools.shell).unwrap_or_default();
                     apply_browser_shell_overlay(&mut shell_config);
                     // Serialize the overlay into the workspace config so the
                     // guest runtime picks it up. We write it as a separate
@@ -309,10 +308,7 @@ impl Runner {
                         );
                     }
 
-                    info!(
-                        port = port,
-                        "browser (Pinchtab) provisioned for shell-vm"
-                    );
+                    info!(port = port, "browser (Pinchtab) provisioned for shell-vm");
                 }
                 None => {
                     warn!(
@@ -3032,11 +3028,9 @@ fn copy_skill_reference_files(
             None => continue,
         };
         let target_refs_dir = target_base.join(folder_name).join("references");
-        fs::create_dir_all(&target_refs_dir).map_err(|source| {
-            RunnerError::ProvisionWorkspace {
-                path: target_refs_dir.clone(),
-                source,
-            }
+        fs::create_dir_all(&target_refs_dir).map_err(|source| RunnerError::ProvisionWorkspace {
+            path: target_refs_dir.clone(),
+            source,
         })?;
 
         let ref_entries =
@@ -3051,11 +3045,9 @@ fn copy_skill_reference_files(
                 && let Some(file_name) = ref_path.file_name()
             {
                 let target = target_refs_dir.join(file_name);
-                fs::copy(&ref_path, &target).map_err(|source| {
-                    RunnerError::ProvisionWorkspace {
-                        path: target.clone(),
-                        source,
-                    }
+                fs::copy(&ref_path, &target).map_err(|source| RunnerError::ProvisionWorkspace {
+                    path: target.clone(),
+                    source,
                 })?;
             }
         }

@@ -30,6 +30,7 @@ use types::{
 
 const SYSTEM_CONFIG_DIR: &str = "/etc/oxydra";
 const USER_CONFIG_DIR: &str = ".config/oxydra";
+const USER_HOME_OXYDRA_DIR: &str = ".oxydra";
 const WORKSPACE_CONFIG_DIR: &str = ".oxydra";
 pub const AGENT_CONFIG_FILE_NAME: &str = "agent.toml";
 pub const PROVIDERS_CONFIG_FILE_NAME: &str = "providers.toml";
@@ -39,19 +40,31 @@ const DEFAULT_PROFILE: &str = "default";
 #[derive(Debug, Clone)]
 pub struct ConfigSearchPaths {
     pub system_dir: PathBuf,
+    /// XDG-style user config directory: `~/.config/oxydra/`
     pub user_dir: Option<PathBuf>,
+    /// Home-based user config directory: `~/.oxydra/`
+    /// Searched after `user_dir` so it takes precedence over XDG but yields
+    /// to workspace-local config.
+    pub user_home_dir: Option<PathBuf>,
     pub workspace_dir: PathBuf,
 }
 
 impl ConfigSearchPaths {
     pub fn discover() -> Result<Self, BootstrapError> {
         let workspace_dir = env::current_dir()?.join(WORKSPACE_CONFIG_DIR);
-        let user_dir = env::var_os("HOME")
+        let (user_dir, user_home_dir) = env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|home| home.join(USER_CONFIG_DIR));
+            .map(|home| {
+                (
+                    Some(home.join(USER_CONFIG_DIR)),
+                    Some(home.join(USER_HOME_OXYDRA_DIR)),
+                )
+            })
+            .unwrap_or((None, None));
         Ok(Self {
             system_dir: PathBuf::from(SYSTEM_CONFIG_DIR),
             user_dir,
+            user_home_dir,
             workspace_dir,
         })
     }
@@ -238,6 +251,9 @@ pub fn load_agent_config_with_paths(
     figment = merge_directory(figment, &paths.system_dir, selected_profile);
     if let Some(user_dir) = &paths.user_dir {
         figment = merge_directory(figment, user_dir, selected_profile);
+    }
+    if let Some(user_home_dir) = &paths.user_home_dir {
+        figment = merge_directory(figment, user_home_dir, selected_profile);
     }
     figment = merge_directory(figment, &paths.workspace_dir, selected_profile);
     figment = figment.merge(Env::prefixed(CONFIG_ENV_PREFIX).split("__"));
@@ -625,6 +641,7 @@ pub async fn bootstrap_vm_runtime_with_paths(
         crate::skills::load_and_render_skills(
             &paths.system_dir,
             paths.user_dir.as_deref(),
+            paths.user_home_dir.as_deref(),
             &paths.workspace_dir,
             &availability,
             &env,
@@ -1914,6 +1931,7 @@ remote_url = "libsql://example-org.turso.io"
         ConfigSearchPaths {
             system_dir: root.join("system"),
             user_dir: Some(root.join("user")),
+            user_home_dir: None,
             workspace_dir: root.join("workspace"),
         }
     }

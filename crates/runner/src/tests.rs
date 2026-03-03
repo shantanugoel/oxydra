@@ -1373,6 +1373,7 @@ fn copy_agent_config_to_workspace_materializes_merged_config() {
     let host_paths = bootstrap::ConfigSearchPaths {
         system_dir: root.join("system"),
         user_dir: Some(root.join("user")),
+        user_home_dir: None,
         workspace_dir: root.join("workspace"),
     };
     fs::create_dir_all(&host_paths.system_dir).expect("system config dir should be creatable");
@@ -2309,7 +2310,7 @@ fn discover_skills_includes_embedded_builtins() {
     let system = temp_dir("embed-sys");
     let workspace = temp_dir("embed-ws");
 
-    let skills = crate::skills::discover_skills(&system, None, &workspace);
+    let skills = crate::skills::discover_skills(&system, None, None, &workspace);
 
     // Should discover the embedded BrowserAutomation skill.
     assert!(
@@ -2338,7 +2339,7 @@ fn workspace_skill_overrides_embedded_builtin() {
     )
     .unwrap();
 
-    let skills = crate::skills::discover_skills(&system, None, &workspace);
+    let skills = crate::skills::discover_skills(&system, None, None, &workspace);
 
     let browser = skills
         .iter()

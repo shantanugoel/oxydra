@@ -57,15 +57,17 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 pub fn discover_skills(
     system_dir: &Path,
     user_dir: Option<&Path>,
+    user_home_dir: Option<&Path>,
     workspace_dir: &Path,
 ) -> Vec<Skill> {
     // Start with embedded built-in skills (lowest precedence).
     let mut skills_by_name: HashMap<String, Skill> = discover_embedded_skills();
 
-    // System → user → workspace (each overriding lower tiers).
+    // System → user (XDG) → user home (~/.oxydra) → workspace (each overriding lower tiers).
     let dirs: Vec<PathBuf> = [
         Some(system_dir.join(SKILLS_SUBDIR)),
         user_dir.map(|d| d.join(SKILLS_SUBDIR)),
+        user_home_dir.map(|d| d.join(SKILLS_SUBDIR)),
         Some(workspace_dir.join(SKILLS_SUBDIR)),
     ]
     .into_iter()
@@ -245,11 +247,12 @@ pub fn format_skills_prompt(skills: &[RenderedSkill]) -> String {
 pub fn load_and_render_skills(
     system_dir: &Path,
     user_dir: Option<&Path>,
+    user_home_dir: Option<&Path>,
     workspace_dir: &Path,
     availability: &ToolAvailability,
     env: &HashMap<String, String>,
 ) -> String {
-    let skills = discover_skills(system_dir, user_dir, workspace_dir);
+    let skills = discover_skills(system_dir, user_dir, user_home_dir, workspace_dir);
     tracing::info!(
         discovered = skills.len(),
         names = %skills.iter().map(|s| s.metadata.name.as_str()).collect::<Vec<_>>().join(", "),
@@ -713,7 +716,7 @@ Body.
         write_skill(sys.path(), "a.md", BASIC_SKILL);
 
         let ws = temp_dir("ws-empty");
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         assert!(
             skills.iter().any(|s| s.metadata.name == "test-skill"),
             "should find the filesystem skill alongside embedded builtins"
@@ -729,7 +732,7 @@ Body.
         fs::write(dir.join("notes.json"), "{}").unwrap();
 
         let ws = temp_dir("ws-ignore");
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         // Only embedded builtins (no filesystem .md skills added).
         assert!(
             !skills
@@ -754,7 +757,7 @@ Body.
         let ws_version = BASIC_SKILL.replace("A test skill", "Workspace override");
         write_skill(ws.path(), "s.md", &ws_version);
 
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -780,7 +783,7 @@ Body.
             &BASIC_SKILL.replace("A test skill", "Workspace version"),
         );
 
-        let skills = discover_skills(sys.path(), Some(usr.path()), ws.path());
+        let skills = discover_skills(sys.path(), Some(usr.path()), None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -796,7 +799,7 @@ Body.
         write_skill(sys.path(), "high.md", BASIC_SKILL); // priority: 50
         write_skill(sys.path(), "always.md", ALWAYS_SKILL); // priority: 10
 
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         // Verify ordering: always-skill (10) should come before test-skill (50).
         let names: Vec<&str> = skills.iter().map(|s| s.metadata.name.as_str()).collect();
         let always_pos = names.iter().position(|n| *n == "always-skill");
@@ -821,7 +824,7 @@ Body.
         write_skill(tmp.path(), "a.md", ALWAYS_SKILL);
         let ws = temp_dir("ws-act");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let active = evaluate_activation(&skills, &unavailable_availability(), &HashMap::new());
         assert!(
             active.iter().any(|s| s.metadata.name == "always-skill"),
@@ -835,7 +838,7 @@ Body.
         write_skill(tmp.path(), "m.md", MANUAL_SKILL);
         let ws = temp_dir("ws-manual");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let active = evaluate_activation(&skills, &ready_availability(), &HashMap::new());
         assert!(
             !active.iter().any(|s| s.metadata.name == "manual-skill"),
@@ -849,7 +852,7 @@ Body.
         write_skill(tmp.path(), "s.md", BASIC_SKILL);
         let ws = temp_dir("ws-auto-ok");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let mut env = HashMap::new();
         env.insert("MY_URL".to_owned(), "http://localhost:9867".to_owned());
 
@@ -866,7 +869,7 @@ Body.
         write_skill(tmp.path(), "s.md", BASIC_SKILL);
         let ws = temp_dir("ws-no-tool");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let mut env = HashMap::new();
         env.insert("MY_URL".to_owned(), "http://localhost:9867".to_owned());
 
@@ -881,7 +884,7 @@ Body.
         write_skill(tmp.path(), "s.md", BASIC_SKILL);
         let ws = temp_dir("ws-no-env");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         // MY_URL not set.
         let active = evaluate_activation(&skills, &ready_availability(), &HashMap::new());
         assert!(active.is_empty());
@@ -895,7 +898,7 @@ Body.
         write_skill(tmp.path(), "s.md", BASIC_SKILL);
         let ws = temp_dir("ws-shell-unavail");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let mut env = HashMap::new();
         env.insert("MY_URL".to_owned(), "http://localhost:9867".to_owned());
 
@@ -926,7 +929,7 @@ Browser content.
         write_skill(tmp.path(), "b.md", content);
         let ws = temp_dir("ws-browser-req");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let active = evaluate_activation(&skills, &shell_only_availability(), &HashMap::new());
         assert!(active.is_empty());
     }
@@ -941,7 +944,7 @@ Browser content.
         write_skill(tmp.path(), "s.md", BASIC_SKILL);
         let ws = temp_dir("ws-render");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -962,7 +965,7 @@ Browser content.
         write_skill(tmp.path(), "s.md", BASIC_SKILL);
         let ws = temp_dir("ws-render-unknown");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -1030,8 +1033,14 @@ Browser content.
         let mut env = HashMap::new();
         env.insert("MY_URL".to_owned(), "http://localhost:9867".to_owned());
 
-        let result =
-            load_and_render_skills(sys.path(), None, ws.path(), &ready_availability(), &env);
+        let result = load_and_render_skills(
+            sys.path(),
+            None,
+            None,
+            ws.path(),
+            &ready_availability(),
+            &env,
+        );
 
         // always-skill and test-skill should be active; manual-skill should not.
         assert!(result.contains("Always Active"));
@@ -1046,6 +1055,7 @@ Browser content.
 
         let result = load_and_render_skills(
             sys.path(),
+            None,
             None,
             ws.path(),
             &ready_availability(),
@@ -1099,7 +1109,7 @@ Use curl {{PINCHTAB_URL}}/api.
         write_skill(tmp.path(), "browser.md", content);
         let ws = temp_dir("ws-browser-activate");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let mut env = HashMap::new();
         env.insert(
             "PINCHTAB_URL".to_owned(),
@@ -1135,7 +1145,7 @@ Browser content.
         write_skill(tmp.path(), "browser.md", content);
         let ws = temp_dir("ws-browser-no-url");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         // Shell is ready but PINCHTAB_URL not set.
         let active = evaluate_activation(&skills, &ready_availability(), &HashMap::new());
         assert!(
@@ -1165,7 +1175,7 @@ Browser content.
         write_skill(tmp.path(), "browser.md", content);
         let ws = temp_dir("ws-browser-no-shell");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let mut env = HashMap::new();
         env.insert(
             "PINCHTAB_URL".to_owned(),
@@ -1199,7 +1209,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         write_skill(tmp.path(), "browser.md", content);
         let ws = temp_dir("ws-browser-render");
 
-        let skills = discover_skills(tmp.path(), None, ws.path());
+        let skills = discover_skills(tmp.path(), None, None, ws.path());
         let browser_skill = skills
             .iter()
             .find(|s| s.metadata.name == "browser-automation")
@@ -1231,7 +1241,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         write_folder_skill(sys.path(), "MySkill", BASIC_SKILL);
 
         let ws = temp_dir("folder-ws-empty");
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -1254,7 +1264,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         fs::write(dir.join("README.md"), "not a skill").unwrap();
 
         let ws = temp_dir("folder-no-skill-ws");
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         // Only embedded builtins should be present — not the empty folder.
         assert!(
             !skills
@@ -1273,7 +1283,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         write_skill(sys.path(), "bare.md", BASIC_SKILL);
 
         let ws = temp_dir("folder-mixed-ws");
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         let names: Vec<&str> = skills.iter().map(|s| s.metadata.name.as_str()).collect();
         assert!(
             names.contains(&"always-skill"),
@@ -1292,7 +1302,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         let ws_version = BASIC_SKILL.replace("A test skill", "Workspace folder override");
         write_folder_skill(ws.path(), "BrowserAutomation", &ws_version);
 
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -1311,7 +1321,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         let ws_version = BASIC_SKILL.replace("A test skill", "Folder wins");
         write_folder_skill(ws.path(), "TestSkill", &ws_version);
 
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         let test_skill = skills
             .iter()
             .find(|s| s.metadata.name == "test-skill")
@@ -1331,7 +1341,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         );
 
         let ws = temp_dir("folder-refs-ws");
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         assert!(
             skills.iter().any(|s| s.metadata.name == "test-skill"),
             "folder-based skill with references should be discovered"
@@ -1455,7 +1465,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         let config_dir = repo_config_dir();
         let ws = temp_dir("actual-skill-ws");
 
-        let skills = discover_skills(&config_dir, None, ws.path());
+        let skills = discover_skills(&config_dir, None, None, ws.path());
         assert!(
             skills
                 .iter()
@@ -1485,7 +1495,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         let config_dir = repo_config_dir();
         let ws = temp_dir("actual-skill-no-shell");
 
-        let skills = discover_skills(&config_dir, None, ws.path());
+        let skills = discover_skills(&config_dir, None, None, ws.path());
         let mut env = HashMap::new();
         env.insert(
             "PINCHTAB_URL".to_owned(),
@@ -1508,7 +1518,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         let config_dir = repo_config_dir();
         let ws = temp_dir("actual-skill-render");
 
-        let skills = discover_skills(&config_dir, None, ws.path());
+        let skills = discover_skills(&config_dir, None, None, ws.path());
         let browser_skill = skills
             .iter()
             .find(|s| s.metadata.name == "browser-automation")
@@ -1569,8 +1579,14 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
             "http://127.0.0.1:9867".to_owned(),
         );
 
-        let prompt =
-            load_and_render_skills(&config_dir, None, ws.path(), &ready_availability(), &env);
+        let prompt = load_and_render_skills(
+            &config_dir,
+            None,
+            None,
+            ws.path(),
+            &ready_availability(),
+            &env,
+        );
 
         assert!(
             prompt.contains("## Active Skills"),
@@ -1603,6 +1619,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
 
         let prompt = load_and_render_skills(
             &config_dir,
+            None,
             None,
             ws.path(),
             &ready_availability(),
@@ -1639,7 +1656,7 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
         let sys = temp_dir("embed-empty-sys");
         let ws = temp_dir("embed-empty-ws");
 
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         assert!(
             skills
                 .iter()
@@ -1668,7 +1685,7 @@ Custom browser content for override test.
 "#;
         write_folder_skill(ws.path(), "BrowserOverride", override_content);
 
-        let skills = discover_skills(sys.path(), None, ws.path());
+        let skills = discover_skills(sys.path(), None, None, ws.path());
         let browser = skills
             .iter()
             .find(|s| s.metadata.name == "browser-automation")

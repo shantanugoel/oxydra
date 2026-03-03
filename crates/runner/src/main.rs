@@ -178,9 +178,34 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Resolves the runner config path, applying a `~/.oxydra/runner.toml` fallback
+/// when the default CWD-relative path was used and does not exist.
+///
+/// Explicit `--config` flags are passed through unchanged. The fallback only
+/// triggers when the path equals the built-in default and the file is absent,
+/// so users who happen to run from their home directory still get the CWD path
+/// when their install is there.
+fn resolve_runner_config_path(configured: &Path) -> PathBuf {
+    if configured != Path::new(DEFAULT_RUNNER_CONFIG_PATH) || configured.exists() {
+        return configured.to_path_buf();
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home_config = PathBuf::from(home).join(".oxydra").join("runner.toml");
+        if home_config.exists() {
+            tracing::info!(
+                path = %home_config.display(),
+                "no local .oxydra/runner.toml found; using config from home directory"
+            );
+            return home_config;
+        }
+    }
+    configured.to_path_buf()
+}
+
 fn run() -> Result<(), CliError> {
     init_tracing();
-    let args = CliArgs::parse();
+    let mut args = CliArgs::parse();
+    args.config_path = resolve_runner_config_path(&args.config_path);
 
     // Subcommands that don't require a running user session.
     match &args.command {

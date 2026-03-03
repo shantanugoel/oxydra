@@ -79,7 +79,7 @@ You can control a headless Chrome browser via Pinchtab's HTTP API...
 | `description` | Yes | — | One-line summary for diagnostics and future UI |
 | `activation` | No | `auto` | `auto` — inject when all conditions met; `manual` — only on explicit request; `always` — always inject |
 | `requires` | No | `[]` | Tool names that must be registered for this skill to activate |
-| `env` | No | `[]` | Environment variables that must be set. Values are available for `{{VAR}}` template substitution in the skill body |
+| `env` | No | `[]` | Environment variables that must be set. Values are available for `{{VAR}}` template substitution in the skill body. **Only use for non-sensitive values** (URLs, paths, feature flags). Secrets must be referenced as shell env vars (`$VAR`) in the skill body — the shell expands them at runtime, keeping actual values out of the system prompt. |
 | `priority` | No | `100` | Ordering when multiple skills are active (lower = earlier in prompt) |
 
 ### 2.3 Skill Storage
@@ -95,7 +95,7 @@ with the same `name` at a higher-precedence level replaces the lower one
 entirely (no merging). This lets users override or disable built-in skills.
 
 The `config/` directory at the repo root holds all shipped configuration
-including example configs (currently in `examples/config/`) and built-in skills.
+including built-in skills.
 
 ### 2.4 Skill Loading and Activation
 
@@ -104,8 +104,17 @@ At session start:
 1. **Discover** — `SkillLoader` scans all three directories, deduplicates by
    `name` (workspace > user > system).
 2. **Evaluate** — For `auto` skills: check that all `requires` tools are
-   registered in the `ToolRegistry` and all `env` vars are set. Mark as active
-   if conditions are met.
+   registered in the `ToolRegistry` **and available** (i.e.,
+   `ToolAvailability` reports the corresponding capability as ready — not just
+   that the tool name exists in the registry), and all `env` vars are set.
+   Mark as active if conditions are met.
+
+   > **Why readiness, not registration:** In the current runtime, `shell_exec`
+   > is always registered even when the shell sidecar is unavailable or
+   > disabled (it returns an error on invocation). Checking only registration
+   > would activate the browser skill in contexts where the shell cannot
+   > actually execute commands. The `SkillLoader` therefore receives both the
+   > `ToolRegistry` and `ToolAvailability` and gates on readiness.
 3. **Render** — Active skills have `{{VAR}}` placeholders replaced with env
    var values.
 4. **Inject** — Rendered skill content is appended to the system prompt.
@@ -318,6 +327,39 @@ stealth settings, advanced cookie management, etc.).
 This file is copied from `config/skills/references/pinchtab-api.md` in the
 Oxydra distribution.
 
+### 3.5 Shell Policy Requirements
+
+The browser skill's curl-based workflow requires commands and shell features
+that are **not** in the default shell allowlist. The following must be allowed
+for browser automation to function:
+
+| Requirement | Default status | Needed by |
+|---|---|---|
+| `curl` | ❌ Not in default allowlist | All Pinchtab API calls |
+| `jq` | ❌ Not in default allowlist | Parsing JSON responses, extracting `tabId` |
+| `sleep` | ❌ Not in default allowlist | Waiting for page loads before snapshot |
+| Shell operators (`&&`, `$()`, `\|`) | ❌ Blocked by default | Command chaining, variable capture |
+
+**Resolution:** When the runner detects `BROWSER_ENABLED=true`, it
+automatically applies a shell config overlay that adds `curl`, `jq`, `sleep`
+to the allowlist and enables `allow_operators`. This is done in the runner's
+container provisioning, not via a separate user config step — browser
+automation should work out of the box when enabled.
+
+The runner constructs a `ShellConfig` overlay:
+
+```rust
+// When browser is enabled, extend shell policy for browser skill commands
+if browser_enabled {
+    shell_config.allow.get_or_insert_with(Vec::new)
+        .extend(["curl", "jq", "sleep"].map(str::to_owned));
+    shell_config.allow_operators = Some(true);
+}
+```
+
+Users who have custom shell configs retain full control — the runner only
+adds to the allowlist, never replaces user-specified settings.
+
 ---
 
 ## 4. Infrastructure (Pinchtab in Shell-VM)
@@ -347,7 +389,29 @@ if [ "${BROWSER_ENABLED}" = "true" ]; then
     fi
 
     /usr/local/bin/pinchtab &
-    sleep 1
+    PINCHTAB_PID=$!
+
+    # Wait for Pinchtab to become healthy (up to 30s).
+    # The runner also polls /health externally, but this avoids a race where
+    # shell-daemon starts accepting commands before Pinchtab is ready.
+    HEALTH_URL="http://${BRIDGE_BIND:-127.0.0.1}:${BRIDGE_PORT:-9867}/health"
+    RETRIES=0
+    MAX_RETRIES=30
+    while [ $RETRIES -lt $MAX_RETRIES ]; do
+        if curl -sf -o /dev/null "$HEALTH_URL" 2>/dev/null; then
+            break
+        fi
+        # Check if Pinchtab process is still alive
+        if ! kill -0 $PINCHTAB_PID 2>/dev/null; then
+            echo "WARNING: Pinchtab process exited unexpectedly" >&2
+            break
+        fi
+        RETRIES=$((RETRIES + 1))
+        sleep 1
+    done
+    if [ $RETRIES -eq $MAX_RETRIES ]; then
+        echo "WARNING: Pinchtab health check timed out after ${MAX_RETRIES}s" >&2
+    fi
 fi
 
 exec /usr/local/bin/shell-daemon "$@"
@@ -404,12 +468,22 @@ regardless.
 
 ### 4.4 Port Allocation
 
-Multiple users on the same host need distinct Pinchtab ports. The runner
-maintains a sequential counter starting from 9867, assigning one port per active
-user container. The assigned port is included in the bootstrap envelope so the
+Multiple users on the same host need distinct Pinchtab ports. The runner uses a
+**probe-and-reserve** strategy starting from port 9867:
+
+1. Try binding a TCP listener to the candidate port.
+2. If the port is in use, increment and retry (up to 100 attempts).
+3. Once a free port is found, record it in the user's runtime state.
+
+This avoids collisions across restarts, concurrent users, and other local
+processes. The assigned port is included in the bootstrap envelope so the
 oxydra-vm knows where to connect.
 
-### 4.5 Profile Support
+### 4.5 Profile Support (Follow-up — not in MVP)
+
+> **Note:** Profile support is deferred until stateless browser automation is
+> stable. The infrastructure below describes the intended design for a
+> follow-up iteration.
 
 Pre-baked browser profiles let agents skip login flows. Users create profiles
 locally (with headed Chrome), and they're mounted into the container.
@@ -436,9 +510,17 @@ curl -X POST http://localhost:9867/navigate \
 
 ### 4.6 Health Check
 
-After Pinchtab starts, the runner polls `GET /health` as the readiness check.
-The `browser_available` field in `StartupStatusReport` is set to `true` once
-the health check passes.
+The `/health` endpoint is the **sole readiness signal** for browser
+availability. The runner polls `GET /health` after starting the container:
+
+1. Poll every 1s, up to 30s timeout.
+2. On success: set `browser_available = true` in `StartupStatusReport`.
+3. On timeout or Pinchtab crash: set `browser_available = false`, log a
+   warning, but continue — the shell remains fully functional. The browser
+   skill will not activate (its `env` condition `PINCHTAB_URL` won't be set).
+4. If Pinchtab crashes mid-session, curl commands will return connection
+   errors. The LLM will see these and can report the issue. A future
+   enhancement could monitor the Pinchtab process and attempt restart.
 
 ---
 
@@ -469,7 +551,12 @@ pub struct Skill {
 }
 ```
 
-### 5.2 New: Skill loader (crate placement TBD — `runner` or `tools`)
+### 5.2 New: Skill loader in `runner` crate (`runner/src/skills.rs`)
+
+The skill loader lives in the `runner` crate because it is fundamentally about
+prompt construction and session configuration — the same domain as
+`build_system_prompt()` and config loading. It depends on `ToolAvailability`
+(from the `tools` crate) but does not need the `ToolRegistry` itself.
 
 ```rust
 pub struct SkillLoader { /* directory paths */ }
@@ -478,8 +565,13 @@ impl SkillLoader {
     /// Scan directories, parse frontmatter, deduplicate by name.
     pub fn discover(&self) -> Vec<Skill>;
 
-    /// Filter to active skills based on registered tools and env vars.
-    pub fn evaluate(skills: &[Skill], tools: &[&str], env: &HashMap<String, String>) -> Vec<&Skill>;
+    /// Filter to active skills based on tool availability and env vars.
+    /// Uses `ToolAvailability` (not `ToolRegistry`) to check readiness.
+    pub fn evaluate(
+        skills: &[Skill],
+        availability: &ToolAvailability,
+        env: &HashMap<String, String>,
+    ) -> Vec<&Skill>;
 
     /// Render a skill's content with env var substitution.
     pub fn render(skill: &Skill, env: &HashMap<String, String>) -> String;
@@ -530,26 +622,22 @@ The built-in browser skill (Section 3.3 content).
 Adapted from Pinchtab's official `references/api.md`. Placed at
 `/shared/.oxydra/skill-refs/pinchtab-api.md` during session setup.
 
-### 5.7 Moved: `examples/config/` → `config/`
-
-The existing example configs (`runner.toml`, `runner-user.toml`, `agent.toml`)
-move from `examples/config/` to `config/`. The `examples/` directory is removed
-(it becomes empty).
-
-### 5.8 Docker changes
+### 5.7 Docker changes
 
 Both `Dockerfile` and `Dockerfile.prebuilt`:
 - Add Pinchtab binary
 - Add `shell-vm-entrypoint.sh`
 - Change entrypoint to the launcher script
 
-### 5.9 Runner changes
+### 5.8 Runner changes
 
-- Port allocation for Pinchtab
+- Port allocation for Pinchtab (probe-and-reserve)
 - `BRIDGE_TOKEN` generation (random hex, stored in config or generated per-session)
 - Environment variable forwarding to shell-vm
 - `PINCHTAB_URL` env var for oxydra-vm
-- Health check polling
+- Health check polling (with timeout and graceful degradation)
+- Shell policy overlay: auto-add `curl`, `jq`, `sleep` and enable operators
+  when `BROWSER_ENABLED=true`
 - Copy skill reference files to workspace during session setup
 - `browser_config` in bootstrap envelope
 
@@ -564,23 +652,27 @@ inject them into the system prompt.
 
 **Scope:**
 1. Define `Skill`, `SkillActivation`, `SkillMetadata` types in `types`
-2. Add `gray_matter = "0.3.2"` dependency
-3. Implement `SkillLoader`:
+2. Add `gray_matter = "0.3.2"` dependency (to `runner` crate)
+3. Implement `SkillLoader` in `runner/src/skills.rs`:
    - Parse YAML frontmatter from markdown files
    - Scan skill directories (system/config → user → workspace)
    - Deduplicate by name (workspace wins)
-   - Evaluate activation conditions
-   - Template substitution for `{{ENV_VAR}}` placeholders
+   - Evaluate activation conditions using `ToolAvailability` (readiness, not
+     just registration) and env var presence
+   - Template substitution for `{{ENV_VAR}}` placeholders (non-sensitive
+     values only — see Section 2.2)
    - Token estimation and 3000-token cap enforcement
 4. Modify `build_system_prompt()` to accept and inject active skills
 5. Wire up: load skills at session start, pass to prompt builder
-6. Move `examples/config/` → `config/`, remove empty `examples/`
-7. Unit tests: frontmatter parsing, directory precedence, deduplication,
-   activation evaluation, template rendering, token cap
+6. Unit tests: frontmatter parsing, directory precedence, deduplication,
+   activation evaluation (including readiness checks), template rendering,
+   token cap
+7. **Test: skill activation does NOT occur when shell is registered but
+   unavailable** (e.g., `ToolAvailability.shell` is `Unavailable`)
 
 **Verification gate:** Skills discovered from config directory, activated based
-on conditions, rendered with env vars, injected into system prompt. Token cap
-enforced.
+on conditions (including tool readiness), rendered with env vars, injected into
+system prompt. Token cap enforced.
 
 ### Phase B: Pinchtab Infrastructure
 
@@ -589,18 +681,25 @@ oxydra-vm.
 
 **Scope:**
 1. Add Pinchtab binary to shell-vm Docker image (both Dockerfiles)
-2. Create `docker/shell-vm-entrypoint.sh`
+2. Create `docker/shell-vm-entrypoint.sh` (with health-check readiness loop)
 3. Add `BrowserToolConfig` to types, `browser_config` to bootstrap envelope
 4. Add env var forwarding in runner (`BRIDGE_*`, `CHROME_*`, `BROWSER_ENABLED`)
-5. Port allocation logic (sequential from 9867)
+5. Port allocation logic (probe-and-reserve from 9867)
 6. `BRIDGE_TOKEN` generation and forwarding
 7. Set `PINCHTAB_URL` env var in oxydra-vm environment
-8. Health check (`GET /health`) and `browser_available` in startup status
-9. Copy skill reference files to `/shared/.oxydra/skill-refs/` during setup
+8. Health check polling (`GET /health`) with 30s timeout and graceful
+   degradation — if health check fails, `browser_available = false` but
+   shell remains fully functional
+9. Shell policy overlay: auto-add `curl`, `jq`, `sleep` to allowlist and
+   enable `allow_operators` when `BROWSER_ENABLED=true`
+10. Copy skill reference files to `/shared/.oxydra/skill-refs/` during setup
+11. **Test: Pinchtab health failure keeps shell usable and browser unavailable**
+12. **Test: browser skill activation toggles correctly with browser
+    availability and env vars**
 
 **Verification gate:** Pinchtab starts in container,
 `curl -H "Authorization: Bearer $BRIDGE_TOKEN" http://localhost:9867/health`
-succeeds from oxydra-vm.
+succeeds from oxydra-vm. Shell works independently of browser health.
 
 ### Phase C: Browser Automation Skill
 
@@ -610,22 +709,32 @@ succeeds from oxydra-vm.
 1. Write `config/skills/browser-automation.md` (Section 3.3)
 2. Adapt Pinchtab's `references/api.md` as
    `config/skills/references/pinchtab-api.md`
-3. Verify skill auto-activates when `shell_exec` + `PINCHTAB_URL` are available
+3. Verify skill auto-activates when shell is available + `PINCHTAB_URL` is set
 4. Integration test: skill appears in system prompt under correct conditions
-5. Manual end-to-end test: agent navigates, reads, clicks via shell+curl
+5. **Test: end-to-end command path works under the shell policy that
+   includes browser allowlist additions**
+6. Manual end-to-end test: agent navigates, reads, clicks via shell+curl
+7. **Manual test: navigate → snapshot → click/type → diff snapshot →
+   screenshot to `/shared` → `send_media`**
 
 **Verification gate:** Agent can navigate to a URL, snapshot the page, click
 elements, extract text, save screenshots — all via `shell_exec` guided by
 the skill prompt.
 
-### Phase D: Human-in-the-Loop
+### Phase D: Human-in-the-Loop (Post-MVP — separate detailed plan)
 
 **Goal:** Agent can pause and request human help for browser blockers.
 
 This is a dedicated tool (not a skill) because it needs gateway protocol
 integration (pause/resume signaling) that cannot be done via shell.
 
-**Scope:**
+> **Note:** This phase is intentionally kept at overview level. A separate
+> detailed plan should be written after Phase C is complete and basic browser
+> automation is validated in practice. Real-world usage will inform the exact
+> UX requirements (timeout behavior, notification content, CDP connection
+> flow, resume semantics).
+
+**Scope (high-level):**
 - `RequestHumanAssistanceTool` implementation
 - Gateway `ResumeHumanAssistance` frame
 - `/resume` command in TUI and Telegram
@@ -725,9 +834,9 @@ is the same risk surface as `shell_exec` (where the agent can `curl` any URL).
 
 ```
 config/
-├── runner.toml              # (moved from examples/config/)
-├── runner-user.toml         # (moved from examples/config/)
-├── agent.toml               # (moved from examples/config/)
+├── runner.toml
+├── runner-user.toml
+├── agent.toml
 └── skills/
     ├── browser-automation.md
     └── references/
@@ -739,5 +848,5 @@ docker/
 crates/
 ├── types/src/skill.rs       # Skill, SkillActivation, SkillMetadata
 ├── runner/src/bootstrap.rs  # Modified: skill injection in build_system_prompt()
-└── runner/src/skills.rs     # SkillLoader (or in tools crate — TBD)
+└── runner/src/skills.rs     # SkillLoader
 ```

@@ -41,6 +41,13 @@ impl EnvVarGuard {
         unsafe { env::set_var(key, value) };
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = env::var(key).ok();
+        // SAFETY: tests guard environment writes with a process-wide mutex.
+        unsafe { env::remove_var(key) };
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -1358,6 +1365,10 @@ fn microvm_tier_launch_request_includes_bootstrap_file() {
 
 #[test]
 fn copy_agent_config_to_workspace_materializes_merged_config() {
+    let _env_lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let _selection_provider = EnvVarGuard::remove("OXYDRA__SELECTION__PROVIDER");
+    let _selection_model = EnvVarGuard::remove("OXYDRA__SELECTION__MODEL");
+
     let root = temp_dir("copy-agent-config");
     let host_paths = bootstrap::ConfigSearchPaths {
         system_dir: root.join("system"),

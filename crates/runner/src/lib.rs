@@ -83,11 +83,11 @@ const DEFAULT_DOCKER_TIMEOUT_SECS: u64 = 120;
 /// Length of the randomly generated hex bridge token.
 const BRIDGE_TOKEN_HEX_BYTES: usize = 32;
 
-/// Directory inside `/shared` for skill reference files and browser state.
-const SKILL_REFS_DIR: &str = ".oxydra/skill-refs";
+/// Directory inside `/shared` for skill folders (including reference files).
+const SKILL_REFS_DIR: &str = ".oxydra/skills";
 
-/// Directory inside the workspace for built-in skill reference sources.
-const SKILL_REFS_SOURCE_DIR: &str = "skills/references";
+/// Directory inside the system config for built-in skills.
+const SKILLS_SOURCE_DIR: &str = "skills";
 
 const DOCKER_SANDBOXD_SOCKET_RELATIVE_PATH: &str = ".docker/sandboxes/sandboxd.sock";
 const DOCKER_SANDBOX_VM_ENDPOINT: &str = "/vm";
@@ -296,7 +296,7 @@ impl Runner {
                         let _ = fs::write(&agent_config_path, contents);
                     }
 
-                    // Copy skill reference files to /shared/.oxydra/skill-refs/.
+                    // Copy skill folders (including reference files) to /shared/.oxydra/skills/.
                     if let Some(ref paths) = host_paths
                         && let Err(error) = copy_skill_reference_files(
                             &paths.system_dir,
@@ -2989,40 +2989,75 @@ fn apply_browser_shell_overlay(shell_config: &mut types::ShellConfig) {
     }
 }
 
-/// Copies built-in skill reference files from the system config directory to
-/// the workspace's `/shared/.oxydra/skill-refs/` directory so the LLM can
-/// read them on demand via `cat` or `file_read`.
+/// Copies built-in skill folders (including reference files) from the system
+/// config directory to the workspace's `/shared/.oxydra/skills/` directory so
+/// the LLM can read reference files on demand via `cat` or `file_read`.
+///
+/// Each skill folder is copied as-is (preserving its subdirectory structure),
+/// e.g. `config/skills/BrowserAutomation/references/pinchtab-api.md` becomes
+/// `/shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md`.
 fn copy_skill_reference_files(
     system_config_dir: &Path,
     shared_dir: &Path,
 ) -> Result<(), RunnerError> {
-    let source_dir = system_config_dir.join(SKILL_REFS_SOURCE_DIR);
+    let source_dir = system_config_dir.join(SKILLS_SOURCE_DIR);
     if !source_dir.is_dir() {
-        // No reference files to copy — not an error.
+        // No skills directory to copy — not an error.
         return Ok(());
     }
 
-    let target_dir = shared_dir.join(SKILL_REFS_DIR);
-    fs::create_dir_all(&target_dir).map_err(|source| RunnerError::ProvisionWorkspace {
-        path: target_dir.clone(),
-        source,
-    })?;
+    let target_base = shared_dir.join(SKILL_REFS_DIR);
 
+    // Iterate over skill folders in the source directory.
     let entries = fs::read_dir(&source_dir).map_err(|source| RunnerError::ProvisionWorkspace {
         path: source_dir.clone(),
         source,
     })?;
 
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(file_name) = path.file_name()
-        {
-            let target = target_dir.join(file_name);
-            fs::copy(&path, &target).map_err(|source| RunnerError::ProvisionWorkspace {
-                path: target.clone(),
+        let skill_dir = entry.path();
+        if !skill_dir.is_dir() {
+            continue;
+        }
+
+        // Look for a references/ subdirectory within the skill folder.
+        let refs_dir = skill_dir.join("references");
+        if !refs_dir.is_dir() {
+            continue;
+        }
+
+        // Mirror the skill folder name in the target.
+        let folder_name = match skill_dir.file_name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let target_refs_dir = target_base.join(folder_name).join("references");
+        fs::create_dir_all(&target_refs_dir).map_err(|source| {
+            RunnerError::ProvisionWorkspace {
+                path: target_refs_dir.clone(),
+                source,
+            }
+        })?;
+
+        let ref_entries =
+            fs::read_dir(&refs_dir).map_err(|source| RunnerError::ProvisionWorkspace {
+                path: refs_dir.clone(),
                 source,
             })?;
+
+        for ref_entry in ref_entries.flatten() {
+            let ref_path = ref_entry.path();
+            if ref_path.is_file()
+                && let Some(file_name) = ref_path.file_name()
+            {
+                let target = target_refs_dir.join(file_name);
+                fs::copy(&ref_path, &target).map_err(|source| {
+                    RunnerError::ProvisionWorkspace {
+                        path: target.clone(),
+                        source,
+                    }
+                })?;
+            }
         }
     }
 

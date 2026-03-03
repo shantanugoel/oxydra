@@ -2273,17 +2273,23 @@ fn apply_browser_shell_overlay_preserves_existing_deny_and_replace_defaults() {
 #[test]
 fn copy_skill_reference_files_copies_to_target() {
     let source_root = temp_dir("skill-ref-src");
-    let source_refs = source_root.join(super::SKILL_REFS_SOURCE_DIR);
-    fs::create_dir_all(&source_refs).unwrap();
-    fs::write(source_refs.join("pinchtab-api.md"), "# API Reference\n").unwrap();
-    fs::write(source_refs.join("extra.md"), "# Extra\n").unwrap();
+    let skill_dir = source_root
+        .join(super::SKILLS_SOURCE_DIR)
+        .join("BrowserAutomation")
+        .join("references");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(skill_dir.join("pinchtab-api.md"), "# API Reference\n").unwrap();
+    fs::write(skill_dir.join("extra.md"), "# Extra\n").unwrap();
 
     let shared_dir = temp_dir("skill-ref-shared");
 
     super::copy_skill_reference_files(&source_root, &shared_dir)
         .expect("copy should succeed");
 
-    let target = shared_dir.join(super::SKILL_REFS_DIR);
+    let target = shared_dir
+        .join(super::SKILL_REFS_DIR)
+        .join("BrowserAutomation")
+        .join("references");
     assert!(target.join("pinchtab-api.md").is_file());
     assert!(target.join("extra.md").is_file());
 
@@ -2302,6 +2308,31 @@ fn copy_skill_reference_files_is_noop_when_source_missing() {
     // No source directory exists — should succeed silently.
     super::copy_skill_reference_files(&source_root, &shared_dir)
         .expect("missing source should not be an error");
+
+    let _ = fs::remove_dir_all(source_root);
+    let _ = fs::remove_dir_all(shared_dir);
+}
+
+#[test]
+fn copy_skill_reference_files_skips_folders_without_references() {
+    let source_root = temp_dir("skill-ref-no-refs");
+    // Create a skill folder without a references/ subdirectory.
+    let skill_dir = source_root
+        .join(super::SKILLS_SOURCE_DIR)
+        .join("SimpleSkill");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(skill_dir.join("SKILL.md"), "---\nname: simple\n---\nBody.").unwrap();
+
+    let shared_dir = temp_dir("skill-ref-no-refs-shared");
+
+    super::copy_skill_reference_files(&source_root, &shared_dir)
+        .expect("should succeed with no references to copy");
+
+    // The target directory for this skill should not exist.
+    let target = shared_dir
+        .join(super::SKILL_REFS_DIR)
+        .join("SimpleSkill");
+    assert!(!target.exists());
 
     let _ = fs::remove_dir_all(source_root);
     let _ = fs::remove_dir_all(shared_dir);

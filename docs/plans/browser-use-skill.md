@@ -52,7 +52,17 @@ packaged as a skill.
 
 ### 2.2 Skill File Format
 
-Skills are markdown files with YAML frontmatter:
+Each skill lives in its own folder with a `SKILL.md` file containing YAML
+frontmatter and markdown body:
+
+```
+config/skills/BrowserAutomation/
+├── SKILL.md                    # skill body (frontmatter + content)
+└── references/                 # optional reference files
+    └── pinchtab-api.md
+```
+
+`SKILL.md` format:
 
 ```markdown
 ---
@@ -84,11 +94,27 @@ You can control a headless Chrome browser via Pinchtab's HTTP API...
 
 ### 2.3 Skill Storage
 
+Skills are organized as **folders**, each containing a `SKILL.md` file and
+optionally a `references/` subdirectory with supplementary files:
+
 ```
-config/skills/                       # built-in skills (ship with Oxydra)
-<user_config_dir>/skills/            # user-level skills (shared across workspaces)
-<workspace_root>/.oxydra/skills/     # workspace-level skills (project-specific)
+config/skills/                              # built-in skills (ship with Oxydra)
+├── BrowserAutomation/
+│   ├── SKILL.md                            # skill body (frontmatter + markdown)
+│   └── references/
+│       └── pinchtab-api.md                 # lazy-loaded reference docs
+├── SimpleSkill/
+│   └── SKILL.md                            # simple skill (no references)
+<user_config_dir>/skills/                   # user-level skills (shared across workspaces)
+├── MyCustomSkill/
+│   └── SKILL.md
+<workspace_root>/.oxydra/skills/            # workspace-level skills (project-specific)
+├── ProjectWorkflow/
+│   └── SKILL.md
 ```
+
+Bare `.md` files directly in a `skills/` directory are also supported for
+backward compatibility (simple skills without reference files).
 
 Skills are discovered with workspace-level taking highest precedence: a skill
 with the same `name` at a higher-precedence level replaces the lower one
@@ -96,6 +122,10 @@ entirely (no merging). This lets users override or disable built-in skills.
 
 The `config/` directory at the repo root holds all shipped configuration
 including built-in skills.
+
+When skill folders are copied to the workspace at session setup, they are placed
+at `/shared/.oxydra/skills/<SkillFolder>/` preserving the folder structure. This
+avoids naming collisions between different skills' reference files.
 
 ### 2.4 Skill Loading and Activation
 
@@ -163,13 +193,14 @@ reference file:
 
 ```markdown
 For the full API reference with all parameters, run:
-cat /shared/.oxydra/skill-refs/pinchtab-api.md
+cat /shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md
 ```
 
-The reference file is placed in the workspace at session setup time (or mounted
-from the config directory). The LLM reads it on demand via `shell_exec` or
-`file_read` only when needed — a multi-page API reference doesn't inflate every
-turn's system prompt.
+The reference file is placed in the workspace at session setup time — skill
+folders (including their `references/` subdirectory) are copied from
+`config/skills/` to `/shared/.oxydra/skills/`. The LLM reads reference files
+on demand via `shell_exec` or `file_read` only when needed — a multi-page API
+reference doesn't inflate every turn's system prompt.
 
 This pattern — concise skill in prompt, detailed reference on disk — keeps the
 prompt lean while giving the LLM access to full documentation when it needs it.
@@ -314,18 +345,18 @@ If you encounter CAPTCHAs, 2FA, or login walls, call `request_human_assistance`
 with a clear description of the blocker.
 
 For the full API reference (all params, PDF options, upload/download, stealth):
-`cat /shared/.oxydra/skill-refs/pinchtab-api.md`
+`cat /shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md`
 ```
 
 ### 3.4 Reference File (Lazy-loaded)
 
 Pinchtab's official `references/api.md` (~2325 tokens) is placed at
-`/shared/.oxydra/skill-refs/pinchtab-api.md` during session setup. The LLM
+`/shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md` during session setup. The LLM
 reads it on demand when it needs detailed parameter information (PDF options,
 stealth settings, advanced cookie management, etc.).
 
-This file is copied from `config/skills/references/pinchtab-api.md` in the
-Oxydra distribution.
+This file is copied from `config/skills/BrowserAutomation/references/pinchtab-api.md`
+in the Oxydra distribution.
 
 ### 3.5 Shell Policy Requirements
 
@@ -420,8 +451,19 @@ exec /usr/local/bin/shell-daemon "$@"
 **Dockerfile additions** (both `Dockerfile` and `Dockerfile.prebuilt`):
 
 ```dockerfile
-# Add Pinchtab binary
-COPY --from=pinchtab-builder /pinchtab /usr/local/bin/pinchtab
+ARG PINCHTAB_VERSION=0.7.6
+
+# Install required tools (curl, jq for browser skill, chromium for Pinchtab)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl jq chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Pinchtab binary for the target architecture
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fSL "https://github.com/pinchtab/pinchtab/releases/download/v${PINCHTAB_VERSION}/pinchtab-linux-${ARCH}" \
+      -o /usr/local/bin/pinchtab && \
+    chmod +x /usr/local/bin/pinchtab
+
 COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
@@ -613,19 +655,20 @@ pub struct BrowserToolConfig {
 
 Add `browser_config: Option<BrowserToolConfig>` to `RunnerBootstrapEnvelope`.
 
-### 5.5 New: `config/skills/browser-automation.md`
+### 5.5 New: `config/skills/BrowserAutomation/SKILL.md`
 
 The built-in browser skill (Section 3.3 content).
 
-### 5.6 New: `config/skills/references/pinchtab-api.md`
+### 5.6 New: `config/skills/BrowserAutomation/references/pinchtab-api.md`
 
 Adapted from Pinchtab's official `references/api.md`. Placed at
-`/shared/.oxydra/skill-refs/pinchtab-api.md` during session setup.
+`/shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md` during session setup.
 
 ### 5.7 Docker changes
 
 Both `Dockerfile` and `Dockerfile.prebuilt`:
-- Add Pinchtab binary
+- Download Pinchtab binary from GitHub releases (multi-arch aware)
+- Install `curl`, `jq` (required by browser skill and entrypoint health check)
 - Add `shell-vm-entrypoint.sh`
 - Change entrypoint to the launcher script
 
@@ -658,6 +701,8 @@ inject them into the system prompt.
 3. ✅ Implement skill loader in `runner/src/skills.rs`:
    - ✅ Parse YAML frontmatter from markdown files
    - ✅ Scan skill directories (system/config → user → workspace)
+   - ✅ Support both folder-based skills (`SkillFolder/SKILL.md`) and bare
+     `.md` files
    - ✅ Deduplicate by name (workspace wins)
    - ✅ Evaluate activation conditions using `ToolAvailability` (readiness, not
      just registration) and env var presence
@@ -666,9 +711,9 @@ inject them into the system prompt.
    - ✅ Token estimation and 3000-token cap enforcement
 4. ✅ Modify `build_system_prompt()` to accept and inject active skills
 5. ✅ Wire up: load skills at session start, pass to prompt builder
-6. ✅ Unit tests (28 total): frontmatter parsing, directory precedence, deduplication,
+6. ✅ Unit tests (36 total): frontmatter parsing, directory precedence, deduplication,
    activation evaluation (including readiness checks), template rendering,
-   token cap, prompt injection
+   token cap, prompt injection, folder-based discovery
 7. ✅ **Test: skill activation does NOT occur when shell is registered but
    unavailable** (e.g., `ToolAvailability.shell` is `Unavailable`)
 
@@ -687,8 +732,11 @@ oxydra-vm.
 1. ✅ Add Pinchtab binary to shell-vm Docker image (both Dockerfiles)
    - Updated `docker/Dockerfile` and `docker/Dockerfile.prebuilt` to use
      `shell-vm-entrypoint.sh` instead of direct `shell-daemon` entrypoint
-   - Note: Pinchtab binary itself must be added separately when available
-     (entrypoint handles conditional startup)
+   - Pinchtab binary downloaded from GitHub releases at build time
+     (multi-arch: `dpkg --print-architecture` resolves to `amd64` or `arm64`)
+   - `docker/Dockerfile` updated to install `curl` and `jq` (required by
+     entrypoint health check and browser skill)
+   - `PINCHTAB_VERSION` build arg allows pinning to a specific release
 2. ✅ Create `docker/shell-vm-entrypoint.sh` (with health-check readiness loop)
 3. ✅ Add `BrowserToolConfig` to types, `browser_config` to bootstrap envelope
 4. ✅ Add env var forwarding in runner (`BRIDGE_*`, `CHROME_*`, `BROWSER_ENABLED`)
@@ -701,9 +749,12 @@ oxydra-vm.
    activate, but shell remains fully functional
 9. ✅ Shell policy overlay: auto-add `curl`, `jq`, `sleep` to allowlist and
    enable `allow_operators` when `BROWSER_ENABLED=true`
-10. ✅ Copy skill reference files to `/shared/.oxydra/skill-refs/` during setup
-    - Created `config/skills/references/pinchtab-api.md` adapted from official
-      Pinchtab API docs
+10. ✅ Copy skill folders (including reference files) to `/shared/.oxydra/skills/` during setup
+    - Created `config/skills/BrowserAutomation/references/pinchtab-api.md`
+      adapted from official Pinchtab API docs
+    - Skill folders copied preserving structure:
+      `config/skills/BrowserAutomation/references/` →
+      `/shared/.oxydra/skills/BrowserAutomation/references/`
 11. ✅ **Test: Pinchtab health failure keeps shell usable and browser unavailable**
     - `browser_skill_inactive_when_shell_unavailable`
     - `browser_skill_inactive_when_pinchtab_url_missing`
@@ -717,7 +768,7 @@ oxydra-vm.
     - `browser_skill_renders_pinchtab_url`
     - `startup_with_browser_enabled_populates_browser_env_in_shell_vm`
 
-**Tests added (21 total):**
+**Tests added (22 total):**
 - Port allocation: `find_available_port_returns_some_port_in_range`
 - Token generation: `generate_bridge_token_produces_hex_string`,
   `generate_bridge_token_produces_unique_values`
@@ -726,7 +777,8 @@ oxydra-vm.
   `apply_browser_shell_overlay_does_not_duplicate_existing_commands`,
   `apply_browser_shell_overlay_preserves_existing_deny_and_replace_defaults`
 - Skill ref copy: `copy_skill_reference_files_copies_to_target`,
-  `copy_skill_reference_files_is_noop_when_source_missing`
+  `copy_skill_reference_files_is_noop_when_source_missing`,
+  `copy_skill_reference_files_skips_folders_without_references`
 - Bootstrap envelope: `browser_config_in_bootstrap_envelope_round_trips`
 - Integration: `startup_with_browser_enabled_populates_browser_env_in_shell_vm`,
   `startup_with_browser_disabled_has_no_browser_config`,
@@ -738,9 +790,9 @@ oxydra-vm.
 
 **Verification gate:** ✅ Browser infrastructure is provisioned when
 `browser_enabled=true`: port allocated, token generated, env vars forwarded to
-both VMs, shell policy overlay applied, skill reference files copied. When
-browser is disabled or in Process tier, no browser infrastructure is
-provisioned. Skill system correctly gates browser skill activation on tool
+both VMs, shell policy overlay applied, skill folders (including references)
+copied. When browser is disabled or in Process tier, no browser infrastructure
+is provisioned. Skill system correctly gates browser skill activation on tool
 readiness and `PINCHTAB_URL` presence.
 
 ### Phase C: Browser Automation Skill
@@ -748,9 +800,10 @@ readiness and `PINCHTAB_URL` presence.
 **Goal:** The LLM can drive the browser via shell commands guided by the skill.
 
 **Scope:**
-1. Write `config/skills/browser-automation.md` (Section 3.3)
+1. Write `config/skills/BrowserAutomation/SKILL.md` (Section 3.3)
 2. Adapt Pinchtab's `references/api.md` as
-   `config/skills/references/pinchtab-api.md`
+   `config/skills/BrowserAutomation/references/pinchtab-api.md`
+   (already done in Phase B)
 3. Verify skill auto-activates when shell is available + `PINCHTAB_URL` is set
 4. Integration test: skill appears in system prompt under correct conditions
 5. **Test: end-to-end command path works under the shell policy that
@@ -880,9 +933,10 @@ config/
 ├── runner-user.toml
 ├── agent.toml
 └── skills/
-    ├── browser-automation.md
-    └── references/
-        └── pinchtab-api.md
+    └── BrowserAutomation/
+        ├── SKILL.md
+        └── references/
+            └── pinchtab-api.md
 docker/
 ├── Dockerfile
 ├── Dockerfile.prebuilt

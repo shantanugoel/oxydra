@@ -26,12 +26,22 @@ const CHARS_PER_TOKEN: usize = 4;
 /// Skill directories relative to each config tier.
 const SKILLS_SUBDIR: &str = "skills";
 
+/// The canonical skill file name inside a skill folder.
+const SKILL_FILE_NAME: &str = "SKILL.md";
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Scans skill directories, deduplicates by `name`, and returns all
 /// successfully parsed skills. Invalid files are logged and skipped.
+///
+/// Skills can be either:
+/// - **Folder-based:** A subdirectory containing `SKILL.md` and optionally a
+///   `references/` subdirectory with supplementary files. E.g.
+///   `skills/BrowserAutomation/SKILL.md`.
+/// - **Bare file:** A `.md` file directly in the `skills/` directory (for
+///   simple skills without reference files).
 ///
 /// Precedence (highest to lowest): `workspace_dir` → `user_dir` → `system_dir`.
 /// A skill with the same `name` at a higher-precedence tier replaces the
@@ -67,6 +77,33 @@ pub fn discover_skills(
 
         for entry in entries.flatten() {
             let path = entry.path();
+
+            // Folder-based skill: subdirectory with SKILL.md inside.
+            if path.is_dir() {
+                let skill_file = path.join(SKILL_FILE_NAME);
+                if skill_file.is_file() {
+                    match parse_skill_file(&skill_file) {
+                        Ok(skill) => {
+                            tracing::debug!(
+                                name = %skill.metadata.name,
+                                path = %skill_file.display(),
+                                "discovered folder-based skill"
+                            );
+                            skills_by_name.insert(skill.metadata.name.clone(), skill);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                path = %skill_file.display(),
+                                error = %err,
+                                "skipping invalid skill file"
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Bare-file skill: a .md file directly in the skills directory.
             if !is_skill_file(&path) {
                 continue;
             }
@@ -307,6 +344,9 @@ mod tests {
 
     use super::*;
 
+    /// The subdirectory within a skill folder that holds reference files.
+    const REFERENCES_SUBDIR: &str = "references";
+
     /// Helper: create a temporary directory tree for testing.
     fn temp_dir(label: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -318,6 +358,24 @@ mod tests {
     /// Helper: write a skill file into the `skills/` subdirectory of `base`.
     fn write_skill(base: &Path, filename: &str, content: &str) {
         let dir = base.join(SKILLS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(filename), content).unwrap();
+    }
+
+    /// Helper: write a folder-based skill with `SKILL.md` inside
+    /// `skills/<folder_name>/`.
+    fn write_folder_skill(base: &Path, folder_name: &str, content: &str) {
+        let dir = base.join(SKILLS_SUBDIR).join(folder_name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SKILL_FILE_NAME), content).unwrap();
+    }
+
+    /// Helper: write a reference file into `skills/<folder_name>/references/`.
+    fn write_skill_reference(base: &Path, folder_name: &str, filename: &str, content: &str) {
+        let dir = base
+            .join(SKILLS_SUBDIR)
+            .join(folder_name)
+            .join(REFERENCES_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(filename), content).unwrap();
     }
@@ -972,5 +1030,112 @@ Navigate: `curl {{PINCHTAB_URL}}/navigate`
             !rendered.content.contains("{{PINCHTAB_URL}}"),
             "placeholder should be replaced"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Folder-based skill discovery
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn discover_skills_finds_folder_based_skill() {
+        let sys = temp_dir("folder-sys");
+        write_folder_skill(sys.path(), "MySkill", BASIC_SKILL);
+
+        let ws = temp_dir("folder-ws-empty");
+        let skills = discover_skills(sys.path(), None, ws.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].metadata.name, "test-skill");
+        assert!(
+            skills[0]
+                .source_path
+                .to_string_lossy()
+                .contains("MySkill/SKILL.md"),
+            "source_path should reference the SKILL.md inside the folder"
+        );
+    }
+
+    #[test]
+    fn discover_skills_ignores_folder_without_skill_md() {
+        let sys = temp_dir("folder-no-skill");
+        // Create a directory but don't put SKILL.md in it.
+        let dir = sys.path().join(SKILLS_SUBDIR).join("EmptyFolder");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("README.md"), "not a skill").unwrap();
+
+        let ws = temp_dir("folder-no-skill-ws");
+        let skills = discover_skills(sys.path(), None, ws.path());
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn discover_skills_mixes_folder_and_bare_file_skills() {
+        let sys = temp_dir("folder-mixed");
+        // Folder-based skill.
+        write_folder_skill(sys.path(), "FolderSkill", ALWAYS_SKILL);
+        // Bare-file skill.
+        write_skill(sys.path(), "bare.md", BASIC_SKILL);
+
+        let ws = temp_dir("folder-mixed-ws");
+        let skills = discover_skills(sys.path(), None, ws.path());
+        assert_eq!(skills.len(), 2);
+        let names: Vec<&str> = skills.iter().map(|s| s.metadata.name.as_str()).collect();
+        assert!(names.contains(&"always-skill"));
+        assert!(names.contains(&"test-skill"));
+    }
+
+    #[test]
+    fn discover_skills_folder_in_workspace_overrides_folder_in_system() {
+        let sys = temp_dir("folder-override-sys");
+        let ws = temp_dir("folder-override-ws");
+
+        // Same skill name in both tiers but different descriptions.
+        write_folder_skill(sys.path(), "BrowserAutomation", BASIC_SKILL);
+        let ws_version = BASIC_SKILL.replace("A test skill", "Workspace folder override");
+        write_folder_skill(ws.path(), "BrowserAutomation", &ws_version);
+
+        let skills = discover_skills(sys.path(), None, ws.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].metadata.description, "Workspace folder override");
+    }
+
+    #[test]
+    fn discover_skills_folder_skill_overrides_bare_file_with_same_name() {
+        let sys = temp_dir("folder-vs-bare-sys");
+        let ws = temp_dir("folder-vs-bare-ws");
+
+        // System has bare file.
+        write_skill(sys.path(), "test.md", BASIC_SKILL);
+        // Workspace has folder-based with same `name`.
+        let ws_version = BASIC_SKILL.replace("A test skill", "Folder wins");
+        write_folder_skill(ws.path(), "TestSkill", &ws_version);
+
+        let skills = discover_skills(sys.path(), None, ws.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].metadata.description, "Folder wins");
+    }
+
+    #[test]
+    fn discover_skills_folder_with_references_is_found() {
+        let sys = temp_dir("folder-refs");
+        write_folder_skill(sys.path(), "BrowserAutomation", BASIC_SKILL);
+        write_skill_reference(
+            sys.path(),
+            "BrowserAutomation",
+            "api.md",
+            "# API Reference\n\nSome docs.",
+        );
+
+        let ws = temp_dir("folder-refs-ws");
+        let skills = discover_skills(sys.path(), None, ws.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].metadata.name, "test-skill");
+
+        // Verify the references directory exists alongside the skill.
+        let refs_dir = sys
+            .path()
+            .join(SKILLS_SUBDIR)
+            .join("BrowserAutomation")
+            .join(REFERENCES_SUBDIR);
+        assert!(refs_dir.join("api.md").is_file());
     }
 }

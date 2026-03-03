@@ -186,9 +186,20 @@ async fn stop_user_daemon_inner(
 
     match response {
         RunnerControlResponse::ShutdownStatus(status) => {
-            wait_for_socket_removal(&socket_path, user_id).await?;
-            let _ = state.remove_spawned_daemon_pid(user_id);
-            Ok(status)
+            match wait_for_socket_removal(&socket_path, user_id).await {
+                Ok(()) => {
+                    let _ = state.remove_spawned_daemon_pid(user_id);
+                    Ok(status)
+                }
+                Err(timeout_err) => {
+                    // Daemon did not exit within the stop timeout. Remove the
+                    // stale PID from tracking and force-kill if we know its PID.
+                    if let Some(pid) = state.remove_spawned_daemon_pid(user_id) {
+                        try_force_kill_pid(pid, user_id);
+                    }
+                    Err(timeout_err)
+                }
+            }
         }
         RunnerControlResponse::Error(error) => Err(daemon_command_failed(format!(
             "daemon shutdown failed for user `{user_id}`: {}",
@@ -266,12 +277,20 @@ fn spawn_detached_daemon(
         command.process_group(0);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         daemon_command_failed(format!(
             "failed to spawn detached daemon process for user `{user_id}`: {error}"
         ))
     })?;
     let pid = child.id();
+
+    // Spawn a background thread to reap the zombie if the daemon exits while
+    // the web configurator is still running. Without this, a daemon that crashes
+    // early would leave a zombie entry in the process table until the web
+    // configurator itself exits.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     tracing::info!(
         user_id = %user_id,
@@ -348,6 +367,39 @@ async fn wait_for_socket_removal(socket_path: &Path, user_id: &str) -> Result<()
         tokio::time::sleep(POLL_INTERVAL).await;
     }
     Ok(())
+}
+
+/// Attempt to SIGKILL a daemon process by PID after a stop timeout.
+/// Only has effect on Unix; no-op on other platforms.
+fn try_force_kill_pid(pid: u32, user_id: &str) {
+    #[cfg(unix)]
+    {
+        let result = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .output();
+        match result {
+            Ok(_) => tracing::warn!(
+                pid,
+                user_id,
+                "sent SIGKILL to daemon process after stop timeout"
+            ),
+            Err(error) => tracing::warn!(
+                pid,
+                user_id,
+                %error,
+                "failed to send SIGKILL to daemon process after stop timeout"
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        tracing::warn!(
+            pid,
+            user_id,
+            "stop timed out; force-kill not supported on this platform"
+        );
+    }
 }
 
 fn cleanup_stale_socket(socket_path: &Path) {

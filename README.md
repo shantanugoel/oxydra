@@ -80,10 +80,10 @@ export OXYDRA_TAG=v0.2.1   # replace with the release you want
 ### 2) Install with one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --base-dir "$PWD"
+curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --base-dir "$HOME"
 ```
 
-This installs the `runner`, `oxydra-vm`, `shell-daemon`, and `oxydra-tui` binaries to `~/.local/bin` and copies starter config templates to `.oxydra/`. If `~/.local/bin` is not in `PATH`:
+This installs the `runner`, `oxydra-vm`, `shell-daemon`, and `oxydra-tui` binaries to `~/.local/bin` and copies starter config templates to `~/.oxydra/`. If `~/.local/bin` is not in `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -153,7 +153,7 @@ export OXYDRA_TAG=v0.2.1   # replace with the release you want
 #### Option A (recommended): one-command installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --base-dir "$PWD"
+curl -fsSL https://raw.githubusercontent.com/shantanugoel/oxydra/main/scripts/install-release.sh | bash -s -- --tag "$OXYDRA_TAG" --base-dir "$HOME"
 ```
 
 Defaults:

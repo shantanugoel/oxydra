@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const DEFAULT_RUNNER_WORKSPACE_ROOT: &str = ".oxydra/workspaces";
+pub const DEFAULT_RUNNER_WORKSPACE_ROOT: &str = "workspaces";
 pub const DEFAULT_OXYDRA_VM_IMAGE: &str = "oxydra-vm:latest";
 pub const DEFAULT_SHELL_VM_IMAGE: &str = "shell-vm:latest";
 pub const DEFAULT_RUNNER_CONFIG_VERSION: &str = "1.0.1";

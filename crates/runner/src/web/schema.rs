@@ -1321,7 +1321,7 @@ fn runner_general_section() -> SchemaSection {
                      a subdirectory here for their shared files, temp data, and vault."
                         .into(),
                 ),
-                default: Some(Value::String(".oxydra/workspaces".into())),
+                default: Some(Value::String("workspaces".into())),
                 required: true,
                 setup_required: true,
                 ..fld("workspace_root", "Workspace Root", "text")

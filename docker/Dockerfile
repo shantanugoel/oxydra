@@ -51,5 +51,6 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 COPY --from=builder /build/target/*/release/shell-daemon /usr/local/bin/shell-daemon
 COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/restart-browser.sh /usr/local/bin/restart-browser
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/restart-browser
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -84,6 +84,28 @@ curl -s "{{PINCHTAB_URL}}/tabs/$TAB/snapshot?filter=interactive&diff=true" \
 - Upload files: First write to /shared/, then `curl -X POST "{{PINCHTAB_URL}}/upload" -H "Authorization: Bearer $BRIDGE_TOKEN" -H 'Content-Type: application/json' -d '{"selector":"input[type=file]","paths":["/shared/file.jpg"]}'`
 - Send to user: After saving to /shared/, use `send_media` to deliver the file
 
+### Recovering from Browser Crashes
+
+If browser commands return timeout or "context canceled" errors, the browser
+service may have crashed. Recover in two steps:
+
+**1. Check health:**
+```bash
+curl -sf --max-time 5 "{{PINCHTAB_URL}}/health" && echo "OK" || echo "UNHEALTHY"
+```
+
+**2. Restart the browser service:**
+```bash
+restart-browser
+```
+
+This kills the stale Pinchtab process, cleans up Chrome lock files, relaunches
+Pinchtab, and waits up to 30 seconds for it to become healthy. After the
+command exits successfully, retry your original browser operation.
+
+If `restart-browser` itself times out, the underlying container may need to be
+restarted — call `request_human_assistance` with that context.
+
 ### If Blocked
 
 If you encounter CAPTCHAs, 2FA, or login walls, call `request_human_assistance`

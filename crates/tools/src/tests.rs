@@ -279,6 +279,7 @@ async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let RuntimeToolsBootstrap {
         registry,
@@ -325,6 +326,7 @@ async fn bootstrap_runtime_tools_waits_for_sidecar_socket_before_disabling_shell
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let RuntimeToolsBootstrap {
         registry,
@@ -475,6 +477,7 @@ async fn bootstrap_registry_denies_file_reads_outside_workspace_roots() {
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let RuntimeToolsBootstrap { registry, .. } =
         bootstrap_runtime_tools(Some(&bootstrap), None, None).await;
@@ -521,6 +524,7 @@ async fn bootstrap_registry_honors_runtime_policy_mount_overrides() {
         }),
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let RuntimeToolsBootstrap { registry, .. } =
         bootstrap_runtime_tools(Some(&bootstrap), None, None).await;

@@ -9,6 +9,8 @@ pub const DEFAULT_SHELL_VM_IMAGE: &str = "shell-vm:latest";
 pub const DEFAULT_RUNNER_CONFIG_VERSION: &str = "1.0.1";
 pub const SUPPORTED_RUNNER_CONFIG_MAJOR_VERSION: u64 = 1;
 pub const DEFAULT_WEB_BIND: &str = "127.0.0.1:9400";
+pub const DEFAULT_PINCHTAB_PORT: u16 = 9867;
+pub const PINCHTAB_PORT_RANGE: u16 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -418,6 +420,20 @@ pub struct RunnerBehaviorOverrides {
     pub browser_enabled: Option<bool>,
 }
 
+// ── Browser (Pinchtab) Configuration Types ──────────────────────────────────
+
+/// Configuration for the Pinchtab browser automation service running inside
+/// the shell-vm container. Included in the bootstrap envelope so the oxydra-vm
+/// runtime can set `PINCHTAB_URL` and activate the browser skill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserToolConfig {
+    /// Full URL to the Pinchtab HTTP API (e.g. `http://127.0.0.1:9867`).
+    pub pinchtab_base_url: String,
+    /// Auth token for Pinchtab. When `None`, no token was configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_token: Option<String>,
+}
+
 // ── Channel Configuration Types ─────────────────────────────────────────────
 
 /// Per-user channel configuration. Lives in `RunnerUserConfig` (host-side,
@@ -539,6 +555,10 @@ pub struct RunnerBootstrapEnvelope {
     /// Populated from the user's `RunnerUserConfig.channels`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<ChannelsConfig>,
+    /// Browser (Pinchtab) configuration. Present when the runner has
+    /// provisioned browser automation for this user's session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_config: Option<BrowserToolConfig>,
 }
 
 impl RunnerBootstrapEnvelope {

@@ -27,7 +27,7 @@ This chapter tracks the implementation status of all 21 phases, documents identi
 | 17 | MCP support | Planned | |
 | 18 | Session lifecycle controls | **Complete** | |
 | 19 | Scheduler system | **Complete** | Durable store, polling executor, 4 LLM tools, conditional notification, cron/interval/once cadences |
-| 20 | Skill system | Planned | |
+| 20 | Skill system | **Complete** | Prompt-injected markdown skills; embedded built-ins (rust-embed); browser automation skill; workspace/user/system/embedded precedence; tool-readiness activation gating |
 | 21 | Persona governance | Planned | |
 | — | Web configurator | **Complete** | `runner web` subcommand, REST API, embedded SPA, onboarding wizard, config editing with backup/validation, lifecycle control, log viewing, host validation, token auth |
 
@@ -352,18 +352,35 @@ Built a complete durable scheduler that lets the LLM create and manage one-off a
 
 **Verification gate:** ✅ One-off and periodic entries execute bounded turns with normal policy/audit controls; conditional notification works correctly; all tests pass.
 
-### Phase 20: Skill System
+### Phase 20: Skill System — ✅ Complete
 
-**Crates:** `runtime`, `tools`, `types`, `memory`
-**Builds on:** Phases 11, 18, 19
+**Crates:** `types`, `runner`
+**Builds on:** Phases 4, 10, 19
 
-**Scope:**
-- `SkillLoader` discovering markdown manifests from `<workspace_root>/<user_id>/skills/`
-- `SkillRegistry` for runtime access
-- API-mediated skill interaction (not raw filesystem traversal)
-- LLM can create/load/use skills; deletion denied by policy
+> **Note:** The delivered implementation differs from the original plan in Chapter 14. The original plan described API-mediated LLM skill access (LLM creates/loads/uses skills through a dedicated API). The actual implementation uses **prompt injection** — skills are operator-authored markdown documents injected into the system prompt at session start. The LLM does not create or modify skills; it simply follows the instructions already in its context. This approach is simpler, more robust to provider differences, and better suited to the goal of teaching the LLM domain workflows.
 
-**Verification gate:** Skills discovered and loaded from managed folder; LLM can create/load/use; deletion denied.
+**Implemented:**
+
+- **Types** (`types/src/skill.rs`): `SkillActivation` enum (`Auto`/`Manual`/`Always`), `SkillMetadata`, `Skill`, `RenderedSkill`
+- **Skill loader** (`runner/src/skills.rs`): `discover_skills()` — scans four tiers (embedded built-ins → system config → user → workspace), deduplicates by `name`, supports both folder-based (`<Folder>/SKILL.md`) and bare `.md` file formats; `evaluate_activation()` — gates `auto` skills on tool readiness (`ToolAvailability`, not just registration) and env var presence; `render_skill()` — `{{VAR}}` placeholder substitution; `format_skills_prompt()` — produces `## Active Skills` section; `load_and_render_skills()` convenience combining all steps; `extract_builtin_references()` — writes embedded reference files to `/shared/.oxydra/skills/` at startup
+- **Embedded built-ins** (`rust-embed` `BuiltinSkills` struct pointing at `config/skills/`): built-in skills compiled into `oxydra-vm` binary; work across all tiers without file copying
+- **Token cap**: 3,000 estimated tokens per skill body; enforced at load time
+- **System prompt integration** (`runner/src/bootstrap.rs`): `build_system_prompt()` calls `load_and_render_skills()` and appends the formatted section
+- **Browser Automation skill** (`config/skills/BrowserAutomation/SKILL.md`): ~1,036 estimated tokens; Core Loop, Key Endpoints table, Best Practices, File Integration, If Blocked sections; `{{PINCHTAB_URL}}` template substitution; `$BRIDGE_TOKEN` as shell env var reference; pointer to lazy-loaded reference file
+- **Browser API reference** (`config/skills/BrowserAutomation/references/pinchtab-api.md`): Adapted from Pinchtab's official API docs; extracted to `/shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md` at startup; read on demand via shell
+- **Pinchtab infrastructure** (runner + Docker):
+  - Port allocation (probe-and-reserve from port 9867, up to 100 attempts)
+  - `BRIDGE_TOKEN` generation (32-byte random hex)
+  - Env var forwarding to shell-vm (`BRIDGE_PORT`, `BRIDGE_BIND`, `BRIDGE_TOKEN`, `BRIDGE_HEADLESS`, `BRIDGE_STATE_DIR`, `CHROME_BINARY`, `CHROME_FLAGS`, `BROWSER_ENABLED`)
+  - `PINCHTAB_URL` + `BRIDGE_TOKEN` forwarded to oxydra-vm env so skill templates and shell commands can use them
+  - Shell policy overlay: auto-adds `curl`, `jq`, `sleep` to allowlist and enables `allow_operators` when `BROWSER_ENABLED=true`
+  - Health check polling (`GET /health`, 30s timeout, graceful degradation — `PINCHTAB_URL` only set on success)
+  - `docker/shell-vm-entrypoint.sh`: starts Pinchtab when `BROWSER_ENABLED=true`, cleans Chrome singleton locks, waits for Pinchtab to become healthy before exec'ing shell-daemon
+  - Docker images updated: Pinchtab binary downloaded at build time (multi-arch `amd64`/`arm64`), `curl`/`jq` installed
+- **Logging**: skill discovery and activation at `info` level; non-activation reasons (missing tools, missing env vars) logged with specifics
+- **Tests**: 36 unit tests in `runner/src/skills.rs` (frontmatter parsing, discovery, deduplication, precedence, activation evaluation, rendering, token cap, prompt formatting, folder-based skills, actual browser skill file validation, browser activation scenarios); 22 runner tests for Pinchtab infrastructure (port allocation, token generation, browser env, shell overlay, reference copying, bootstrap envelope, startup integration, skill activation toggles); 9 browser skill tests (metadata parsing, token cap check, key sections validation, activation under different conditions, rendering, prompt integration, shell policy)
+
+**Verification gate:** ✅ Browser automation skill discovered from embedded built-ins, activates when shell is ready and `PINCHTAB_URL` is set, renders with URL substitution, appears in system prompt. Shell policy overlay allows `curl`/`jq`/`sleep`/operators when browser enabled. Token cap enforced. Workspace-level skills override built-ins by name.
 
 ### Phase 21: Persona Governance
 
@@ -384,7 +401,7 @@ The two open gaps are incorporated as additional work items:
 
 | Gap | Affected Phase | Resolution Target | Priority |
 |-----|---------------|-------------------|----------|
-| upsert_chunks implementation | Phase 9 | Before Phase 20 (skill/document indexing needs chunk ingestion) | Medium |
+| upsert_chunks implementation | Phase 9 | Before document/codebase indexing features | Medium |
 | Docker container log capture | Phase 10 | Non-blocking; wire bollard `logs()` streaming to log files for container-tier guests | Low |
 
 These gaps do not block any currently completed phase's functionality but should be resolved before the phases that depend on them.

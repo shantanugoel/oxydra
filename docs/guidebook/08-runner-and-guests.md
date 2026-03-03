@@ -341,6 +341,117 @@ Two backends implement the `ShellSession` trait:
 | `VsockShellSession` | Production (Container/MicroVM) | Connects to shell-daemon over vsock/Unix socket |
 | `LocalProcessShellSession` | Development/Testing | Spawns host processes directly |
 
+## Browser Sidecar (Pinchtab)
+
+When `browser_enabled = true` in the user config (`[behavior]` section of `runner-user.toml`), the runner provisions a [Pinchtab](https://github.com/pinchtab/pinchtab) process alongside `shell-daemon` inside the same `shell-vm` container. Pinchtab is a headless Chrome automation server with a REST API. The agent drives the browser via `curl` commands through the existing `shell_exec` tool, guided by the Browser Automation skill injected into the system prompt (see Chapter 14).
+
+Browser provisioning is skipped entirely in `Process` tier — the browser tool requires container isolation.
+
+### Entrypoint Script
+
+The shell-vm container uses a launcher script (`docker/shell-vm-entrypoint.sh`) as its entrypoint instead of running `shell-daemon` directly:
+
+```sh
+#!/bin/sh
+if [ "${BROWSER_ENABLED}" = "true" ]; then
+    # Clean Chrome singleton locks from previous crashes
+    find "${BRIDGE_STATE_DIR:-/shared/.pinchtab}/profiles" \
+        -name "SingletonLock" -delete 2>/dev/null || true
+
+    /usr/local/bin/pinchtab &
+    PINCHTAB_PID=$!
+
+    # Wait for Pinchtab to become healthy (up to 30s)
+    HEALTH_URL="http://${BRIDGE_BIND:-127.0.0.1}:${BRIDGE_PORT:-9867}/health"
+    RETRIES=0; MAX_RETRIES=30
+    while [ $RETRIES -lt $MAX_RETRIES ]; do
+        curl -sf -o /dev/null "$HEALTH_URL" 2>/dev/null && break
+        kill -0 $PINCHTAB_PID 2>/dev/null || break  # exit early if Pinchtab crashed
+        RETRIES=$((RETRIES + 1)); sleep 1
+    done
+fi
+exec /usr/local/bin/shell-daemon "$@"
+```
+
+The script cleans up Chrome singleton lock files left by crashes in previous sessions, starts Pinchtab as a background process, waits for the `/health` endpoint to respond (up to 30 seconds), then execs `shell-daemon` — so `shell-daemon` becomes PID 1 and `shell_exec` remains fully functional even if browser fails to start.
+
+### Port Allocation
+
+Multiple users or restarts on the same host need distinct Pinchtab ports. The runner uses **probe-and-reserve** starting from `DEFAULT_PINCHTAB_PORT` (9867):
+
+1. Try binding a TCP listener to the candidate port.
+2. If in use, increment and retry (up to `PINCHTAB_PORT_RANGE` = 100 attempts).
+3. Record the assigned port; use it for `BRIDGE_PORT` and `PINCHTAB_URL`.
+
+This avoids collisions across concurrent users and restarts without any coordination service.
+
+### Auth Token
+
+The runner generates a 32-byte random hex `BRIDGE_TOKEN` at container provisioning time. It is:
+
+1. Set as `BRIDGE_TOKEN` env var in `shell-vm` — Pinchtab enforces it on every request.
+2. Set as `BRIDGE_TOKEN` env var in `oxydra-vm` — the LLM's `curl` commands reference `$BRIDGE_TOKEN`; the shell expands it at runtime. The actual token value never appears in the system prompt.
+
+Since both containers share host networking and Pinchtab binds to `127.0.0.1`, the token is defense-in-depth — only local processes can reach Pinchtab regardless.
+
+### Environment Variables
+
+The runner forwards these variables into the shell-vm container when browser is enabled:
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `BROWSER_ENABLED` | `"true"` | Tells the entrypoint to start Pinchtab |
+| `BRIDGE_PORT` | Allocated port (from 9867) | Pinchtab HTTP port |
+| `BRIDGE_BIND` | `"127.0.0.1"` | Loopback-only bind |
+| `BRIDGE_TOKEN` | Generated hex token | Auth enforcement |
+| `BRIDGE_HEADLESS` | Config-derived | Default headless mode |
+| `BRIDGE_STATE_DIR` | `"/shared/.pinchtab"` | Profile / state storage |
+| `CHROME_BINARY` | `"/usr/bin/chromium"` | Chrome executable |
+| `CHROME_FLAGS` | `"--no-sandbox"` | Required for containerized Chrome |
+
+The runner also forwards `PINCHTAB_URL` (`http://127.0.0.1:<port>`) and `BRIDGE_TOKEN` into the **oxydra-vm** environment, so the skill's `{{PINCHTAB_URL}}` template placeholder is resolved and `$BRIDGE_TOKEN` is available in the shell.
+
+### Health Check
+
+The runner polls `GET /health` on the Pinchtab port after starting the container (30s timeout, 1s polling interval). On success, `browser_available = true` is set in `StartupStatusReport`. On timeout or crash, `browser_available = false` is set and a warning is logged — the shell sidecar remains fully functional. Critically, `PINCHTAB_URL` is only added to the oxydra-vm environment when the health check succeeds; this ensures the Browser Automation skill does not activate when Pinchtab is down.
+
+### Shell Policy Overlay
+
+The browser skill's `curl`-based workflow requires commands and features that are not in the default shell allowlist. When `BROWSER_ENABLED=true`, the runner automatically extends the `ShellConfig`:
+
+```rust
+// Applied in runner/src/lib.rs before shell-vm launch:
+fn apply_browser_shell_overlay(config: &mut ShellConfig) {
+    config.allow.get_or_insert_with(Vec::new)
+        .extend(["curl", "jq", "sleep"].map(str::to_owned));
+    config.allow_operators = Some(true);  // enables &&, |, $(), etc.
+}
+```
+
+This adds `curl`, `jq`, `sleep`, and shell operators to the allowlist **without replacing** any user-specified shell config. Users who have custom shell allowlists retain full control; the overlay only adds.
+
+### Docker Image Changes
+
+Both `docker/Dockerfile` and `docker/Dockerfile.prebuilt` include:
+
+```dockerfile
+ARG PINCHTAB_VERSION=0.7.6
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl jq chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fSL "https://github.com/pinchtab/pinchtab/releases/download/v${PINCHTAB_VERSION}/pinchtab-linux-${ARCH}" \
+      -o /usr/local/bin/pinchtab && \
+    chmod +x /usr/local/bin/pinchtab
+
+COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+```
+
+`dpkg --print-architecture` resolves to `amd64` or `arm64`, so the correct Pinchtab binary is fetched for the build target. `curl` and `jq` are installed at image build time (not just allowed by the shell policy) because the entrypoint health check script itself needs `curl`.
+
 ## Platform-Specific Backends
 
 ### Container and MicroVM Launch Mechanics

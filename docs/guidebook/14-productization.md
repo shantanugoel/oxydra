@@ -1,9 +1,9 @@
 # Chapter 14: Productization
 
 > **Status:** Mixed
-> **Implemented:** Model catalog governance (models.dev-aligned, snapshot commands, caps overrides), session lifecycle controls, scheduler system
-> **Remaining:** MCP support, skill system, persona governance
-> **Last verified against code:** 2026-02-28
+> **Implemented:** Model catalog governance (models.dev-aligned, snapshot commands, caps overrides), session lifecycle controls, scheduler system, skill system (prompt-injected markdown skills, browser automation built-in)
+> **Remaining:** MCP support, persona governance
+> **Last verified against code:** 2026-03-03
 
 ## Overview
 
@@ -132,35 +132,209 @@ Each schedule gets its own `runtime_session_id` (format: `scheduled:{schedule_id
 
 ## Skill System
 
+> **Status:** Implemented (Phase A/B/C complete). See Chapter 15 Phase 20 for full scope.
+
 ### Purpose
 
-Skills extend the agent's capabilities through markdown manifests loaded from a managed per-user workspace folder. They are a governed capability boundary — the LLM can create, load, and use skills, but cannot delete them.
+Skills extend the agent's capabilities through markdown documents that are injected into the system prompt at session start. They teach the LLM domain-specific workflows using existing tools — no new Rust code or tool schemas required. The browser automation skill is the first built-in; users can author their own skills or override built-ins.
 
-### Folder Structure
+### Skill File Format
+
+Each skill lives in a folder containing a `SKILL.md` file and an optional `references/` subdirectory:
 
 ```
-<workspace_root>/<user_id>/skills/
-├── code-review.md
-├── meeting-notes.md
-└── data-analysis.md
+config/skills/BrowserAutomation/
+├── SKILL.md                    # Frontmatter + markdown body (injected into prompt)
+└── references/
+    └── pinchtab-api.md         # Lazy-loaded supplementary reference (not injected)
 ```
 
-Each skill file contains:
-- A name and description
-- System prompt additions or behavioral instructions
-- Optional tool declarations or tool usage patterns
-- Activation conditions (when this skill should be applied)
+`SKILL.md` begins with YAML frontmatter followed by markdown content:
 
-### Loading and Access
+```markdown
+---
+name: browser-automation
+description: Control a headless Chrome browser via Pinchtab's REST API
+activation: auto
+requires:
+  - shell_exec
+env:
+  - PINCHTAB_URL
+priority: 50
+---
 
-- **Discovery** — `SkillLoader` scans the managed folder at session start and on explicit reload
-- **Registry** — discovered skills are registered in a `SkillRegistry` available to the runtime
-- **API-mediated access** — the LLM interacts with skills through a dedicated skill API, not through raw filesystem traversal of the skills folder
-- **Immutability policy** — the LLM can create new skill files and read existing ones, but deletion is denied by policy enforcement in the tool layer
+## Browser Automation (Pinchtab)
 
-### Validation
+You can control a headless Chrome browser via Pinchtab at `{{PINCHTAB_URL}}`...
+```
 
-Skills can be validated in strict schema mode (structured YAML/TOML frontmatter) or permissive mode (freeform markdown). The validation mode is operator-configurable.
+**Frontmatter fields** (types in `types/src/skill.rs` — `SkillMetadata`):
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `name` | Yes | — | Unique kebab-case identifier. Used for deduplication across all discovery tiers. |
+| `description` | Yes | — | One-line summary for diagnostics and logs. |
+| `activation` | No | `auto` | `auto` — inject when all conditions met; `always` — always inject; `manual` — never auto-inject. Maps to `SkillActivation` enum. |
+| `requires` | No | `[]` | Tool names that must be **ready** (not just registered) for this skill to activate. Currently recognized: `"shell_exec"`, `"browser"`. |
+| `env` | No | `[]` | (`env_vars` in Rust) Environment variable names that must be set. Values are substituted into `{{VAR}}` placeholders in the skill body. **Only use for non-sensitive values** (URLs, feature flags) — secrets must be referenced as `$VAR` shell env vars in the skill body. |
+| `priority` | No | `100` | Ordering when multiple skills are active (lower = earlier in prompt). |
+
+Skills are capped at **3,000 estimated tokens** (`content.len() / 4`). Skills exceeding the cap are rejected at load time with a warning.
+
+### Types
+
+Defined in `types/src/skill.rs`:
+
+```rust
+pub enum SkillActivation { Auto, Manual, Always }
+
+pub struct SkillMetadata {
+    pub name: String,
+    pub description: String,
+    pub activation: SkillActivation,
+    pub requires: Vec<String>,   // tool names (env field alias: "env")
+    pub env_vars: Vec<String>,   // env var names
+    pub priority: i32,
+}
+
+pub struct Skill {
+    pub metadata: SkillMetadata,
+    pub content: String,         // Markdown body after frontmatter
+    pub source_path: PathBuf,
+}
+
+pub struct RenderedSkill {
+    pub name: String,
+    pub content: String,         // `{{VAR}}` placeholders replaced
+    pub priority: i32,
+}
+```
+
+### Discovery and Precedence
+
+The skill loader (`runner/src/skills.rs`) scans four tiers, deduplicating by `name` (highest-precedence tier wins — no merging):
+
+| Tier | Location | Priority |
+|---|---|---|
+| Embedded built-ins | Compiled into `oxydra-vm` binary via `rust-embed` | Lowest |
+| System/config | `<config_dir>/skills/` (repo `config/skills/` in the binary) | Low |
+| User | `~/.config/oxydra/skills/` | Medium |
+| Workspace | `<workspace>/.oxydra/skills/` | Highest |
+
+Both folder-based skills (`<Folder>/SKILL.md`) and bare `.md` files directly in the `skills/` directory are supported. The `name` field in the frontmatter — not the filename or folder name — determines identity for deduplication.
+
+**Embedded built-ins** are compiled into the `oxydra-vm` binary at build time via `rust-embed` (`BuiltinSkills` struct pointing at `config/skills/`). This means the browser automation skill ships inside the binary and works across all deployment modes without needing file copying at startup.
+
+### Activation Evaluation
+
+At session start, `evaluate_activation()` filters the discovered skills:
+
+- **`Always`** — always included, no conditions checked.
+- **`Manual`** — never auto-included.
+- **`Auto`** — included if:
+  1. All tools listed in `requires` are **ready** according to `ToolAvailability` (not just registered — this prevents the browser skill from activating when the shell sidecar is unavailable).
+  2. All variable names in `env_vars` are present in the environment map passed to the loader.
+
+The browser automation skill requires `shell_exec` to be ready **and** `PINCHTAB_URL` to be set. The runner only sets `PINCHTAB_URL` when Pinchtab's health check passes at startup — so if Pinchtab failed to start, the skill will not activate.
+
+### Rendering and Injection
+
+After activation evaluation:
+
+1. **Render** — `render_skill()` replaces `{{VAR}}` placeholders with values from the environment map.
+2. **Format** — `format_skills_prompt()` concatenates active skill bodies under an `## Active Skills` heading.
+3. **Inject** — The formatted string is appended to the system prompt constructed by `build_system_prompt()` in `runner/src/bootstrap.rs`.
+
+```rust
+// In build_system_prompt():
+let skills_section = load_and_render_skills(
+    &paths.config_dir,
+    user_skills_dir.as_deref(),
+    &paths.workspace_dir,
+    availability,
+    &env_map,
+);
+format!("...{shell_note}{scheduler_note}{memory_note}{skills_section}{specialists_note}")
+```
+
+Activation is evaluated once at session start. Skills are stable for the lifetime of the session.
+
+### Lazy-Loaded References
+
+For skills that need extensive reference material (full API docs, parameter tables), the skill body stays under the token cap by containing only a concise summary plus a pointer:
+
+```markdown
+For the full API reference:
+`cat /shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md`
+```
+
+The reference file is extracted from the embedded binary to the shared workspace at startup by `extract_builtin_references()`. The LLM reads it on demand via `shell_exec` or `file_read` — only when needed, keeping the system prompt lean.
+
+```rust
+// In oxydra-vm startup:
+skills::extract_builtin_references(&shared_dir);
+// Writes: /shared/.oxydra/skills/BrowserAutomation/references/pinchtab-api.md
+```
+
+### Token Budget Guidance
+
+| Section | Approx. tokens |
+|---|---|
+| Base prompt (identity, filesystem) | ~300 |
+| Memory section (when enabled) | ~800 |
+| Scheduler section (when enabled) | ~150 |
+| Browser Automation skill | ~1,036 |
+
+Skill content benefits from **prompt caching** on providers that support it (Anthropic, OpenAI). Stable system prompt prefixes are processed once and served from cache on subsequent turns, keeping the per-turn cost low.
+
+### Browser Automation Skill
+
+The built-in `browser-automation` skill (`config/skills/BrowserAutomation/SKILL.md`) is the first production skill. It teaches the agent to drive headless Chrome through Pinchtab's REST API using `curl` commands in the sandboxed shell.
+
+**Why skill-based instead of a dedicated tool:**
+
+| Concern | Dedicated tool | Skill (shell + curl) |
+|---|---|---|
+| API drift | Every Pinchtab change needs Rust code + tests | Update the markdown file |
+| Provider schema | JSON schema quirks per provider | No schema — uses existing `shell_exec` |
+| Maintenance | ~2,000 lines of Rust | ~200 lines of markdown |
+| Flexibility | New capabilities need new Rust variants | LLM uses any endpoint immediately |
+
+**Core workflow the skill teaches:**
+
+1. `POST /navigate` → creates a tab, returns `tabId`
+2. `GET /tabs/{id}/snapshot?filter=interactive&maxTokens=2000` → accessibility tree with clickable refs
+3. `POST /tabs/{id}/action` with `{"kind":"click","ref":"e5"}` etc.
+4. Re-snapshot with `diff=true` for ~90% token savings
+5. Repeat until done; use `send_media` to deliver screenshots/PDFs
+
+**File integration** is explicitly documented in the skill body: screenshots saved to `/shared/`, PDFs, downloads, uploads — all via Pinchtab endpoints, with `send_media` to deliver files to the user.
+
+**If blocked** by CAPTCHAs, 2FA, or login walls, the skill instructs the agent to call `request_human_assistance`.
+
+See `config/skills/BrowserAutomation/SKILL.md` for the full injected content and `config/skills/BrowserAutomation/references/pinchtab-api.md` for the lazy-loaded full API reference.
+
+### Logging
+
+Skill discovery and activation log at `info` level:
+
+```
+skill discovery complete  discovered=2 names="always-active, browser-automation"
+skills activated          active_count=1 names="browser-automation"
+# Or, when conditions are not met:
+skill not activated: required tool(s) not ready  skill=browser-automation missing_tools=shell_exec
+skill not activated: required env var(s) not set  skill=browser-automation missing_env=PINCHTAB_URL
+```
+
+### Overriding and Disabling Built-ins
+
+Users place a skill with the same `name` value at a higher-precedence location to override a built-in. To disable a built-in, set `activation: manual` in the override — `manual` skills are never auto-injected. See the [README Customizing section](../../README.md#skills-custom-workflows-and-overrides) for path details.
+
+### Implementation Sequence (Phases A–C)
+
+1. **Phase A** — `Skill`/`SkillMetadata`/`RenderedSkill` types; `runner/src/skills.rs` loader (discover, evaluate, render, format); `build_system_prompt()` integration; 36 unit tests.
+2. **Phase B** — Pinchtab infrastructure in shell-vm: port allocation, `BRIDGE_TOKEN` generation, env forwarding, health check polling, shell policy overlay, embedded reference extraction.
+3. **Phase C** — `config/skills/BrowserAutomation/SKILL.md` written; `rust-embed` embedded built-ins so the skill ships inside the binary; additional integration tests validating end-to-end activation and prompt injection.
 
 ## Persona Governance
 
@@ -253,9 +427,9 @@ These productization features are implemented in dependency order:
 
 1. **Model catalog governance** (Phase 13) — ✅ Complete: typed schema, snapshot generation, startup validation, provider registry, capability overrides
 2. **MCP support** (Phase 17) — adapter implementation, discovery, safety integration
-3. **Session lifecycle** (Phase 18) — explicit new-session command, deterministic identity
+3. **Session lifecycle** (Phase 18) — ✅ Complete: explicit new-session command, deterministic identity
 4. **Scheduler** (Phase 19) — ✅ Complete: durable store, polling executor, four LLM tools, conditional notification, cron/interval/once cadences, auto-disable on failures
-5. **Skill system** (Phase 20) — loader, registry, API-mediated access, deletion prevention
+5. **Skill system** (Phase 20) — ✅ Complete: markdown-based skills, embedded built-ins, browser automation skill, three-tier discovery with workspace override, activation evaluation against tool readiness and env vars, prompt injection
 6. **Persona governance** (Phase 21) — SOUL.md/SYSTEM.md loading, immutability enforcement
 
 Each phase has an explicit verification gate enforced by automated tests before closure.

@@ -175,6 +175,7 @@ fn bootstrap_envelope_supports_length_prefixed_round_trip() {
             degraded_reasons: Vec::new(),
         }),
         channels: None,
+        browser_config: None,
     };
 
     let encoded = envelope
@@ -195,6 +196,7 @@ fn bootstrap_envelope_rejects_invalid_length_prefix() {
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
 
     let mut encoded = envelope
@@ -233,6 +235,7 @@ fn bootstrap_envelope_rejects_invalid_runtime_policy_mounts() {
         }),
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
 
     let error = envelope
@@ -316,6 +319,7 @@ fn bootstrap_envelope_rejects_inconsistent_startup_status() {
             degraded_reasons: Vec::new(),
         }),
         channels: None,
+        browser_config: None,
     };
 
     let error = envelope
@@ -490,6 +494,7 @@ fn bootstrap_envelope_with_channels_round_trips() {
                 max_message_length: 4096,
             }),
         }),
+        browser_config: None,
     };
 
     let encoded = envelope
@@ -514,6 +519,7 @@ fn bootstrap_envelope_without_channels_round_trips() {
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
 
     let encoded = envelope

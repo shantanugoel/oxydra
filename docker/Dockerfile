@@ -31,6 +31,22 @@ ENTRYPOINT ["/usr/local/bin/oxydra-vm"]
 # --- shell-vm (shell-daemon sidecar) image ---
 FROM debian:trixie-slim AS shell-vm
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium && rm -rf /var/lib/apt/lists/*
+ARG PINCHTAB_VERSION=0.7.6
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    jq \
+    chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Pinchtab binary for the target architecture.
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fSL "https://github.com/pinchtab/pinchtab/releases/download/v${PINCHTAB_VERSION}/pinchtab-linux-${ARCH}" \
+      -o /usr/local/bin/pinchtab && \
+    chmod +x /usr/local/bin/pinchtab
+
 COPY --from=builder /build/target/*/release/shell-daemon /usr/local/bin/shell-daemon
-ENTRYPOINT ["/usr/local/bin/shell-daemon"]
+COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

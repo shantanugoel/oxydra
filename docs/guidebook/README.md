@@ -26,7 +26,7 @@ Internal engineering documentation for the Oxydra AI agent orchestrator. This gu
 | 11 | [Multi-Agent Orchestration](11-multi-agent-orchestration.md) | In progress: subagent delegation and routing foundations are implemented; advanced orchestration graphs/session trees remain |
 | 12 | [External Channels and Identity](12-external-channels-and-identity.md) | Implemented: external channel adapters, sender authentication, and durable session identity mapping |
 | 13 | [Observability](13-observability.md) | OpenTelemetry traces, metrics, cost reporting, conversation replay |
-| 14 | [Productization](14-productization.md) | Mixed: model catalog governance, session lifecycle, and scheduler are implemented; MCP/skills/persona remain planned |
+| 14 | [Productization](14-productization.md) | Mixed: model catalog governance, session lifecycle, scheduler, and **skill system (including browser automation)** are implemented; MCP/persona remain planned |
 
 ### Reference
 

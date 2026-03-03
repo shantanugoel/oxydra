@@ -925,6 +925,7 @@ async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap), None, None).await;
     assert!(bootstrap_tools.availability.shell.is_ready());
@@ -986,6 +987,7 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap), None, None).await;
     assert!(!bootstrap_tools.availability.shell.is_ready());
@@ -1054,6 +1056,7 @@ async fn run_session_injects_security_policy_denial_for_out_of_workspace_file_ac
         runtime_policy: None,
         startup_status: None,
         channels: None,
+        browser_config: None,
     };
     let bootstrap_tools = bootstrap_runtime_tools(Some(&bootstrap), None, None).await;
     let runtime = AgentRuntime::new(

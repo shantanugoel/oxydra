@@ -613,12 +613,31 @@ pub async fn bootstrap_vm_runtime_with_paths(
 
     let startup_status = availability.startup_status(bootstrap.as_ref());
     let path_scrub_mappings = build_path_scrub_mappings(bootstrap.as_ref());
+
+    // Extract embedded reference files to the shared directory so the LLM
+    // can `cat` them from the shell (e.g. full Pinchtab API docs).
+    let shared_dir = resolve_shared_dir(bootstrap.as_ref());
+    crate::skills::extract_builtin_references(&shared_dir);
+
+    // Load, evaluate, and render active skills for system prompt injection.
+    let skills_note = {
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        crate::skills::load_and_render_skills(
+            &paths.system_dir,
+            paths.user_dir.as_deref(),
+            &paths.workspace_dir,
+            &availability,
+            &env,
+        )
+    };
+
     let system_prompt = build_system_prompt(
         paths,
         bootstrap.as_ref(),
         scheduler_store.is_some(),
         memory.is_some(),
         &config.agents,
+        &skills_note,
     );
 
     // Build session store for gateway session persistence.
@@ -745,6 +764,23 @@ const SHARED_PATH_NAME: &str = "shared";
 const TMP_PATH_NAME: &str = "tmp";
 const VAULT_PATH_NAME: &str = "vault";
 
+/// Resolves the shared directory from the bootstrap envelope or defaults to
+/// `<cwd>/shared/`. Used for extracting embedded skill reference files.
+fn resolve_shared_dir(bootstrap: Option<&RunnerBootstrapEnvelope>) -> PathBuf {
+    match bootstrap {
+        Some(b) => {
+            if let Some(policy) = b.runtime_policy.as_ref() {
+                PathBuf::from(&policy.mounts.shared)
+            } else {
+                PathBuf::from(&b.workspace_root).join(SHARED_PATH_NAME)
+            }
+        }
+        None => env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(SHARED_PATH_NAME),
+    }
+}
+
 /// Constructs host-path → virtual-path scrub mappings from the bootstrap
 /// envelope so that tool output and error messages never leak host filesystem
 /// details to the LLM.
@@ -824,6 +860,7 @@ fn build_system_prompt(
     scheduler_enabled: bool,
     memory_enabled: bool,
     agents: &BTreeMap<String, AgentDefinition>,
+    skills_note: &str,
 ) -> Option<String> {
     let sandbox_tier = bootstrap.map_or(types::SandboxTier::Process, |b| b.sandbox_tier);
     let shell_note = if sandbox_tier == types::SandboxTier::Process {
@@ -979,7 +1016,7 @@ fn build_system_prompt(
          When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
          always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
          For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`. \
-         If the current user turn includes attachments, use `attachment_save(index, path)` to persist them into `/shared` or `/tmp` before further processing.{shell_note}{scheduler_note}{memory_note}{specialists_note}"
+         If the current user turn includes attachments, use `attachment_save(index, path)` to persist them into `/shared` or `/tmp` before further processing.{shell_note}{scheduler_note}{memory_note}{skills_note}{specialists_note}"
     );
 
     // Look for a SYSTEM.md override/append file in the config search paths.
@@ -1382,7 +1419,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_includes_memory_guidance_when_memory_is_enabled() {
         let root = temp_dir("system-prompt-memory-enabled");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("corrected procedures"));
@@ -1408,7 +1445,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_omits_memory_guidance_when_memory_is_disabled() {
         let root = temp_dir("system-prompt-memory-disabled");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(!prompt.contains("## Memory"));
         assert!(!prompt.contains("corrected procedures"));
@@ -1426,7 +1463,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_operational_loop_contains_all_phases() {
         let root = temp_dir("system-prompt-operational-loop");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         // All five operational loop phases must be present
         assert!(prompt.contains("**Plan**"));
@@ -1441,7 +1478,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_retry_protocol_mentions_distinct_attempts_and_escalation() {
         let root = temp_dir("system-prompt-retry-protocol");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("Do NOT repeat the exact same failed action"),
@@ -1462,7 +1499,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_user_ask_boundary_is_restrictive() {
         let root = temp_dir("system-prompt-ask-boundary");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("Only ask the user when"),
@@ -1494,7 +1531,7 @@ remote_url = "libsql://example-org.turso.io"
                 max_cost: None,
             },
         );
-        let prompt = build_system_prompt(&paths, None, false, false, &agents)
+        let prompt = build_system_prompt(&paths, None, false, false, &agents, "")
             .expect("system prompt should be generated");
         assert!(prompt.contains("## Specialist Agents"));
         assert!(prompt.contains("delegate_to_agent"));
@@ -1507,7 +1544,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_contains_agent_identity_framing() {
         let root = temp_dir("system-prompt-agent-identity");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("autonomous AI agent"),
@@ -1528,7 +1565,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_contains_pre_action_requirement() {
         let root = temp_dir("system-prompt-pre-action");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("### Pre-Action Requirement"),
@@ -1549,7 +1586,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_contains_anti_patterns() {
         let root = temp_dir("system-prompt-anti-patterns");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("### Anti-Patterns"),
@@ -1574,7 +1611,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_contains_example_turn() {
         let root = temp_dir("system-prompt-example-turn");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("### Example Turn"),
@@ -1599,7 +1636,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_contains_memory_save_triggers() {
         let root = temp_dir("system-prompt-memory-triggers");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("### When to Save to Memory"),
@@ -1624,7 +1661,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_scratchpad_has_usage_threshold() {
         let root = temp_dir("system-prompt-scratchpad-threshold");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("more than 2 tool calls"),
@@ -1641,7 +1678,7 @@ remote_url = "libsql://example-org.turso.io"
     fn build_system_prompt_closing_reminder_at_end() {
         let root = temp_dir("system-prompt-closing-reminder");
         let paths = test_paths(&root);
-        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new())
+        let prompt = build_system_prompt(&paths, None, false, true, &BTreeMap::new(), "")
             .expect("system prompt should be generated");
         assert!(
             prompt.contains("CRITICAL REMINDER"),
@@ -1657,6 +1694,38 @@ remote_url = "libsql://example-org.turso.io"
         assert!(
             reminder_pos > memory_section_pos,
             "closing reminder should appear after the memory section"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_includes_skills_note_when_provided() {
+        let root = temp_dir("system-prompt-with-skills");
+        let paths = test_paths(&root);
+        let skills_note =
+            "\n\n## Active Skills\n\n## Browser Automation\n\nUse curl to control Chrome.";
+        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new(), skills_note)
+            .expect("system prompt should be generated");
+        assert!(
+            prompt.contains("## Active Skills"),
+            "prompt should contain the active skills header"
+        );
+        assert!(
+            prompt.contains("Browser Automation"),
+            "prompt should contain skill content"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_omits_skills_section_when_empty() {
+        let root = temp_dir("system-prompt-no-skills");
+        let paths = test_paths(&root);
+        let prompt = build_system_prompt(&paths, None, false, false, &BTreeMap::new(), "")
+            .expect("system prompt should be generated");
+        assert!(
+            !prompt.contains("## Active Skills"),
+            "prompt should not contain active skills section when no skills are provided"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -1678,6 +1747,7 @@ remote_url = "libsql://example-org.turso.io"
             runtime_policy: None,
             startup_status: None,
             channels: None,
+            browser_config: None,
         }
         .to_length_prefixed_json()
         .expect("process-tier bootstrap frame should encode");
@@ -1737,6 +1807,7 @@ remote_url = "libsql://example-org.turso.io"
             runtime_policy: None,
             startup_status: None,
             channels: None,
+            browser_config: None,
         }
         .to_length_prefixed_json()
         .expect("sidecar bootstrap frame should encode");

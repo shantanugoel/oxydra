@@ -17,6 +17,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 figment = { version = "0.10", features = ["env", "toml"] }
 futures-util = "0.3"
 gateway = { path = "../gateway" }
+gray_matter = { version = "0.3", features = ["yaml"] }
 hyper = { version = "1.8", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 hyperlocal = "0.9"

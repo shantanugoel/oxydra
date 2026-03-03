@@ -468,6 +468,7 @@ mod tests {
             runtime_policy: None,
             startup_status: None,
             channels: None,
+            browser_config: None,
         };
         let json_bytes = serde_json::to_vec(&bootstrap).expect("should serialize");
         let file_path = root.join("bootstrap.json");
@@ -528,6 +529,7 @@ mod tests {
             runtime_policy: None,
             startup_status: None,
             channels: None,
+            browser_config: None,
         }
         .to_length_prefixed_json()
         .expect("bootstrap envelope should encode");

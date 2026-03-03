@@ -950,6 +950,135 @@ mod tests {
         assert!(glob_matches("npm", "npm"));
     }
 
+    /// Verifies that the browser shell overlay (curl, jq, sleep + operators)
+    /// produces a policy that allows the exact commands the browser skill
+    /// needs: curl with piped jq, sleep for page load waits, and shell
+    /// variable capture with `$()`.
+    #[test]
+    fn browser_shell_overlay_allows_browser_skill_commands() {
+        let workspace = unique_temp_workspace("browser-overlay-policy");
+        let config = ShellConfig {
+            allow: Some(vec!["curl".to_owned(), "jq".to_owned(), "sleep".to_owned()]),
+            deny: None,
+            replace_defaults: None,
+            allow_operators: Some(true),
+            env_keys: None,
+        };
+        let policy = WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace)
+            .with_shell_config(Some(&config));
+
+        // Simple curl command (navigate).
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "curl -s -X POST http://127.0.0.1:9867/navigate -H 'Authorization: Bearer token' -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'"}),
+        );
+        assert!(result.is_ok(), "curl command should be allowed: {result:?}");
+
+        // curl piped to jq (tab ID extraction).
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "curl -s -X POST http://127.0.0.1:9867/navigate -H 'Authorization: Bearer token' -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}' | jq -r '.tabId'"}),
+        );
+        assert!(
+            result.is_ok(),
+            "curl piped to jq should be allowed: {result:?}"
+        );
+
+        // sleep for page load wait.
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "sleep 3"}),
+        );
+        assert!(
+            result.is_ok(),
+            "sleep command should be allowed: {result:?}"
+        );
+
+        // jq standalone.
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "jq -r '.tabId' /shared/response.json"}),
+        );
+        assert!(result.is_ok(), "jq command should be allowed: {result:?}");
+
+        // curl with -o flag for screenshot.
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "curl -s http://127.0.0.1:9867/tabs/tab1/screenshot -H 'Authorization: Bearer token' -o /shared/screenshot.png"}),
+        );
+        assert!(
+            result.is_ok(),
+            "curl with -o for screenshot should be allowed: {result:?}"
+        );
+
+        // Chained commands with && (navigate then snapshot).
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "curl -s http://127.0.0.1:9867/navigate && curl -s http://127.0.0.1:9867/snapshot"}),
+        );
+        assert!(result.is_ok(), "&& chaining should be allowed: {result:?}");
+
+        // Verify commands NOT in the overlay are still blocked.
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "wget http://example.com"}),
+        );
+        assert!(
+            result.is_err(),
+            "wget should NOT be allowed (not in overlay)"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    /// Without the browser overlay, curl/jq/sleep and operators should be
+    /// rejected by the default shell policy.
+    #[test]
+    fn default_policy_rejects_browser_commands() {
+        let workspace = unique_temp_workspace("no-browser-overlay");
+        let policy =
+            WorkspaceSecurityPolicy::for_bootstrap_workspace(&workspace).with_shell_config(None);
+
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "curl http://127.0.0.1:9867/navigate"}),
+        );
+        assert!(
+            result.is_err(),
+            "curl should be blocked without browser overlay"
+        );
+
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "jq '.tabId'"}),
+        );
+        assert!(
+            result.is_err(),
+            "jq should be blocked without browser overlay"
+        );
+
+        let result = policy.enforce(
+            "shell_exec",
+            SafetyTier::SideEffecting,
+            &json!({"command": "sleep 3"}),
+        );
+        assert!(
+            result.is_err(),
+            "sleep should be blocked without browser overlay"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
     fn unique_temp_workspace(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -9,6 +9,7 @@ mod provider;
 mod runner;
 mod scheduler;
 mod session;
+mod skill;
 mod tool;
 mod tracing;
 
@@ -55,23 +56,25 @@ pub use model::{
 pub use proactive::ProactiveSender;
 pub use provider::{Provider, ProviderStream};
 pub use runner::{
-    BootstrapEnvelopeError, ChannelsConfig, DEFAULT_RUNNER_CONFIG_VERSION, ExecCommand,
-    ExecCommandAck, KillSession, KillSessionAck, LOG_TAIL_DEFAULT, LOG_TAIL_MAX, LogFormat,
-    LogRole, LogSource, LogStream, RunnerBehaviorOverrides, RunnerBootstrapEnvelope,
-    RunnerConfigError, RunnerControl, RunnerControlError, RunnerControlErrorCode,
-    RunnerControlHealthStatus, RunnerControlLogsRequest, RunnerControlLogsResponse,
-    RunnerControlResponse, RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages,
-    RunnerLogEntry, RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits,
-    RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration,
-    SUPPORTED_RUNNER_CONFIG_MAJOR_VERSION, SandboxTier, SenderBinding, ShellDaemonError,
-    ShellDaemonRequest, ShellDaemonResponse, ShellOutputStream, SidecarEndpoint, SidecarTransport,
-    SpawnSession, SpawnSessionAck, StartupDegradedReason, StartupDegradedReasonCode,
-    StartupStatusReport, StreamOutput, StreamOutputChunk, TelegramChannelConfig, WebAuthMode,
+    BootstrapEnvelopeError, BrowserToolConfig, ChannelsConfig, DEFAULT_PINCHTAB_PORT,
+    DEFAULT_RUNNER_CONFIG_VERSION, ExecCommand, ExecCommandAck, KillSession, KillSessionAck,
+    LOG_TAIL_DEFAULT, LOG_TAIL_MAX, LogFormat, LogRole, LogSource, LogStream, PINCHTAB_PORT_RANGE,
+    RunnerBehaviorOverrides, RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl,
+    RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus,
+    RunnerControlLogsRequest, RunnerControlLogsResponse, RunnerControlResponse,
+    RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages, RunnerLogEntry,
+    RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
+    RunnerUserConfig, RunnerUserRegistration, SUPPORTED_RUNNER_CONFIG_MAJOR_VERSION, SandboxTier,
+    SenderBinding, ShellDaemonError, ShellDaemonRequest, ShellDaemonResponse, ShellOutputStream,
+    SidecarEndpoint, SidecarTransport, SpawnSession, SpawnSessionAck, StartupDegradedReason,
+    StartupDegradedReasonCode, StartupStatusReport, StreamOutput, StreamOutputChunk,
+    TelegramChannelConfig, WebAuthMode,
 };
 pub use scheduler::{
     NotificationPolicy, ScheduleCadence, ScheduleDefinition, SchedulePatch, ScheduleRunRecord,
     ScheduleRunStatus, ScheduleSearchFilters, ScheduleSearchResult, ScheduleStatus,
 };
 pub use session::{SessionRecord, SessionStore};
+pub use skill::{RenderedSkill, Skill, SkillActivation, SkillMetadata};
 pub use tool::{FunctionDecl, SafetyTier, Tool, ToolExecutionContext, ToolParameterSchema};
 pub use tracing::init_tracing;

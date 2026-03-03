@@ -35,20 +35,22 @@ use tokio_tungstenite::{
 use tools::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use tracing::{info, warn};
 use types::{
-    BootstrapEnvelopeError, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame, GatewayClientHello,
-    GatewayHealthCheck, GatewayServerFrame, LogRole, LogSource, LogStream, RunnerBootstrapEnvelope,
-    RunnerConfigError, RunnerControl, RunnerControlError, RunnerControlErrorCode,
-    RunnerControlHealthStatus, RunnerControlLogsRequest, RunnerControlLogsResponse,
-    RunnerControlResponse, RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages,
-    RunnerLogEntry, RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits,
-    RunnerRuntimePolicy, RunnerUserConfig, RunnerUserRegistration, SandboxTier, SidecarEndpoint,
-    SidecarTransport, StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport,
+    BootstrapEnvelopeError, BrowserToolConfig, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame,
+    GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, LogRole, LogSource, LogStream,
+    RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl, RunnerControlError,
+    RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlLogsRequest,
+    RunnerControlLogsResponse, RunnerControlResponse, RunnerControlShutdownStatus,
+    RunnerGlobalConfig, RunnerGuestImages, RunnerLogEntry, RunnerMountPaths,
+    RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig,
+    RunnerUserRegistration, SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReason,
+    StartupDegradedReasonCode, StartupStatusReport,
 };
 
 mod backend;
 pub mod bootstrap;
 pub mod catalog;
 mod config_migration;
+pub mod skills;
 pub mod web;
 
 pub use bootstrap::{
@@ -76,6 +78,11 @@ const FIRECRACKER_BINARY: &str = "firecracker";
 const PROCESS_EXECUTABLE_ENV_KEY: &str = "OXYDRA_VM_PROCESS_EXECUTABLE";
 const DEFAULT_PROCESS_EXECUTABLE: &str = "oxydra-vm";
 const DEFAULT_DOCKER_TIMEOUT_SECS: u64 = 120;
+
+// ── Browser (Pinchtab) constants ────────────────────────────────────────────
+
+/// Length of the randomly generated hex bridge token.
+const BRIDGE_TOKEN_HEX_BYTES: usize = 32;
 
 const DOCKER_SANDBOXD_SOCKET_RELATIVE_PATH: &str = ".docker/sandboxes/sandboxd.sock";
 const DOCKER_SANDBOX_VM_ENDPOINT: &str = "/vm";
@@ -179,15 +186,7 @@ impl Runner {
             } else {
                 Some(user_config.channels.clone())
             },
-        };
-        bootstrap.validate()?;
-
-        // For non-Process tiers, write the bootstrap to a file that the guest
-        // can read (mounted into the container or injected into boot_args).
-        let bootstrap_file = if sandbox_tier != SandboxTier::Process {
-            Some(write_bootstrap_file(&workspace, &bootstrap)?)
-        } else {
-            None
+            browser_config: None, // populated below if browser is enabled
         };
 
         // Copy host agent config into the workspace internal directory so the
@@ -222,6 +221,96 @@ impl Runner {
                 }
             }
         }
+
+        // ── Browser (Pinchtab) provisioning ─────────────────────────────
+        // When browser capability is requested, allocate a port, generate a
+        // token, inject env vars into both containers, apply the shell policy
+        // overlay, and copy skill reference files.
+        let mut bootstrap = bootstrap;
+        if capabilities.browser && sandbox_tier != SandboxTier::Process {
+            match find_available_port() {
+                Some(port) => {
+                    let bridge_token = generate_bridge_token();
+                    let (browser_shell_env, pinchtab_url) = build_browser_env(port, &bridge_token);
+
+                    // Shell-vm env: Pinchtab process config + auth token.
+                    shell_env.extend(browser_shell_env);
+
+                    // Oxydra-vm env: PINCHTAB_URL and BRIDGE_TOKEN so the
+                    // skill system can template them and the LLM's curl
+                    // commands can reference $BRIDGE_TOKEN.
+                    extra_env.push(format!("PINCHTAB_URL={pinchtab_url}"));
+                    extra_env.push(format!("BRIDGE_TOKEN={bridge_token}"));
+
+                    // Set browser_config on the bootstrap envelope.
+                    bootstrap.browser_config = Some(BrowserToolConfig {
+                        pinchtab_base_url: pinchtab_url,
+                        bridge_token: Some(bridge_token),
+                    });
+
+                    // Apply shell policy overlay: add curl, jq, sleep and
+                    // enable operators for the browser skill's curl workflow.
+                    let host_paths = bootstrap::ConfigSearchPaths::discover().ok();
+                    let agent_config = host_paths.as_ref().and_then(|paths| {
+                        bootstrap::load_agent_config_with_paths(
+                            paths,
+                            None,
+                            bootstrap::CliOverrides::default(),
+                        )
+                        .ok()
+                    });
+                    let mut shell_config =
+                        agent_config.and_then(|c| c.tools.shell).unwrap_or_default();
+                    apply_browser_shell_overlay(&mut shell_config);
+                    // Serialize the overlay into the workspace config so the
+                    // guest runtime picks it up. We write it as a separate
+                    // section in the already-materialized agent config.
+                    let overlay_toml = format!(
+                        "\n[tools.shell]\n{}",
+                        toml::to_string_pretty(&shell_config).unwrap_or_default()
+                    );
+                    let agent_config_path =
+                        workspace.internal.join(bootstrap::AGENT_CONFIG_FILE_NAME);
+                    if agent_config_path.is_file()
+                        && let Ok(mut contents) = fs::read_to_string(&agent_config_path)
+                    {
+                        // Remove existing [tools.shell] section if present
+                        // to avoid duplicate keys.
+                        if let Some(idx) = contents.find("\n[tools.shell]") {
+                            // Find the next section header or EOF.
+                            let rest = &contents[idx + 1..];
+                            let end = rest
+                                .find("\n[")
+                                .map(|i| idx + 1 + i)
+                                .unwrap_or(contents.len());
+                            contents.replace_range(idx..end, "");
+                        }
+                        contents.push_str(&overlay_toml);
+                        let _ = fs::write(&agent_config_path, contents);
+                    }
+
+                    info!(port = port, "browser (Pinchtab) provisioned for shell-vm");
+                }
+                None => {
+                    warn!(
+                        "no available port for Pinchtab in range {}..{}; browser will be unavailable",
+                        types::DEFAULT_PINCHTAB_PORT,
+                        types::DEFAULT_PINCHTAB_PORT + types::PINCHTAB_PORT_RANGE
+                    );
+                }
+            }
+        }
+
+        // Re-validate bootstrap after browser_config was set.
+        bootstrap.validate()?;
+
+        // For non-Process tiers, write the bootstrap to disk (must happen
+        // after browser_config is populated).
+        let bootstrap_file = if sandbox_tier != SandboxTier::Process {
+            Some(write_bootstrap_file(&workspace, &bootstrap)?)
+        } else {
+            None
+        };
 
         // Remove any stale gateway endpoint marker left by a previous run
         // so that the CLI (or any external poller) does not pick up the old
@@ -2795,6 +2884,90 @@ fn collect_channel_bot_token_env_vars(
     result
 }
 
+// ── Browser (Pinchtab) infrastructure ───────────────────────────────────────
+
+/// Find an available TCP port using a probe-and-reserve strategy.
+/// Starts from `types::DEFAULT_PINCHTAB_PORT` and tries up to
+/// `types::PINCHTAB_PORT_RANGE` consecutive ports.
+fn find_available_port() -> Option<u16> {
+    let start = types::DEFAULT_PINCHTAB_PORT;
+    let range = types::PINCHTAB_PORT_RANGE;
+    for offset in 0..range {
+        let port = start + offset;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Some(port);
+        }
+    }
+    None
+}
+
+/// Generate a random hex token for Pinchtab bridge authentication.
+fn generate_bridge_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Use a simple approach: hash of PID + timestamp + random stack address.
+    // This is defense-in-depth (Pinchtab already binds to loopback), so
+    // cryptographic strength is not required.
+    let pid = std::process::id();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let stack_addr = &pid as *const u32 as usize;
+    let seed = format!("{pid}-{timestamp}-{stack_addr}");
+
+    // Simple deterministic hash spread across the hex token.
+    let mut hash: u128 = 0;
+    for (i, byte) in seed.bytes().enumerate() {
+        hash = hash.wrapping_mul(31).wrapping_add(u128::from(byte));
+        hash ^= hash >> (7 + (i % 5));
+    }
+    // Second pass for better mixing.
+    let mut hash2: u128 = hash;
+    for byte in seed.bytes().rev() {
+        hash2 = hash2.wrapping_mul(37).wrapping_add(u128::from(byte));
+        hash2 ^= hash2 >> 11;
+    }
+
+    format!("{hash:032x}{hash2:032x}")[..BRIDGE_TOKEN_HEX_BYTES * 2].to_owned()
+}
+
+/// Builds environment variables for the shell-vm container when browser is
+/// enabled. Returns `(shell_vm_env_vars, pinchtab_url, bridge_token)`.
+fn build_browser_env(port: u16, bridge_token: &str) -> (Vec<String>, String) {
+    let pinchtab_url = format!("http://127.0.0.1:{port}");
+    let env_vars = vec![
+        "BROWSER_ENABLED=true".to_owned(),
+        format!("BRIDGE_PORT={port}"),
+        "BRIDGE_BIND=127.0.0.1".to_owned(),
+        format!("BRIDGE_TOKEN={bridge_token}"),
+        "BRIDGE_HEADLESS=true".to_owned(),
+        "BRIDGE_STEALTH=light".to_owned(),
+        format!("BRIDGE_STATE_DIR=/shared/.pinchtab"),
+        "CHROME_BINARY=/usr/bin/chromium".to_owned(),
+        "CHROME_FLAGS=--no-sandbox".to_owned(),
+    ];
+    (env_vars, pinchtab_url)
+}
+
+/// Applies the shell policy overlay for browser automation. When browser is
+/// enabled, adds `curl`, `jq`, `sleep` to the allow list and enables
+/// `allow_operators` so the LLM can chain commands and capture tab IDs.
+fn apply_browser_shell_overlay(shell_config: &mut types::ShellConfig) {
+    let browser_commands = ["curl", "jq", "sleep"];
+    let allow = shell_config.allow.get_or_insert_with(Vec::new);
+    for cmd in &browser_commands {
+        let cmd_str = (*cmd).to_owned();
+        if !allow.contains(&cmd_str) {
+            allow.push(cmd_str);
+        }
+    }
+    if shell_config.allow_operators != Some(true) {
+        shell_config.allow_operators = Some(true);
+    }
+}
+
+/// Copies built-in skill folders (including reference files) from the system
+/// config directory to the workspace's `/shared/.oxydra/skills/` directory so
 fn ensure_firecracker_api_ready(api_socket_path: PathBuf) -> Result<(), RunnerError> {
     run_async(async move {
         let started = Instant::now();

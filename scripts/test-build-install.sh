@@ -172,21 +172,19 @@ run_remote_installer() {
   return "$status"
 }
 
-write_runner_wrapper_script() {
+write_runner_generic_wrapper_script() {
   local destination="$1"
   local runner_bin="$2"
   local runner_config="$3"
   local env_file="$4"
-  shift 4
-
-  local exec_cmd
-  exec_cmd="$(quote_args "$runner_bin" --config "$runner_config" "$@")"
 
   cat >"$destination" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
 ENV_FILE=$(printf '%q' "$env_file")
+RUNNER_BIN=$(printf '%q' "$runner_bin")
+RUNNER_CONFIG=$(printf '%q' "$runner_config")
 
 if [[ -f "\$ENV_FILE" ]]; then
   while IFS= read -r line || [[ -n "\$line" ]]; do
@@ -194,9 +192,10 @@ if [[ -f "\$ENV_FILE" ]]; then
     [[ -z "\$line" || "\${line:0:1}" == "#" ]] && continue
     export "\$line"
   done < "\$ENV_FILE"
+  exec "\$RUNNER_BIN" --config "\$RUNNER_CONFIG" --env-file "\$ENV_FILE" "\$@"
 fi
 
-exec ${exec_cmd}
+exec "\$RUNNER_BIN" --config "\$RUNNER_CONFIG" "\$@"
 EOF
   chmod 0755 "$destination"
 }
@@ -363,8 +362,7 @@ for target in "${TARGETS[@]}"; do
     fresh_backup="${fresh_base}/backups"
     fresh_runner_config="${fresh_workspace}/.oxydra/runner.toml"
     fresh_runner_env="${fresh_base}/runner.env"
-    start_wrapper="${fresh_base}/start-runner.sh"
-    web_wrapper="${fresh_base}/open-web.sh"
+    runner_wrapper="${fresh_base}/runner-with-env.sh"
 
     install_args+=(--install-dir "$fresh_bin" --base-dir "$fresh_workspace" --backup-dir "$fresh_backup")
   else
@@ -386,40 +384,39 @@ for target in "${TARGETS[@]}"; do
     continue
   fi
 
-  if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
-    tmp_env_file="$(mktemp)"
-    tmp_start_wrapper="$(mktemp)"
-    tmp_web_wrapper="$(mktemp)"
-    write_env_overrides_file "$tmp_env_file"
-    write_runner_wrapper_script "$tmp_start_wrapper" "$fresh_bin/runner" "$fresh_runner_config" "$fresh_runner_env" --env-file "$fresh_runner_env" --user alice start
-    write_runner_wrapper_script "$tmp_web_wrapper" "$fresh_bin/runner" "$fresh_runner_config" "$fresh_runner_env" web --bind "$WEB_BIND"
+  tmp_runner_wrapper="$(mktemp)"
+  write_runner_generic_wrapper_script "$tmp_runner_wrapper" "$fresh_bin/runner" "$fresh_runner_config" "$fresh_runner_env"
 
-    if [[ "$target_kind" == "local" ]]; then
-      mkdir -p "$fresh_base"
+  if [[ "$target_kind" == "local" ]]; then
+    mkdir -p "$fresh_base"
+    cp "$tmp_runner_wrapper" "$runner_wrapper"
+    chmod 0755 "$runner_wrapper"
+    if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
+      tmp_env_file="$(mktemp)"
+      write_env_overrides_file "$tmp_env_file"
       cp "$tmp_env_file" "$fresh_runner_env"
       chmod 0600 "$fresh_runner_env"
-      cp "$tmp_start_wrapper" "$start_wrapper"
-      chmod 0755 "$start_wrapper"
-      cp "$tmp_web_wrapper" "$web_wrapper"
-      chmod 0755 "$web_wrapper"
-    else
-      copy_file_to_remote "$target_host" "$tmp_env_file" "$fresh_runner_env" 0600
-      copy_file_to_remote "$target_host" "$tmp_start_wrapper" "$start_wrapper" 0755
-      copy_file_to_remote "$target_host" "$tmp_web_wrapper" "$web_wrapper" 0755
+      rm -f "$tmp_env_file"
     fi
-
-    rm -f "$tmp_env_file" "$tmp_start_wrapper" "$tmp_web_wrapper"
-    start_cmd="$(quote_args "$start_wrapper")"
-    web_cmd="$(quote_args "$web_wrapper")"
   else
-    web_cmd="$(quote_args "${fresh_bin}/runner" --config "$fresh_runner_config" web --bind "$WEB_BIND")"
-    start_cmd="$(quote_args "${fresh_bin}/runner" --config "$fresh_runner_config" --user alice start)"
+    copy_file_to_remote "$target_host" "$tmp_runner_wrapper" "$runner_wrapper" 0755
+    if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
+      tmp_env_file="$(mktemp)"
+      write_env_overrides_file "$tmp_env_file"
+      copy_file_to_remote "$target_host" "$tmp_env_file" "$fresh_runner_env" 0600
+      rm -f "$tmp_env_file"
+    fi
   fi
+  rm -f "$tmp_runner_wrapper"
+
+  start_cmd="$(quote_args "$runner_wrapper" --user alice start)"
+  web_cmd="$(quote_args "$runner_wrapper" web --bind "$WEB_BIND")"
 
   cleanup_cmd="$(quote_args rm -rf "$fresh_base")"
 
   if [[ "$target_kind" == "local" ]]; then
     log "Fresh install path: ${fresh_base}"
+    log "Runner wrapper: ${runner_wrapper}"
     if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
       log "Runner env file: ${fresh_runner_env}"
     fi
@@ -427,14 +424,11 @@ for target in "${TARGETS[@]}"; do
     log "Open onboarding wizard: ${web_cmd}"
     log "Discard this fresh install: ${cleanup_cmd}"
     if [[ "$START_WEB" == "true" ]]; then
-      if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
-        "$web_wrapper"
-      else
-        "${fresh_bin}/runner" --config "$fresh_runner_config" web --bind "$WEB_BIND"
-      fi
+      "$runner_wrapper" web --bind "$WEB_BIND"
     fi
   else
     log "Fresh install path on ${target_host}: ${fresh_base}"
+    log "Runner wrapper on ${target_host}: ${runner_wrapper}"
     if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
       log "Runner env file on ${target_host}: ${fresh_runner_env}"
     fi
@@ -443,11 +437,7 @@ for target in "${TARGETS[@]}"; do
     log "Discard this fresh install on ${target_host}: ssh ${target_host} ${cleanup_cmd}"
     if [[ "$START_WEB" == "true" ]]; then
       log "Use SSH port-forward in another terminal: ssh -L 9400:${WEB_BIND%:*}:${WEB_BIND##*:} ${target_host}"
-      if [[ "${#ENV_OVERRIDES[@]}" -gt 0 ]]; then
-        run_remote_command "$target_host" "$web_wrapper"
-      else
-        run_remote_command "$target_host" "${fresh_bin}/runner" --config "$fresh_runner_config" web --bind "$WEB_BIND"
-      fi
+      run_remote_command "$target_host" "$runner_wrapper" web --bind "$WEB_BIND"
     fi
   fi
 done

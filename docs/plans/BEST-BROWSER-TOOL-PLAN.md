@@ -477,7 +477,6 @@ description: Control a headless Chrome browser via Pinchtab's REST API
 activation: auto
 requires:
   - shell_exec
-  - browser
 env:
   - PINCHTAB_URL
 priority: 50
@@ -698,6 +697,11 @@ impl Tool for BrowserTool {
     }
 }
 ```
+
+**Note:** `execute_with_shell_session()` in `lib.rs` is currently private.
+Either make it `pub(crate)` so `browser.rs` can call it, or have
+`BrowserTool` use the `ShellSession` trait methods directly (`exec_command`
++ `stream_output` loop).
 
 **Verify:** Unit tests for script generation + integration tests with mock shell
 

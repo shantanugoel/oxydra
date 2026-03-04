@@ -74,7 +74,7 @@ The fastest path to a running Oxydra instance. You'll need [Docker](https://docs
 Pick a version from the [GitHub releases page](https://github.com/shantanugoel/oxydra/releases) and export it:
 
 ```bash
-export OXYDRA_TAG=v0.2.4   # replace with the release you want
+export OXYDRA_TAG=v0.2.5   # replace with the release you want
 ```
 
 ### 2) Install with one command
@@ -145,7 +145,7 @@ Use this path for more control over the install process, direct TOML editing ins
 Pick a version from the [GitHub releases page](https://github.com/shantanugoel/oxydra/releases) and export it once:
 
 ```bash
-export OXYDRA_TAG=v0.2.4   # replace with the release you want
+export OXYDRA_TAG=v0.2.5   # replace with the release you want
 ```
 
 ### 1) Install binaries and bootstrap config templates
@@ -277,7 +277,7 @@ sudo usermod -aG docker $USER
 newgrp docker   # apply in the current shell without logging out
 ```
 
-The guest images are public on ghcr.io and pull without authentication. If you ever hit a `manifest unknown` 404, double-check that the tag in `runner.toml` includes the `v` prefix (e.g. `v0.2.4`, not `0.1.2`).
+The guest images are public on ghcr.io and pull without authentication. If you ever hit a `manifest unknown` 404, double-check that the tag in `runner.toml` includes the `v` prefix (e.g. `v0.2.5`, not `0.1.2`).
 
 ### 4) Set your provider API key
 
@@ -392,7 +392,7 @@ auth_token_env = "OXYDRA_WEB_TOKEN"
 | `oxydra-tui was not found in PATH` | Ensure install dir is in `PATH` or run the binary directly |
 | Docker unreachable / `client error (Connect)` | Start Docker (`sudo systemctl start docker`); for Colima set `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` |
 | `Permission denied` accessing Docker socket | Add your user to the docker group: `sudo usermod -aG docker $USER` then run `newgrp docker` or log out and back in |
-| `pull_image` fails with `manifest unknown` or 404 | Check the tag in `runner.toml` includes the `v` prefix (e.g. `v0.2.4` not `0.1.2`); see [published images](https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm) for available tags |
+| `pull_image` fails with `manifest unknown` or 404 | Check the tag in `runner.toml` includes the `v` prefix (e.g. `v0.2.5` not `0.1.2`); see [published images](https://github.com/shantanugoel/oxydra/pkgs/container/oxydra-vm) for available tags |
 | Telegram bot does not respond | Verify `bot_token_env` points to an exported token and your Telegram user ID is listed in `[[channels.telegram.senders]]` |
 | `micro_vm` start fails on macOS | Ensure Docker Desktop is installed and running |
 | `micro_vm` start fails on Linux (`firecracker` or config error) | Install `firecracker` and set `guest_images.firecracker_oxydra_vm_config` (and `guest_images.firecracker_shell_vm_config` for sidecar) |

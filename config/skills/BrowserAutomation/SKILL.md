@@ -47,6 +47,28 @@ cleanup, and accessibility tree wait times automatically.
 - Locks auto-expire after timeout; if your tab is stolen, the tool
   re-acquires from available tabs
 
+### Navigate vs Click — Critical Rule
+
+**`navigate` is for going to URLs. `click` is for interactions with no URL.**
+
+When following a link, **never click it** — extract the URL and navigate directly.
+Clicking triggers hover states, preview popovers, and JavaScript event handlers that
+often intercept navigation (search result previews, HackerNews/Reddit card expansions,
+SPAs with custom routing, sticky overlays). Direct navigation bypasses all of this.
+
+```
+# WRONG — triggers Google preview, HN popover, etc.
+browser(action="act", kind="click", ref="e5", tabId="...")
+
+# RIGHT — extract href from snapshot or evaluate, then navigate
+browser(action="evaluate", expression="document.querySelector('a.result').href", tabId="...")
+browser(action="navigate", url="<extracted url>")
+```
+
+If the snapshot already shows the URL on a link ref, navigate to it directly without
+touching the DOM at all. Use `click` only when there is no URL involved: buttons,
+form submissions, toggles, checkboxes, dropdowns, and in-page UI controls.
+
 ### Action Kinds
 
 For `action="act"`, use these `kind` values:

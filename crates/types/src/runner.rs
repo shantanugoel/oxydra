@@ -418,6 +418,12 @@ pub struct RunnerBehaviorOverrides {
     pub shell_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_enabled: Option<bool>,
+    /// HTTP base URL of an external Chromium instance running with
+    /// `--remote-debugging-port`. When set, Pinchtab connects to this instance
+    /// instead of launching bundled Chromium.
+    /// Example: `http://192.168.1.100:9222`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_cdp_url: Option<String>,
 }
 
 // ── Browser (Pinchtab) Configuration Types ──────────────────────────────────

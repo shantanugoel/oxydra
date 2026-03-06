@@ -30,21 +30,25 @@ COPY --from=builder /build/target/*/release/oxydra-vm /usr/local/bin/oxydra-vm
 ENTRYPOINT ["/usr/local/bin/oxydra-vm"]
 
 # --- shell-vm (shell-daemon sidecar) image ---
-FROM debian:trixie-slim AS shell-vm
+FROM alpine:3 AS shell-vm
 
 ARG PINCHTAB_VERSION=0.7.6
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     ca-certificates \
     curl \
     jq \
-    libnss3 \
-    fonts-liberation \
-    chromium \
-    && rm -rf /var/lib/apt/lists/*
+    nss \
+    ttf-freefont \
+    chromium
 
 # Download Pinchtab binary for the target architecture.
-RUN ARCH=$(dpkg --print-architecture) && \
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+      x86_64)  ARCH="amd64" ;; \
+      aarch64) ARCH="arm64" ;; \
+      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
     curl -fSL "https://github.com/pinchtab/pinchtab/releases/download/v${PINCHTAB_VERSION}/pinchtab-linux-${ARCH}" \
       -o /usr/local/bin/pinchtab && \
     chmod +x /usr/local/bin/pinchtab

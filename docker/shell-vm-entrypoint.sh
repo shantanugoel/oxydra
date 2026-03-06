@@ -46,7 +46,8 @@ if [ "${BROWSER_ENABLED}" = "true" ]; then
     BASE_URL="http://${BRIDGE_BIND:-127.0.0.1}:${BRIDGE_PORT}"
 
     # ── 1. Clean Chrome singleton locks from previous crashes ─────────────────
-    if [ -d "${PROFILES_DIR}" ]; then
+    # Skip in external CDP mode — there is no local Chrome profile directory.
+    if [ -z "${BROWSER_EXTERNAL_CDP_URL}" ] && [ -d "${PROFILES_DIR}" ]; then
         find "${PROFILES_DIR}" -name "SingletonLock" -delete 2>/dev/null || true
         find "${PROFILES_DIR}" -name ".com.google.Chrome.SingletonLock" \
             -delete 2>/dev/null || true

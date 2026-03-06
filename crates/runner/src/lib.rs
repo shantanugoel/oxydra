@@ -35,15 +35,15 @@ use tokio_tungstenite::{
 use tools::{ProcessHardeningOutcome, attempt_process_tier_hardening};
 use tracing::{info, warn};
 use types::{
-    BootstrapEnvelopeError, BrowserToolConfig, GATEWAY_PROTOCOL_VERSION, GatewayClientFrame,
-    GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, LogRole, LogSource, LogStream,
-    RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl, RunnerControlError,
-    RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlLogsRequest,
-    RunnerControlLogsResponse, RunnerControlResponse, RunnerControlShutdownStatus,
-    RunnerGlobalConfig, RunnerGuestImages, RunnerLogEntry, RunnerMountPaths,
-    RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy, RunnerUserConfig,
-    RunnerUserRegistration, SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReason,
-    StartupDegradedReasonCode, StartupStatusReport,
+    BootstrapEnvelopeError, BrowserToolConfig, GATEWAY_PROTOCOL_VERSION,
+    GatewayClientFrame, GatewayClientHello, GatewayHealthCheck, GatewayServerFrame, LogRole,
+    LogSource, LogStream, RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl,
+    RunnerControlError, RunnerControlErrorCode, RunnerControlHealthStatus,
+    RunnerControlLogsRequest, RunnerControlLogsResponse, RunnerControlResponse,
+    RunnerControlShutdownStatus, RunnerGlobalConfig, RunnerGuestImages, RunnerLogEntry,
+    RunnerMountPaths, RunnerResolvedMountPaths, RunnerResourceLimits, RunnerRuntimePolicy,
+    RunnerUserConfig, RunnerUserRegistration, SandboxTier, SidecarEndpoint, SidecarTransport,
+    StartupDegradedReason, StartupDegradedReasonCode, StartupStatusReport,
 };
 
 mod backend;
@@ -222,16 +222,17 @@ impl Runner {
             }
         }
 
-        // ── Browser (Pinchtab) provisioning ─────────────────────────────
-        // When browser capability is requested, allocate a port, generate a
-        // token, inject env vars into both containers, apply the shell policy
-        // overlay, and copy skill reference files.
+        // ── Browser provisioning (Pinchtab) ──────────────────────────────
         let mut bootstrap = bootstrap;
         if capabilities.browser && sandbox_tier != SandboxTier::Process {
             match find_available_port() {
                 Some(port) => {
                     let bridge_token = generate_bridge_token();
-                    let (browser_shell_env, pinchtab_url) = build_browser_env(port, &bridge_token);
+                    let (browser_shell_env, pinchtab_url) = build_browser_env(
+                        port,
+                        &bridge_token,
+                        user_config.behavior.browser_cdp_url.as_deref(),
+                    );
 
                     // Shell-vm env: Pinchtab process config + auth token.
                     shell_env.extend(browser_shell_env);
@@ -250,44 +251,8 @@ impl Runner {
 
                     // Apply shell policy overlay: add curl, jq, sleep and
                     // enable operators for the browser skill's curl workflow.
-                    let host_paths = bootstrap::ConfigSearchPaths::discover().ok();
-                    let agent_config = host_paths.as_ref().and_then(|paths| {
-                        bootstrap::load_agent_config_with_paths(
-                            paths,
-                            None,
-                            bootstrap::CliOverrides::default(),
-                        )
-                        .ok()
-                    });
-                    let mut shell_config =
-                        agent_config.and_then(|c| c.tools.shell).unwrap_or_default();
-                    apply_browser_shell_overlay(&mut shell_config);
-                    // Serialize the overlay into the workspace config so the
-                    // guest runtime picks it up. We write it as a separate
-                    // section in the already-materialized agent config.
-                    let overlay_toml = format!(
-                        "\n[tools.shell]\n{}",
-                        toml::to_string_pretty(&shell_config).unwrap_or_default()
-                    );
-                    let agent_config_path =
-                        workspace.internal.join(bootstrap::AGENT_CONFIG_FILE_NAME);
-                    if agent_config_path.is_file()
-                        && let Ok(mut contents) = fs::read_to_string(&agent_config_path)
-                    {
-                        // Remove existing [tools.shell] section if present
-                        // to avoid duplicate keys.
-                        if let Some(idx) = contents.find("\n[tools.shell]") {
-                            // Find the next section header or EOF.
-                            let rest = &contents[idx + 1..];
-                            let end = rest
-                                .find("\n[")
-                                .map(|i| idx + 1 + i)
-                                .unwrap_or(contents.len());
-                            contents.replace_range(idx..end, "");
-                        }
-                        contents.push_str(&overlay_toml);
-                        let _ = fs::write(&agent_config_path, contents);
-                    }
+                    let shell_config = load_shell_config_for_overlay();
+                    write_shell_overlay(shell_config, apply_browser_shell_overlay, &workspace);
 
                     info!(port = port, "browser (Pinchtab) provisioned for shell-vm");
                 }
@@ -2938,16 +2903,20 @@ fn generate_bridge_token() -> String {
 /// Builds environment variables for the shell-vm container when browser is
 /// enabled. Returns `(shell_vm_env_vars, pinchtab_url)`.
 ///
-/// `CHROME_BINARY` is set to the chromium wrapper script
-/// (`/usr/local/bin/chromium-wrapper`) rather than the bare chromium binary.
-/// The wrapper unconditionally passes the container-stability flags
-/// (`--no-sandbox`, `--disable-dev-shm-usage`, `--disable-gpu`, etc.) to
-/// Chromium, which is more reliable than setting `CHROME_FLAGS` — whose
-/// handling has had bugs in some Pinchtab versions that caused the flags to be
-/// ignored.
-fn build_browser_env(port: u16, bridge_token: &str) -> (Vec<String>, String) {
+/// `CHROME_BINARY` is always set to the chromium wrapper script
+/// (`/usr/local/bin/chromium-wrapper`). In local mode the wrapper launches
+/// the bundled Chromium with container-stability flags. In external CDP mode
+/// (when `external_cdp_url` is `Some`), the wrapper instead fetches the
+/// WebSocket debugger URL from the external Chrome's DevTools HTTP API and
+/// prints it in the format Pinchtab expects (`DevTools listening on ws://...`),
+/// then sleeps to keep the "Chrome process" alive.
+fn build_browser_env(
+    port: u16,
+    bridge_token: &str,
+    external_cdp_url: Option<&str>,
+) -> (Vec<String>, String) {
     let pinchtab_url = format!("http://127.0.0.1:{port}");
-    let env_vars = vec![
+    let mut env_vars = vec![
         "BROWSER_ENABLED=true".to_owned(),
         format!("BRIDGE_PORT={port}"),
         "BRIDGE_BIND=127.0.0.1".to_owned(),
@@ -2964,14 +2933,61 @@ fn build_browser_env(port: u16, bridge_token: &str) -> (Vec<String>, String) {
         "BRIDGE_NO_RESTORE=true".to_owned(),
         // Point Pinchtab at the wrapper script so stability flags are always
         // applied regardless of how Pinchtab handles CHROME_FLAGS internally.
+        // In external CDP mode the wrapper connects to the remote Chrome
+        // instead of launching a local instance.
         "CHROME_BINARY=/usr/local/bin/chromium-wrapper".to_owned(),
     ];
+    if let Some(cdp_url) = external_cdp_url {
+        env_vars.push(format!("BROWSER_EXTERNAL_CDP_URL={cdp_url}"));
+    }
     (env_vars, pinchtab_url)
 }
 
-/// Applies the shell policy overlay for browser automation. When browser is
-/// enabled, adds `curl`, `jq`, `sleep` to the allow list and enables
-/// `allow_operators` so the LLM can chain commands and capture tab IDs.
+/// Loads the current agent shell config for overlay use.
+fn load_shell_config_for_overlay() -> types::ShellConfig {
+    let host_paths = bootstrap::ConfigSearchPaths::discover().ok();
+    let agent_config = host_paths.as_ref().and_then(|paths| {
+        bootstrap::load_agent_config_with_paths(
+            paths,
+            None,
+            bootstrap::CliOverrides::default(),
+        )
+        .ok()
+    });
+    agent_config.and_then(|c| c.tools.shell).unwrap_or_default()
+}
+
+/// Serialises an updated shell config back into the workspace agent config
+/// file, replacing any existing `[tools.shell]` section.
+fn write_shell_overlay(
+    mut shell_config: types::ShellConfig,
+    apply: fn(&mut types::ShellConfig),
+    workspace: &UserWorkspace,
+) {
+    apply(&mut shell_config);
+    let overlay_toml = format!(
+        "\n[tools.shell]\n{}",
+        toml::to_string_pretty(&shell_config).unwrap_or_default()
+    );
+    let agent_config_path = workspace.internal.join(bootstrap::AGENT_CONFIG_FILE_NAME);
+    if agent_config_path.is_file()
+        && let Ok(mut contents) = fs::read_to_string(&agent_config_path)
+    {
+        if let Some(idx) = contents.find("\n[tools.shell]") {
+            let rest = &contents[idx + 1..];
+            let end = rest
+                .find("\n[")
+                .map(|i| idx + 1 + i)
+                .unwrap_or(contents.len());
+            contents.replace_range(idx..end, "");
+        }
+        contents.push_str(&overlay_toml);
+        let _ = fs::write(&agent_config_path, contents);
+    }
+}
+
+/// Applies the shell policy overlay for Pinchtab. Adds `curl`, `jq`, `sleep`
+/// to the allow list and enables `allow_operators` for the curl-based workflow.
 fn apply_browser_shell_overlay(shell_config: &mut types::ShellConfig) {
     let browser_commands = ["curl", "jq", "sleep"];
     let allow = shell_config.allow.get_or_insert_with(Vec::new);

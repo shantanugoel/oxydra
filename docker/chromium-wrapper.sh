@@ -11,7 +11,7 @@
 #
 # 1. LOCAL (default): launches the bundled Chromium with container-stability
 #    flags. Flags applied:
-#      --no-sandbox              Required: no user-namespace support in containers.
+#      --no-sandbox              Required: containers have no user-namespace support.
 #      --disable-dev-shm-usage   /dev/shm is typically only 64 MB in Docker;
 #                                Chrome uses it for IPC shared memory and
 #                                crashes without this flag on the default size.
@@ -78,6 +78,7 @@ if [ -z "$CHROMIUM_BIN" ]; then
     echo "ERROR: no chromium binary found in PATH" >&2
     exit 1
 fi
+
 exec "$CHROMIUM_BIN" \
     --no-sandbox \
     --disable-dev-shm-usage \

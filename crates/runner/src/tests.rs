@@ -1602,6 +1602,83 @@ fn shell_prefixed_env_vars_forwarded_to_shell_env_with_prefix_stripped() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn configured_timezone_is_forwarded_to_both_guests() {
+    let root = temp_dir("configured-timezone");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(
+        &root.join("users/alice.toml"),
+        r#"
+[behavior]
+timezone = "America/New_York"
+"#,
+    );
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+    runner
+        .start_user_for_host(RunnerStartRequest::new("alice"), "linux")
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+    assert!(
+        launches[0]
+            .extra_env
+            .iter()
+            .any(|e| e == "TZ=America/New_York"),
+        "runtime env should receive configured TZ, got: {:?}",
+        launches[0].extra_env
+    );
+    assert!(
+        launches[0]
+            .shell_env
+            .iter()
+            .any(|e| e == "TZ=America/New_York"),
+        "shell env should receive configured TZ, got: {:?}",
+        launches[0].shell_env
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cli_timezone_env_is_forwarded_to_shell_env_without_shell_prefix() {
+    let root = temp_dir("cli-timezone-env");
+    let global_path = write_runner_config_fixture(&root, "container");
+    write_user_config(&root.join("users/alice.toml"), "");
+
+    let backend = Arc::new(MockSandboxBackend::default());
+    let runner = Runner::from_global_config_path_with_backend(&global_path, backend.clone())
+        .expect("runner should initialize");
+    runner
+        .start_user_for_host(
+            RunnerStartRequest {
+                user_id: "alice".to_owned(),
+                insecure: false,
+                extra_env: vec!["TZ=Asia/Kolkata".to_owned()],
+            },
+            "linux",
+        )
+        .expect("startup should succeed");
+
+    let launches = backend.recorded_launches();
+    assert_eq!(launches.len(), 1);
+    assert!(
+        launches[0].extra_env.iter().any(|e| e == "TZ=Asia/Kolkata"),
+        "runtime env should receive CLI TZ, got: {:?}",
+        launches[0].extra_env
+    );
+    assert!(
+        launches[0].shell_env.iter().any(|e| e == "TZ=Asia/Kolkata"),
+        "shell env should receive CLI TZ, got: {:?}",
+        launches[0].shell_env
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 // ---------------------------------------------------------------------------
 //  Daemon control socket and exit-after-shutdown tests
 // ---------------------------------------------------------------------------

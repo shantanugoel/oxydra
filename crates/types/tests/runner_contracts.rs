@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use types::{
-    BootstrapEnvelopeError, ChannelsConfig, DEFAULT_RUNNER_CONFIG_VERSION, ExecCommand,
-    LOG_TAIL_DEFAULT, LOG_TAIL_MAX, LogFormat, LogRole, LogSource, LogStream,
+    BootstrapEnvelopeError, ChannelsConfig, DEFAULT_RUNNER_CONFIG_VERSION, DEFAULT_RUNNER_TIMEZONE,
+    ExecCommand, LOG_TAIL_DEFAULT, LOG_TAIL_MAX, LogFormat, LogRole, LogSource, LogStream,
     RunnerBootstrapEnvelope, RunnerConfigError, RunnerControl, RunnerControlError,
     RunnerControlErrorCode, RunnerControlHealthStatus, RunnerControlLogsRequest,
     RunnerControlLogsResponse, RunnerControlResponse, RunnerControlShutdownStatus,
@@ -84,6 +84,22 @@ fn runner_user_config_rejects_invalid_config_version_format() {
 }
 
 #[test]
+fn runner_user_config_rejects_invalid_timezone() {
+    let mut config = RunnerUserConfig::default();
+    config.behavior.timezone = "Mars/Olympus".to_owned();
+
+    let error = config
+        .validate()
+        .expect_err("invalid timezone should fail validation");
+    assert_eq!(
+        error,
+        RunnerConfigError::InvalidTimezone {
+            timezone: "Mars/Olympus".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn runner_config_defaults_to_current_version() {
     assert_eq!(
         RunnerGlobalConfig::default().config_version,
@@ -92,6 +108,10 @@ fn runner_config_defaults_to_current_version() {
     assert_eq!(
         RunnerUserConfig::default().config_version,
         DEFAULT_RUNNER_CONFIG_VERSION
+    );
+    assert_eq!(
+        RunnerUserConfig::default().behavior.timezone,
+        DEFAULT_RUNNER_TIMEZONE
     );
 }
 

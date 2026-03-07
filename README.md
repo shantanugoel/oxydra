@@ -431,6 +431,23 @@ Or use the web configurator under **Agent Config → Tools → Browser** for wor
 
 **How it works:** The Browser Automation skill is a markdown document embedded in the Oxydra binary. When browser is enabled and Pinchtab starts successfully, the skill is automatically injected into the agent's system prompt with the Pinchtab API URL pre-filled. The shell sandbox is also automatically extended to allow `curl`, `jq`, `sleep`, and shell operators (`&&`, `|`, `$()`) — no manual shell config changes needed. The agent then drives the browser entirely through `curl` calls to Pinchtab's REST API, keeping all browser activity inside the sandboxed container.
 
+The guest containers now run unprivileged by default. When launched by the runner, they are mapped to your host UID/GID when possible so bind-mounted workspaces stay writable.
+
+If you need container-local time to match your region for shell commands or browser automation, set it per user in `.oxydra/users/<user>.toml`:
+
+```toml
+[behavior]
+timezone = "America/New_York"
+```
+
+The default is `UTC`. You can still override it for a single launch:
+
+```bash
+runner --config .oxydra/runner.toml --user alice -e TZ=America/New_York start
+```
+
+`TZ` is forwarded to both guest containers. Use an IANA timezone such as `America/New_York` or `Asia/Kolkata`.
+
 ### Custom Specialist Agents
 
 Specialist agents let you configure separate personas, tool scopes, and model choices for different tasks. The main agent can delegate work to specialists using the `delegate_to_agent` tool, or you can address a specialist directly from the TUI using `/new <agent-name>`.

@@ -11,6 +11,7 @@ pub const SUPPORTED_RUNNER_CONFIG_MAJOR_VERSION: u64 = 1;
 pub const DEFAULT_WEB_BIND: &str = "127.0.0.1:9400";
 pub const DEFAULT_PINCHTAB_PORT: u16 = 9867;
 pub const PINCHTAB_PORT_RANGE: u16 = 100;
+pub const DEFAULT_RUNNER_TIMEZONE: &str = "UTC";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -412,7 +413,7 @@ impl RunnerResourceLimits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerBehaviorOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,10 +422,31 @@ pub struct RunnerBehaviorOverrides {
     pub shell_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_enabled: Option<bool>,
+    #[serde(
+        default = "default_runner_timezone",
+        skip_serializing_if = "is_default_runner_timezone"
+    )]
+    pub timezone: String,
+}
+
+impl Default for RunnerBehaviorOverrides {
+    fn default() -> Self {
+        Self {
+            sandbox_tier: None,
+            shell_enabled: None,
+            browser_enabled: None,
+            timezone: default_runner_timezone(),
+        }
+    }
 }
 
 impl RunnerBehaviorOverrides {
     fn validate(&self) -> Result<(), RunnerConfigError> {
+        if self.timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err(RunnerConfigError::InvalidTimezone {
+                timezone: self.timezone.clone(),
+            });
+        }
         Ok(())
     }
 }
@@ -579,6 +601,14 @@ fn default_max_message_length() -> usize {
     4096
 }
 
+fn default_runner_timezone() -> String {
+    DEFAULT_RUNNER_TIMEZONE.to_owned()
+}
+
+fn is_default_runner_timezone(value: &String) -> bool {
+    value == DEFAULT_RUNNER_TIMEZONE
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RunnerConfigError {
     #[error("unsupported runner config_version `{version}`; supported major is {supported_major}")]
@@ -606,6 +636,8 @@ pub enum RunnerConfigError {
     InvalidCredentialRefValue { key: String },
     #[error("runner web bind address `{bind}` is not a valid socket address")]
     InvalidWebBind { bind: String },
+    #[error("runner timezone `{timezone}` is not a valid IANA timezone")]
+    InvalidTimezone { timezone: String },
     #[error("runner web auth_mode is \"token\" but neither auth_token_env nor auth_token is set")]
     WebTokenAuthMissingSource,
     #[error(
@@ -1178,5 +1210,17 @@ mod tests {
         });
 
         config.validate().expect("telegram config should validate");
+    }
+
+    #[test]
+    fn runner_user_config_rejects_invalid_timezone() {
+        let mut config = RunnerUserConfig::default();
+        config.behavior.timezone = "Mars/Olympus".to_owned();
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(RunnerConfigError::InvalidTimezone { timezone }) if timezone == "Mars/Olympus"
+        ));
     }
 }

@@ -25,8 +25,16 @@ RUN strip /build/target/*/release/oxydra-vm /build/target/*/release/shell-daemon
 # --- oxydra-vm image ---
 FROM alpine:3 AS oxydra-vm
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S oxydra \
+    && adduser -S -D -H -G oxydra oxydra
+ENV HOME=/tmp/oxydra-home \
+    XDG_CONFIG_HOME=/tmp/oxydra-home/.config \
+    XDG_CACHE_HOME=/tmp/oxydra-home/.cache \
+    XDG_STATE_HOME=/tmp/oxydra-home/.local/state \
+    TZ=UTC
 COPY --from=builder /build/target/*/release/oxydra-vm /usr/local/bin/oxydra-vm
+USER oxydra:oxydra
 ENTRYPOINT ["/usr/local/bin/oxydra-vm"]
 
 # --- shell-vm (shell-daemon sidecar) image ---
@@ -39,8 +47,11 @@ RUN apk add --no-cache \
     curl \
     jq \
     nss \
+    tzdata \
     ttf-freefont \
-    chromium
+    chromium \
+    && addgroup -S oxydra \
+    && adduser -S -D -H -G oxydra oxydra
 
 # Download Pinchtab binary for the target architecture.
 RUN ARCH=$(uname -m) && \
@@ -58,4 +69,10 @@ COPY docker/chromium-wrapper.sh /usr/local/bin/chromium-wrapper
 RUN chmod +x /usr/local/bin/chromium-wrapper
 COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/tmp/oxydra-home \
+    XDG_CONFIG_HOME=/tmp/oxydra-home/.config \
+    XDG_CACHE_HOME=/tmp/oxydra-home/.cache \
+    XDG_STATE_HOME=/tmp/oxydra-home/.local/state \
+    TZ=UTC
+USER oxydra:oxydra
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

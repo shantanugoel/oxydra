@@ -22,6 +22,7 @@ hyper = { version = "1.8", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 hyperlocal = "0.9"
 http-body-util = "0.1"
+libc = "0.2"
 memory = { path = "../memory" }
 provider = { path = "../provider" }
 runtime = { path = "../runtime" }

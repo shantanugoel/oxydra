@@ -16,6 +16,13 @@
 # can return non-zero without being fatal, and explicit `|| true` guards are
 # used where needed.
 
+export HOME="${HOME:-/tmp/oxydra-home}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+mkdir -p "${HOME}" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_STATE_HOME}" \
+    2>/dev/null || true
+
 # Helper: kill a process gracefully, then forcefully if it lingers, and
 # wait until the port it was using is released before returning.
 # Usage: kill_and_wait_port <pid> <port>

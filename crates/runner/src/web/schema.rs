@@ -1280,8 +1280,13 @@ fn agent_scheduler_section() -> SchemaSection {
             SchemaField {
                 description: Some("Timezone for cron schedule interpretation".into()),
                 default: Some(Value::String("Asia/Kolkata".into())),
+                allow_custom: true,
                 dynamic_source: Some("timezone_suggestions".into()),
-                ..fld("scheduler.default_timezone", "Default Timezone", "text")
+                ..fld(
+                    "scheduler.default_timezone",
+                    "Default Timezone",
+                    "select_dynamic",
+                )
             },
             SchemaField {
                 description: Some("Consecutive failures before auto-disabling a schedule".into()),
@@ -1663,6 +1668,18 @@ fn user_behavior_section() -> SchemaSection {
                     "Browser Access Override",
                     "boolean",
                 )
+            },
+            SchemaField {
+                description: Some(
+                    "Timezone to set inside this user's guest containers. \
+                     Uses IANA timezone names like UTC, America/New_York, or Asia/Kolkata."
+                        .into(),
+                ),
+                default: Some(Value::String("UTC".into())),
+                nullable: true,
+                allow_custom: true,
+                dynamic_source: Some("timezone_suggestions".into()),
+                ..fld("behavior.timezone", "Container Timezone", "select_dynamic")
             },
         ],
         ..sec("behavior", "Behavior Overrides")
@@ -2146,6 +2163,7 @@ mod tests {
         assert!(paths.contains(&"behavior.sandbox_tier".to_owned()));
         assert!(paths.contains(&"behavior.shell_enabled".to_owned()));
         assert!(paths.contains(&"behavior.browser_enabled".to_owned()));
+        assert!(paths.contains(&"behavior.timezone".to_owned()));
         // Telegram
         assert!(paths.contains(&"channels.telegram.enabled".to_owned()));
         assert!(paths.contains(&"channels.telegram.bot_token_env".to_owned()));
@@ -2542,6 +2560,27 @@ mod tests {
 
     #[tokio::test]
     async fn schema_endpoint_returns_correct_field_metadata() {
+        fn find_field<'a>(
+            sections: &'a [serde_json::Value],
+            path: &str,
+        ) -> Option<&'a serde_json::Value> {
+            for section in sections {
+                if let Some(field) = section["fields"]
+                    .as_array()
+                    .and_then(|fields| fields.iter().find(|f| f["path"] == path))
+                {
+                    return Some(field);
+                }
+                if let Some(field) = section["subsections"]
+                    .as_array()
+                    .and_then(|subsections| find_field(subsections, path))
+                {
+                    return Some(field);
+                }
+            }
+            None
+        }
+
         let state = test_state();
         let app = crate::web::build_router(state);
 
@@ -2577,6 +2616,17 @@ mod tests {
         assert_eq!(model_field["input_type"], "model_picker");
         assert_eq!(model_field["required"], true);
         assert_eq!(model_field["allow_custom"], true);
+
+        let scheduler_timezone = find_field(agent_sections, "scheduler.default_timezone")
+            .expect("scheduler.default_timezone field should exist");
+        assert_eq!(scheduler_timezone["input_type"], "select_dynamic");
+        assert_eq!(scheduler_timezone["allow_custom"], true);
+
+        let user_sections = json["data"]["user"]["sections"].as_array().unwrap();
+        let container_timezone = find_field(user_sections, "behavior.timezone")
+            .expect("behavior.timezone field should exist");
+        assert_eq!(container_timezone["input_type"], "select_dynamic");
+        assert_eq!(container_timezone["allow_custom"], true);
 
         // Verify dynamic sources contain all expected keys
         let ds = &json["data"]["dynamic_sources"];

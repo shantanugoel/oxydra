@@ -402,6 +402,7 @@ The runner forwards these variables into the shell-vm container when browser is 
 | `BRIDGE_HEADLESS` | Config-derived | Default headless mode |
 | `BRIDGE_STATE_DIR` | `"/shared/.pinchtab"` | Profile / state storage |
 | `CHROME_BINARY` | `"/usr/local/bin/chromium-wrapper"` | Chromium wrapper (see below) |
+| `TZ` | Derived from `RunnerUserConfig.behavior.timezone` (default `UTC`), overridable via `--env TZ=...` | Container timezone |
 
 `CHROME_FLAGS` is **not** set. Some Pinchtab versions pass this env var to Chromium incorrectly (using an empty flag name in the chromedp allocator, producing a malformed argument). Instead, all container-stability flags are baked into the chromium wrapper so they are applied unconditionally.
 
@@ -411,7 +412,7 @@ The runner forwards these variables into the shell-vm container when browser is 
 
 | Flag | Reason |
 |---|---|
-| `--no-sandbox` | Required: containers have no user-namespace sandboxing |
+| `--no-sandbox` | Required for Chromium reliability in this container setup |
 | `--disable-dev-shm-usage` | Required: `/dev/shm` defaults to 64 MB in Docker, which is too small for Chrome's IPC shared memory; this redirects to `/tmp` |
 | `--disable-gpu` | Headless containers have no GPU; avoids GPU-related crashes |
 | `--disable-software-rasterizer` | The software rasterizer is slow and can OOM-crash on constrained devices (e.g. Raspberry Pi) |
@@ -435,27 +436,35 @@ This adds `curl`, `jq`, `sleep`, and shell operators to the allowlist **without 
 
 ### Docker Image Changes
 
-Both `docker/Dockerfile` and `docker/Dockerfile.prebuilt` include:
+Both `docker/Dockerfile` and `docker/Dockerfile.prebuilt` now:
 
 ```dockerfile
 ARG PINCHTAB_VERSION=0.7.6
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl jq chromium \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates curl jq chromium tzdata \
+    && addgroup -S oxydra \
+    && adduser -S -D -H -G oxydra oxydra
 
-RUN ARCH=$(dpkg --print-architecture) && \
+ENV HOME=/tmp/oxydra-home \
+    XDG_CONFIG_HOME=/tmp/oxydra-home/.config \
+    XDG_CACHE_HOME=/tmp/oxydra-home/.cache \
+    XDG_STATE_HOME=/tmp/oxydra-home/.local/state \
+    TZ=UTC
+
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in x86_64) ARCH="amd64" ;; aarch64) ARCH="arm64" ;; esac && \
     curl -fSL "https://github.com/pinchtab/pinchtab/releases/download/v${PINCHTAB_VERSION}/pinchtab-linux-${ARCH}" \
       -o /usr/local/bin/pinchtab && \
-    chmod +x /usr/local/bin/pinchtab
+      chmod +x /usr/local/bin/pinchtab
 
 COPY docker/chromium-wrapper.sh /usr/local/bin/chromium-wrapper
 RUN chmod +x /usr/local/bin/chromium-wrapper
 COPY docker/shell-vm-entrypoint.sh /usr/local/bin/entrypoint.sh
+USER oxydra:oxydra
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
-`dpkg --print-architecture` resolves to `amd64` or `arm64`, so the correct Pinchtab binary is fetched for the build target. `curl` and `jq` are installed at image build time (not just allowed by the shell policy) because the entrypoint health check script itself needs `curl`. The `chromium-wrapper.sh` is installed alongside to ensure Chromium always starts with the required container-stability flags.
+The runtime images are Alpine-based, install `tzdata` so standard `TZ=Area/City` settings work, and default to the unprivileged `oxydra` user. The runner still overrides the container user to the host UID/GID for normal launches so bind-mounted workspaces remain writable.
 
 ## Platform-Specific Backends
 
@@ -473,6 +482,7 @@ Both the Container and macOS MicroVM tiers use the same `launch_docker_container
    - Bind mounts — `OxydraVm` uses host paths directly; `ShellVm` uses virtual container paths (`/shared`, `/tmp`, `/ipc`) to prevent host path leakage
    - Bootstrap file bind-mounted read-only at `/run/oxydra/bootstrap` (OxydraVm only)
    - Resource limits (CPU, memory, PID)
+   - Non-root execution mapped to the host UID/GID when available, plus `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, and Docker init reaping
    - Proxy environment variables for sandboxd-managed VMs
    - Environment variables (see [Environment Variable Forwarding](#environment-variable-forwarding) below)
 5. **Starts** the container
@@ -491,7 +501,7 @@ Guest images can be built from `docker/Dockerfile` (full in-Docker build) or fro
 ./scripts/build-guest-images-in-docker.sh
 ```
 
-The in-Docker build compiles both `oxydra-vm` and `shell-daemon` binaries in a shared Rust builder. The prebuilt path packages locally compiled binaries into `debian:trixie-slim` images.
+The in-Docker build compiles both `oxydra-vm` and `shell-daemon` binaries in a shared Rust builder. The prebuilt path packages locally compiled binaries into Alpine-based runtime images.
 
 Image names are configured in `runner.toml` under `[guest_images]`:
 ```toml
@@ -510,13 +520,15 @@ Interacts with `docker-sandboxd` via a Unix socket to provision Docker-managed V
 
 ### Environment Variable Forwarding
 
-The runner collects environment variables from two sources and injects them into the **`oxydra-vm` container only**:
+The runner collects environment variables from two sources and injects them into the **`oxydra-vm` container**:
 
 1. **Config-referenced keys** — The runner scans the agent config for `api_key_env` fields in provider registry entries and `api_key_env`/`engine_id_env` in `[tools.web_search]`. For each referenced env var name that is set in the runner's own environment, a `KEY=VALUE` pair is forwarded. This is how provider API keys (e.g. `OPENAI_API_KEY`, `GEMINI_API_KEY`) reach the guest.
 
 2. **CLI-supplied env vars** — The `--env KEY=VALUE` (`-e`) and `--env-file <PATH>` flags inject additional variables. CLI values override file values on conflict.
 
 The **`shell-vm` container does not receive API keys or config-referenced env vars** to prevent credential exposure in shell output. Shell-specific env vars can be forwarded via the `[shell.env_keys]` config section or by using the `SHELL_` prefix convention with `--env`/`--env-file` (see Chapter 2 for details).
+
+`TZ` is the one deliberate exception: the runner injects it into both guests so shell commands, browser automation, and the runtime agree on local time handling. The base value comes from `RunnerUserConfig.behavior.timezone` and defaults to `UTC`. `--env TZ=Area/City` overrides that for a single launch. Use `SHELL_TZ=...` only if you intentionally want a shell-only override.
 
 Additionally, sandboxd-managed VMs (macOS MicroVM tier) receive HTTP/HTTPS proxy environment variables to route traffic through the sandbox daemon's proxy.
 

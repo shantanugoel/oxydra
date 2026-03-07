@@ -83,6 +83,9 @@ const DEFAULT_DOCKER_TIMEOUT_SECS: u64 = 120;
 
 /// Length of the randomly generated hex bridge token.
 const BRIDGE_TOKEN_HEX_BYTES: usize = 32;
+const TZ_ENV_KEY: &str = "TZ";
+const SHELL_ENV_PREFIX: &str = "SHELL_";
+const DOCKER_SECURITY_OPT_NO_NEW_PRIVILEGES: &str = "no-new-privileges:true";
 
 const DOCKER_SANDBOXD_SOCKET_RELATIVE_PATH: &str = ".docker/sandboxes/sandboxd.sock";
 const DOCKER_SANDBOX_VM_ENDPOINT: &str = "/vm";
@@ -212,17 +215,14 @@ impl Runner {
 
         // Split CLI/file env vars: SHELL_-prefixed entries go to shell-vm
         // (with the prefix stripped), everything else goes to oxydra-vm.
-        for entry in request.extra_env {
-            if let Some((key, value)) = entry.split_once('=') {
-                if let Some(stripped) = key.strip_prefix("SHELL_") {
-                    if !stripped.is_empty() {
-                        shell_env.push(format!("{stripped}={value}"));
-                    }
-                } else {
-                    extra_env.push(entry);
-                }
-            }
-        }
+        let (cli_extra_env, cli_shell_env) = split_cli_container_env(request.extra_env);
+        extra_env.extend(cli_extra_env);
+        shell_env.extend(cli_shell_env);
+        ensure_timezone_env(
+            &mut extra_env,
+            &mut shell_env,
+            &user_config.behavior.timezone,
+        );
 
         // ── Browser provisioning (Pinchtab) ──────────────────────────────
         let mut bootstrap = bootstrap;
@@ -1932,6 +1932,7 @@ async fn launch_docker_container_async(
     let config = ContainerCreateBody {
         image: Some(params.image),
         labels: Some(params.labels),
+        user: current_container_user_spec(),
         entrypoint: Some(entrypoint),
         cmd: Some(cmd),
         working_dir,
@@ -1939,6 +1940,7 @@ async fn launch_docker_container_async(
         host_config: Some(HostConfig {
             binds: Some(binds),
             network_mode: Some("host".to_owned()),
+            init: Some(true),
             nano_cpus: params
                 .resource_limits
                 .max_vcpus
@@ -1948,6 +1950,8 @@ async fn launch_docker_container_async(
                 .max_memory_mib
                 .map(|max_memory_mib| (max_memory_mib as i64) * 1024 * 1024),
             pids_limit: params.resource_limits.max_processes.map(i64::from),
+            cap_drop: Some(vec!["ALL".to_owned()]),
+            security_opt: Some(vec![DOCKER_SECURITY_OPT_NO_NEW_PRIVILEGES.to_owned()]),
             restart_policy: Some(RestartPolicy {
                 name: Some(RestartPolicyNameEnum::ON_FAILURE),
                 maximum_retry_count: Some(5),
@@ -2816,6 +2820,74 @@ fn collect_shell_config_env_keys() -> Vec<String> {
         }
     }
     result
+}
+
+fn split_cli_container_env(extra_env: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut runtime_env = Vec::new();
+    let mut shell_env = Vec::new();
+
+    for entry in extra_env {
+        let Some((key, value)) = entry.split_once('=') else {
+            continue;
+        };
+
+        if let Some(stripped) = key.strip_prefix(SHELL_ENV_PREFIX) {
+            if !stripped.is_empty() {
+                shell_env.push(format!("{stripped}={value}"));
+            }
+            continue;
+        }
+
+        if key == TZ_ENV_KEY {
+            shell_env.push(entry.clone());
+        }
+        runtime_env.push(entry);
+    }
+
+    (runtime_env, shell_env)
+}
+
+fn ensure_timezone_env(
+    runtime_env: &mut Vec<String>,
+    shell_env: &mut Vec<String>,
+    configured_timezone: &str,
+) {
+    let runtime_has_tz = runtime_env.iter().any(|entry| entry.starts_with("TZ="));
+    let shell_has_tz = shell_env.iter().any(|entry| entry.starts_with("TZ="));
+    if runtime_has_tz && shell_has_tz {
+        return;
+    }
+
+    if configured_timezone.trim().is_empty() {
+        return;
+    }
+
+    let entry = format!("{TZ_ENV_KEY}={configured_timezone}");
+    if !runtime_has_tz {
+        runtime_env.push(entry.clone());
+    }
+    if !shell_has_tz {
+        shell_env.push(entry);
+    }
+}
+
+#[cfg(unix)]
+fn current_container_user_spec() -> Option<String> {
+    if let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID"))
+        && !uid.trim().is_empty()
+        && !gid.trim().is_empty()
+    {
+        return Some(format!("{uid}:{gid}"));
+    }
+
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    Some(format!("{uid}:{gid}"))
+}
+
+#[cfg(not(unix))]
+fn current_container_user_spec() -> Option<String> {
+    None
 }
 
 /// Collect bot token environment variables from the user's channel config.

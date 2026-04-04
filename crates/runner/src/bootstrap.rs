@@ -916,7 +916,7 @@ fn build_system_prompt(
         .unwrap_or(false);
     let shell_note = if sandbox_tier == types::SandboxTier::Process {
         if process_shell_available {
-            "\n\nNote: Shell commands execute in a sandboxed interpreter with built-in text/file utilities only. Outbound network access is disabled, system commands such as cargo, git, python, node, npm, and pip are unavailable, and browser tools are disabled in the current environment."
+            "\n\nNote: Shell commands execute in a sandboxed interpreter with built-in text/file utilities only. Within the shell, outbound network access is disabled and system commands such as cargo, git, python, node, npm, and pip are unavailable. Browser tools are disabled. Other tools (web_fetch, web_search, etc.) still have normal network access."
         } else {
             "\n\nNote: Shell and browser tools are disabled in the current environment."
         }

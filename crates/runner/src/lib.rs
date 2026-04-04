@@ -166,17 +166,16 @@ impl Runner {
         // Pre-compute the sidecar endpoint so we can build the bootstrap envelope
         // before launching the backend. Container/MicroVM tiers need the bootstrap
         // file on disk before the guest process starts.
-        let pre_sidecar_endpoint = if (capabilities.shell || capabilities.browser)
-            && sandbox_tier.supports_sidecar()
-        {
-            Some(pre_compute_sidecar_endpoint(
-                sandbox_tier,
-                host_os,
-                &workspace,
-            ))
-        } else {
-            None
-        };
+        let pre_sidecar_endpoint =
+            if (capabilities.shell || capabilities.browser) && sandbox_tier.supports_sidecar() {
+                Some(pre_compute_sidecar_endpoint(
+                    sandbox_tier,
+                    host_os,
+                    &workspace,
+                ))
+            } else {
+                None
+            };
         let pre_shell_available = if sandbox_tier.supports_sidecar() {
             capabilities.shell && pre_sidecar_endpoint.is_some()
         } else {
@@ -1439,8 +1438,7 @@ pub struct SandboxLaunchRequest {
 
 impl SandboxLaunchRequest {
     fn sidecar_requested(&self) -> bool {
-        self.sandbox_tier.supports_sidecar()
-            && (self.requested_shell || self.requested_browser)
+        self.sandbox_tier.supports_sidecar() && (self.requested_shell || self.requested_browser)
     }
 }
 

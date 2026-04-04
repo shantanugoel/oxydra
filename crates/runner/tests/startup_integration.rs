@@ -57,8 +57,9 @@ impl SandboxBackend for IntegrationSandboxBackend {
         } else {
             cfg!(feature = "sandboxed-shell") && request.requested_shell
         };
-        let browser_available =
-            request.sandbox_tier.supports_browser() && sidecar_requested && request.requested_browser;
+        let browser_available = request.sandbox_tier.supports_browser()
+            && sidecar_requested
+            && request.requested_browser;
 
         Ok(SandboxLaunch {
             launch: RunnerLaunchHandle {

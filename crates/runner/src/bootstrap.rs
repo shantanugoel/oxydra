@@ -1539,9 +1539,9 @@ remote_url = "libsql://example-org.turso.io"
                 .expect("system prompt should be generated");
         assert!(prompt.contains("Your workspace contains two directories"));
         assert!(prompt.contains("sandboxed interpreter"));
-        assert!(prompt.contains("Outbound network access is disabled"));
+        assert!(prompt.contains("outbound network access is disabled"));
         assert!(prompt.contains("cargo, git, python, node, npm, and pip"));
-        assert!(prompt.contains("browser tools are disabled"));
+        assert!(prompt.contains("Browser tools are disabled"));
         assert!(!prompt.contains("/vault"));
         let _ = fs::remove_dir_all(root);
     }

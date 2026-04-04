@@ -910,10 +910,36 @@ fn build_system_prompt(
     skills_note: &str,
 ) -> Option<String> {
     let sandbox_tier = bootstrap.map_or(types::SandboxTier::Process, |b| b.sandbox_tier);
+    let process_shell_available = bootstrap
+        .and_then(|value| value.startup_status.as_ref())
+        .map(|status| status.shell_available)
+        .unwrap_or(false);
     let shell_note = if sandbox_tier == types::SandboxTier::Process {
-        "\n\nNote: Shell and browser tools are disabled in the current environment."
+        if process_shell_available {
+            "\n\nNote: Shell commands execute in a sandboxed interpreter with built-in text/file utilities only. Outbound network access is disabled, system commands such as cargo, git, python, node, npm, and pip are unavailable, and browser tools are disabled in the current environment."
+        } else {
+            "\n\nNote: Shell and browser tools are disabled in the current environment."
+        }
     } else {
         ""
+    };
+    let file_system_note = if sandbox_tier == types::SandboxTier::Process {
+        "Your workspace contains two directories:\n\
+         - `/shared` — persistent working directory for reading and writing files\n\
+         - `/tmp` — temporary scratch space (may be cleared between sessions)\n\n\
+         When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
+         always use paths relative to or starting with `/shared` or `/tmp`. \
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`. \
+         If the current user turn includes attachments, use `attachment_save(index, path)` to persist them into `/shared` or `/tmp` before further processing."
+    } else {
+        "Your workspace contains three directories:\n\
+         - `/shared` — persistent working directory for reading and writing files\n\
+         - `/tmp` — temporary scratch space (may be cleared between sessions)\n\
+         - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
+         When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
+         always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
+         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`. \
+         If the current user turn includes attachments, use `attachment_save(index, path)` to persist them into `/shared` or `/tmp` before further processing."
     };
 
     let scheduler_note = if scheduler_enabled {
@@ -1056,14 +1082,7 @@ fn build_system_prompt(
          exception, not the norm.\n\n\
          You operate in a sandboxed workspace.\n\n\
          ## File System\n\n\
-         Your workspace contains three directories:\n\
-         - `/shared` — persistent working directory for reading and writing files\n\
-         - `/tmp` — temporary scratch space (may be cleared between sessions)\n\
-         - `/vault` — read-only directory for sensitive/reference files; use `vault_copyto` to copy files from vault into `/shared` or `/tmp` before reading them\n\n\
-         When using file tools (`file_read`, `file_write`, `file_edit`, `file_list`, `file_search`, `file_delete`), \
-         always use paths relative to or starting with `/shared`, `/tmp`, or `/vault`. \
-         For example: `file_list` with path `/shared` to list files, or `file_write` with path `/shared/notes.txt`. \
-         If the current user turn includes attachments, use `attachment_save(index, path)` to persist them into `/shared` or `/tmp` before further processing.{shell_note}{scheduler_note}{memory_note}{skills_note}{specialists_note}"
+         {file_system_note}{shell_note}{scheduler_note}{memory_note}{skills_note}{specialists_note}"
     );
 
     // Look for a SYSTEM.md override/append file in the config search paths.
@@ -1139,11 +1158,9 @@ fn file_uses_profiles(path: &Path, selected_profile: &str) -> bool {
 mod tests {
     use std::{
         fs,
-        sync::{Mutex, OnceLock},
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use tokio::sync::Mutex as AsyncMutex;
     use types::{
         AgentDefinition, ModelId, ProviderId, ProviderSelection, RunnerBootstrapEnvelope,
         SandboxTier, SidecarEndpoint, SidecarTransport, StartupDegradedReasonCode,
@@ -1151,14 +1168,12 @@ mod tests {
 
     use super::*;
 
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn test_lock() -> &'static tokio::sync::Mutex<()> {
+        crate::test_env_lock()
     }
 
-    fn async_test_lock() -> &'static AsyncMutex<()> {
-        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| AsyncMutex::new(()))
+    fn async_test_lock() -> &'static tokio::sync::Mutex<()> {
+        crate::test_env_lock()
     }
 
     #[derive(Debug)]
@@ -1197,9 +1212,7 @@ mod tests {
 
     #[test]
     fn load_agent_config_honors_file_env_and_cli_precedence() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("precedence");
         let paths = test_paths(&root);
         write_config(
@@ -1277,9 +1290,7 @@ base_url = "https://workspace-openai.example"
 
     #[test]
     fn load_agent_config_applies_profile_overrides() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("profile");
         let paths = test_paths(&root);
         write_config(
@@ -1307,9 +1318,7 @@ max_turns = 11
 
     #[test]
     fn load_agent_config_maps_nested_env_keys() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("env-nesting");
         let paths = test_paths(&root);
 
@@ -1342,9 +1351,7 @@ max_turns = 11
 
     #[test]
     fn load_agent_config_rejects_unsupported_config_version() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("version");
         let paths = test_paths(&root);
         write_config(
@@ -1370,9 +1377,7 @@ model = "gpt-4o-mini"
 
     #[test]
     fn load_agent_config_rejects_remote_memory_without_auth_token() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("memory-remote-auth");
         let paths = test_paths(&root);
         write_config(
@@ -1505,6 +1510,39 @@ remote_url = "libsql://example-org.turso.io"
         // Agent identity framing should still be present
         assert!(prompt.contains("autonomous AI agent"));
         assert!(prompt.contains("NOT a chatbot"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_system_prompt_describes_sandboxed_process_shell_when_available() {
+        let root = temp_dir("system-prompt-process-sandboxed-shell");
+        let paths = test_paths(&root);
+        let workspace_root = root.join("workspace");
+        let bootstrap = RunnerBootstrapEnvelope {
+            user_id: "alice".to_owned(),
+            sandbox_tier: SandboxTier::Process,
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+            sidecar_endpoint: None,
+            runtime_policy: None,
+            startup_status: Some(StartupStatusReport {
+                sandbox_tier: SandboxTier::Process,
+                sidecar_available: false,
+                shell_available: true,
+                browser_available: false,
+                degraded_reasons: Vec::new(),
+            }),
+            channels: None,
+            browser_config: None,
+        };
+        let prompt =
+            build_system_prompt(&paths, Some(&bootstrap), false, false, &BTreeMap::new(), "")
+                .expect("system prompt should be generated");
+        assert!(prompt.contains("Your workspace contains two directories"));
+        assert!(prompt.contains("sandboxed interpreter"));
+        assert!(prompt.contains("Outbound network access is disabled"));
+        assert!(prompt.contains("cargo, git, python, node, npm, and pip"));
+        assert!(prompt.contains("browser tools are disabled"));
+        assert!(!prompt.contains("/vault"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1780,18 +1818,19 @@ remote_url = "libsql://example-org.turso.io"
     }
 
     #[tokio::test]
-    async fn bootstrap_vm_runtime_with_process_tier_frame_disables_sidecar_tools() {
+    async fn bootstrap_vm_runtime_with_process_tier_frame_bootstraps_the_sandboxed_shell() {
         let _lock = async_test_lock().lock().await;
         let _openai_key = EnvGuard::set("OPENAI_API_KEY", "test-openai-key");
         let _provider = EnvGuard::set("OXYDRA__SELECTION__PROVIDER", "openai");
         let _model = EnvGuard::set("OXYDRA__SELECTION__MODEL", "gpt-4o-mini");
         let root = temp_dir("bootstrap-process-tier");
         let paths = test_paths(&root);
+        let workspace_root = root.join("workspace");
         write_bootstrap_config(&paths);
         let frame = RunnerBootstrapEnvelope {
             user_id: "alice".to_owned(),
             sandbox_tier: SandboxTier::Process,
-            workspace_root: "/tmp/oxydra-alice".to_owned(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
             sidecar_endpoint: None,
             runtime_policy: None,
             startup_status: None,
@@ -1813,25 +1852,50 @@ remote_url = "libsql://example-org.turso.io"
                 .map(|envelope| envelope.sandbox_tier),
             Some(SandboxTier::Process)
         );
-        assert!(!bootstrap.tool_availability.shell.is_ready());
+        assert_eq!(
+            bootstrap.tool_availability.shell.is_ready(),
+            cfg!(feature = "sandboxed-shell")
+        );
         assert!(!bootstrap.tool_availability.browser.is_ready());
         assert_eq!(bootstrap.startup_status.sandbox_tier, SandboxTier::Process);
+        assert_eq!(
+            bootstrap.startup_status.shell_available,
+            cfg!(feature = "sandboxed-shell")
+        );
         assert!(!bootstrap.startup_status.sidecar_available);
         assert!(
             bootstrap
                 .startup_status
                 .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
         );
-        let error = bootstrap
-            .tool_registry
-            .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
-            .await
-            .expect_err("process-tier bootstrap should disable sidecar-dependent shell tool");
-        assert!(matches!(
-            error,
-            types::ToolError::ExecutionFailed { tool, message }
-                if tool == "shell_exec" && message.contains("disabled")
-        ));
+        assert_eq!(
+            bootstrap
+                .startup_status
+                .has_reason_code(StartupDegradedReasonCode::SandboxedShellLimited),
+            cfg!(feature = "sandboxed-shell")
+        );
+        if cfg!(feature = "sandboxed-shell") {
+            let output = bootstrap
+                .tool_registry
+                .execute(
+                    "shell_exec",
+                    r#"{"command":"printf sandboxed-process-shell"}"#,
+                )
+                .await
+                .expect("process-tier bootstrap should expose the sandboxed shell");
+            assert_eq!(output, "sandboxed-process-shell");
+        } else {
+            let error = bootstrap
+                .tool_registry
+                .execute("shell_exec", r#"{"command":"printf should-not-run"}"#)
+                .await
+                .expect_err("process-tier bootstrap should disable shell when the feature is off");
+            assert!(matches!(
+                error,
+                types::ToolError::ExecutionFailed { tool, message }
+                    if tool == "shell_exec" && message.contains("disabled")
+            ));
+        }
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2181,9 +2245,7 @@ model = "definitely-not-a-real-model"
     /// build a provider from it.
     #[test]
     fn full_bootstrap_with_registry_config() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("registry-config");
         let paths = test_paths(&root);
 
@@ -2234,9 +2296,7 @@ catalog_provider = "openai"
 
     #[test]
     fn apply_web_search_config_sets_provider_and_base_url_env_vars() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let _clear_provider = EnvGuard::remove("OXYDRA_WEB_SEARCH_PROVIDER");
         let _clear_base_url = EnvGuard::remove("OXYDRA_WEB_SEARCH_GOOGLE_BASE_URL");
         let _clear_query_params = EnvGuard::remove("OXYDRA_WEB_SEARCH_QUERY_PARAMS");
@@ -2267,9 +2327,7 @@ catalog_provider = "openai"
 
     #[test]
     fn apply_web_search_config_does_not_override_existing_env_vars() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let _existing_provider = EnvGuard::set("OXYDRA_WEB_SEARCH_PROVIDER", "duckduckgo-explicit");
 
         let config = WebSearchConfig {
@@ -2287,9 +2345,7 @@ catalog_provider = "openai"
 
     #[test]
     fn apply_web_search_config_resolves_google_api_key_via_indirection() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let _clear_provider = EnvGuard::remove("OXYDRA_WEB_SEARCH_PROVIDER");
         let _clear_api_key = EnvGuard::remove("OXYDRA_WEB_SEARCH_GOOGLE_API_KEY");
         let _clear_cx = EnvGuard::remove("OXYDRA_WEB_SEARCH_GOOGLE_CX");
@@ -2316,9 +2372,7 @@ catalog_provider = "openai"
 
     #[test]
     fn apply_web_search_config_sets_searxng_specific_fields() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let _clear_provider = EnvGuard::remove("OXYDRA_WEB_SEARCH_PROVIDER");
         let _clear_base_url = EnvGuard::remove("OXYDRA_WEB_SEARCH_SEARXNG_BASE_URL");
         let _clear_engines = EnvGuard::remove("OXYDRA_WEB_SEARCH_SEARXNG_ENGINES");
@@ -2367,9 +2421,7 @@ catalog_provider = "openai"
 
     #[test]
     fn load_agent_config_parses_tools_web_search_section() {
-        let _lock = test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _lock = test_lock().blocking_lock();
         let root = temp_dir("tools-web-search");
         let paths = test_paths(&root);
         write_config(

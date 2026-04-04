@@ -256,6 +256,139 @@ async fn bootstrap_runtime_tools_without_bootstrap_disables_shell() {
     assert!(startup_status.has_reason_code(StartupDegradedReasonCode::InsecureProcessTier));
 }
 
+#[cfg(feature = "sandboxed-shell")]
+#[tokio::test]
+async fn bootstrap_runtime_tools_process_tier_uses_sandboxed_shell() {
+    let workspace_root = temp_workspace_root("sandboxed-shell");
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: Some(StartupStatusReport {
+            sandbox_tier: SandboxTier::Process,
+            sidecar_available: false,
+            shell_available: true,
+            browser_available: false,
+            degraded_reasons: Vec::new(),
+        }),
+        channels: None,
+        browser_config: None,
+    };
+    let shell_config = ShellConfig {
+        command_timeout_secs: Some(10),
+        ..ShellConfig::default()
+    };
+    let RuntimeToolsBootstrap {
+        registry,
+        availability,
+    } = bootstrap_runtime_tools(Some(&bootstrap), Some(&shell_config), None).await;
+
+    assert!(availability.shell.is_ready());
+    assert!(!availability.browser.is_ready());
+    assert!(registry.get(BROWSER_TOOL_NAME).is_none());
+    let shell_schema = registry
+        .get(SHELL_EXEC_TOOL_NAME)
+        .expect("shell tool should be registered")
+        .schema();
+    assert!(
+        shell_schema
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sandboxed interpreter")
+    );
+
+    let output = registry
+        .execute(
+            SHELL_EXEC_TOOL_NAME,
+            &json!({ "command": "echo sandboxed > /shared/hello.txt && cat /shared/hello.txt" })
+                .to_string(),
+        )
+        .await
+        .expect("sandboxed shell should read and write /shared");
+    assert_eq!(output, "sandboxed");
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("shared").join("hello.txt"))
+            .expect("shared file should be written through the mount"),
+        "sandboxed\n"
+    );
+
+    let startup_status = availability.startup_status(Some(&bootstrap));
+    assert!(!startup_status.sidecar_available);
+    assert!(startup_status.has_reason_code(StartupDegradedReasonCode::InsecureProcessTier));
+    assert!(startup_status.has_reason_code(StartupDegradedReasonCode::SandboxedShellLimited));
+
+    let _ = fs::remove_dir_all(workspace_root);
+}
+
+#[cfg(feature = "sandboxed-shell")]
+#[tokio::test]
+async fn sandboxed_shell_reports_unknown_commands_and_hides_unmounted_paths() {
+    let workspace_root = temp_workspace_root("sandboxed-shell-errors");
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: Some(StartupStatusReport {
+            sandbox_tier: SandboxTier::Process,
+            sidecar_available: false,
+            shell_available: true,
+            browser_available: false,
+            degraded_reasons: Vec::new(),
+        }),
+        channels: None,
+        browser_config: None,
+    };
+    let shell_config = ShellConfig::default();
+    let RuntimeToolsBootstrap { registry, .. } =
+        bootstrap_runtime_tools(Some(&bootstrap), Some(&shell_config), None).await;
+
+    let unknown = registry
+        .execute(
+            SHELL_EXEC_TOOL_NAME,
+            &json!({ "command": "cargo build" }).to_string(),
+        )
+        .await
+        .expect_err("system-installed commands should not exist in sandboxed shell");
+    assert!(matches!(
+        unknown,
+        ToolError::ExecutionFailed { tool, message }
+            if tool == SHELL_EXEC_TOOL_NAME && message.contains("command not found")
+    ));
+
+    for (command, expectation) in [
+        ("cat /vault/secret.txt", "vault path should not be mounted"),
+        ("cat /etc/passwd", "host paths outside mounts should fail"),
+        (
+            "cat /../../../etc/passwd",
+            "path traversal should not escape the virtual filesystem",
+        ),
+        (
+            "cat /.oxydra/db.sqlite3",
+            "internal oxydra directory should not be mounted",
+        ),
+    ] {
+        let hidden = registry
+            .execute(
+                SHELL_EXEC_TOOL_NAME,
+                &json!({ "command": command }).to_string(),
+            )
+            .await
+            .expect_err(expectation);
+        assert!(matches!(
+            hidden,
+            ToolError::ExecutionFailed { tool, message }
+                if tool == SHELL_EXEC_TOOL_NAME && message.contains("No such file or directory")
+        ));
+    }
+
+    let _ = fs::remove_dir_all(workspace_root);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn bootstrap_runtime_tools_runs_bash_via_sidecar_session() {

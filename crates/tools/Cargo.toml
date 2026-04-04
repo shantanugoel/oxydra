@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["wasm-isolation"]
 wasm-isolation = ["dep:wasmtime", "dep:wasmtime-wasi"]
+sandboxed-shell = ["dep:rust-bash"]
 
 [dependencies]
 async-trait = "0.1"
@@ -26,6 +27,7 @@ types = { path = "../types" }
 uuid = { version = "1", features = ["v4"] }
 wasmtime = { version = "42", optional = true }
 wasmtime-wasi = { version = "42", optional = true }
+rust-bash = { workspace = true, optional = true }
 
 [dev-dependencies]
 memory = { path = "../memory" }

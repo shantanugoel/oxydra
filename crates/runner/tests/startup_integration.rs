@@ -24,7 +24,8 @@ impl SandboxBackend for IntegrationSandboxBackend {
             RunnerGuestRole::OxydraVm,
             RunnerCommandSpec::new("integration-oxydra-vm", Vec::new()),
         );
-        let sidecar_requested = request.requested_shell || request.requested_browser;
+        let sidecar_requested = request.sandbox_tier.supports_sidecar()
+            && (request.requested_shell || request.requested_browser);
         let sidecar = sidecar_requested.then(|| {
             RunnerGuestHandle::simulated(
                 RunnerGuestRole::ShellVm,
@@ -44,13 +45,20 @@ impl SandboxBackend for IntegrationSandboxBackend {
 
         let mut warnings = Vec::new();
         let mut degraded_reasons = Vec::new();
-        if request.sandbox_tier == SandboxTier::Process {
+        if !request.sandbox_tier.supports_sidecar() {
             warnings.push(PROCESS_TIER_WARNING.to_owned());
             degraded_reasons.push(StartupDegradedReason::new(
                 StartupDegradedReasonCode::InsecureProcessTier,
                 PROCESS_TIER_WARNING,
             ));
         }
+        let shell_available = if request.sandbox_tier.supports_sidecar() {
+            sidecar_requested && request.requested_shell
+        } else {
+            cfg!(feature = "sandboxed-shell") && request.requested_shell
+        };
+        let browser_available =
+            request.sandbox_tier.supports_browser() && sidecar_requested && request.requested_browser;
 
         Ok(SandboxLaunch {
             launch: RunnerLaunchHandle {
@@ -60,8 +68,8 @@ impl SandboxBackend for IntegrationSandboxBackend {
                 scope: Some(RunnerScopeHandle::Simulated),
             },
             sidecar_endpoint,
-            shell_available: sidecar_requested && request.requested_shell,
-            browser_available: sidecar_requested && request.requested_browser,
+            shell_available,
+            browser_available,
             degraded_reasons,
             warnings,
         })
@@ -117,13 +125,19 @@ fn runner_process_mode_reports_explicit_degraded_warning() {
         .expect("startup should succeed");
 
     assert_eq!(startup.sandbox_tier, SandboxTier::Process);
-    assert!(!startup.shell_available);
+    assert_eq!(startup.shell_available, cfg!(feature = "sandboxed-shell"));
     assert!(!startup.browser_available);
     assert!(!startup.startup_status.sidecar_available);
     assert!(
         startup
             .startup_status
             .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
+    );
+    assert_eq!(
+        startup
+            .startup_status
+            .has_reason_code(StartupDegradedReasonCode::SandboxedShellLimited),
+        cfg!(feature = "sandboxed-shell")
     );
     assert_eq!(startup.warnings, vec![PROCESS_TIER_WARNING.to_owned()]);
 

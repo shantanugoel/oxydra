@@ -426,7 +426,7 @@ impl CrateSandboxBackend {
                 scope: None,
             },
             sidecar_endpoint: None,
-            shell_available: false,
+            shell_available: cfg!(feature = "sandboxed-shell") && request.requested_shell,
             browser_available: false,
             degraded_reasons,
             warnings,

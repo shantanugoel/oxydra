@@ -3,7 +3,7 @@ use std::{
     env, fs,
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::Mutex,
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -23,9 +23,8 @@ use super::*;
 #[cfg(unix)]
 const BOOTSTRAP_CAPTURE_ENV_KEY: &str = "OXYDRA_RUNNER_BOOTSTRAP_CAPTURE";
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    super::test_env_lock()
 }
 
 #[derive(Debug)]
@@ -126,13 +125,20 @@ impl SandboxBackend for MockSandboxBackend {
 
         let mut warnings = Vec::new();
         let mut degraded_reasons = Vec::new();
-        if request.sandbox_tier == SandboxTier::Process {
+        if !request.sandbox_tier.supports_sidecar() {
             warnings.push(PROCESS_TIER_WARNING.to_owned());
             degraded_reasons.push(StartupDegradedReason::new(
                 StartupDegradedReasonCode::InsecureProcessTier,
                 PROCESS_TIER_WARNING,
             ));
         }
+        let shell_available = if request.sandbox_tier.supports_sidecar() {
+            sidecar_requested && request.requested_shell
+        } else {
+            cfg!(feature = "sandboxed-shell") && request.requested_shell
+        };
+        let browser_available =
+            request.sandbox_tier.supports_browser() && sidecar_requested && request.requested_browser;
 
         Ok(SandboxLaunch {
             launch: RunnerLaunchHandle {
@@ -142,8 +148,8 @@ impl SandboxBackend for MockSandboxBackend {
                 scope: Some(RunnerScopeHandle::Simulated),
             },
             sidecar_endpoint,
-            shell_available: sidecar_requested && request.requested_shell,
-            browser_available: sidecar_requested && request.requested_browser,
+            shell_available,
+            browser_available,
             degraded_reasons,
             warnings,
         })
@@ -408,7 +414,7 @@ fn startup_uses_macos_microvm_backend_with_unix_sidecar() {
 }
 
 #[test]
-fn startup_insecure_process_mode_disables_shell_and_browser() {
+fn startup_insecure_process_mode_exposes_only_the_sandboxed_shell() {
     let root = temp_dir("process-mode");
     let global_path = write_runner_config_fixture(&root, "micro_vm");
     write_user_config(&root.join("users/alice.toml"), "");
@@ -430,21 +436,43 @@ fn startup_insecure_process_mode_disables_shell_and_browser() {
     assert_eq!(startup.sandbox_tier, SandboxTier::Process);
     assert_eq!(startup.launch.tier, SandboxTier::Process);
     assert!(startup.launch.sidecar.is_none());
-    assert!(!startup.shell_available);
+    assert_eq!(startup.shell_available, cfg!(feature = "sandboxed-shell"));
     assert!(!startup.browser_available);
+    assert_eq!(
+        startup.startup_status.shell_available,
+        cfg!(feature = "sandboxed-shell")
+    );
+    assert!(!startup.startup_status.browser_available);
     assert!(!startup.startup_status.sidecar_available);
     assert!(
         startup
             .startup_status
             .has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
     );
+    assert_eq!(
+        startup
+            .startup_status
+            .has_reason_code(StartupDegradedReasonCode::SandboxedShellLimited),
+        cfg!(feature = "sandboxed-shell")
+    );
     assert!(startup.bootstrap.sidecar_endpoint.is_none());
+    assert_eq!(
+        startup
+            .bootstrap
+            .startup_status
+            .as_ref()
+            .map(|status| status.shell_available),
+        Some(cfg!(feature = "sandboxed-shell"))
+    );
     assert_eq!(startup.warnings, vec![PROCESS_TIER_WARNING.to_owned()]);
 
     let launches = backend.recorded_launches();
     assert_eq!(launches.len(), 1);
     assert_eq!(launches[0].sandbox_tier, SandboxTier::Process);
-    assert!(!launches[0].requested_shell);
+    assert_eq!(
+        launches[0].requested_shell,
+        cfg!(feature = "sandboxed-shell")
+    );
     assert!(!launches[0].requested_browser);
 
     let _ = fs::remove_dir_all(root);
@@ -453,7 +481,7 @@ fn startup_insecure_process_mode_disables_shell_and_browser() {
 #[cfg(unix)]
 #[test]
 fn process_startup_sends_bootstrap_frame_to_runtime_stdin() {
-    let _env_lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let _env_lock = env_lock().blocking_lock();
     let root = temp_dir("process-bootstrap-stdin");
     let global_path = write_runner_config_fixture(&root, "micro_vm");
     write_user_config(&root.join("users/alice.toml"), "");
@@ -726,6 +754,82 @@ slack = "vault://slack/token"
     );
     assert_eq!(runtime_policy.resources, launch.resource_limits);
     assert_eq!(runtime_policy.credential_refs, launch.credential_refs);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn control_health_check_keeps_process_sidecar_unavailable_with_sandboxed_shell() {
+    let root = temp_dir("process-health-sidecar-status");
+    let workspace = UserWorkspace {
+        root: root.clone(),
+        shared: root.join("shared"),
+        tmp: root.join("tmp"),
+        vault: root.join("vault"),
+        logs: root.join("logs"),
+        ipc: root.join("ipc"),
+        internal: root.join(".oxydra"),
+    };
+    let startup_status = StartupStatusReport {
+        sandbox_tier: SandboxTier::Process,
+        sidecar_available: false,
+        shell_available: true,
+        browser_available: false,
+        degraded_reasons: vec![
+            StartupDegradedReason::new(
+                StartupDegradedReasonCode::InsecureProcessTier,
+                PROCESS_TIER_WARNING,
+            ),
+            StartupDegradedReason::new(
+                StartupDegradedReasonCode::SandboxedShellLimited,
+                "shell is available via a sandboxed interpreter with built-in text/file utilities only; outbound network access is disabled and system commands like cargo, git, python, node, npm, and pip are unavailable. Use Container or MicroVm tier for full shell access.",
+            ),
+        ],
+    };
+    let bootstrap = RunnerBootstrapEnvelope {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: workspace.root.to_string_lossy().into_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: Some(startup_status.clone()),
+        channels: None,
+        browser_config: None,
+    };
+    let launch = RunnerLaunchHandle {
+        tier: SandboxTier::Process,
+        runtime: RunnerGuestHandle::simulated(
+            RunnerGuestRole::OxydraVm,
+            RunnerCommandSpec::new("mock-oxydra-vm", Vec::new()),
+        ),
+        sidecar: None,
+        scope: Some(RunnerScopeHandle::Simulated),
+    };
+    let mut startup = RunnerStartup {
+        user_id: "alice".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace,
+        shell_available: true,
+        browser_available: false,
+        startup_status,
+        launch,
+        bootstrap,
+        warnings: Vec::new(),
+        shutdown_complete: false,
+    };
+
+    let response = startup.handle_control(RunnerControl::HealthCheck);
+    assert!(matches!(
+        response,
+        RunnerControlResponse::HealthStatus(status)
+            if status.healthy
+                && status.shell_available
+                && !status.browser_available
+                && !status.startup_status.sidecar_available
+                && status
+                    .startup_status
+                    .has_reason_code(StartupDegradedReasonCode::SandboxedShellLimited)
+    ));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1533,7 +1637,7 @@ fn microvm_tier_launch_request_includes_bootstrap_file() {
 
 #[test]
 fn copy_agent_config_to_workspace_materializes_merged_config() {
-    let _env_lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let _env_lock = env_lock().blocking_lock();
     let _selection_provider = EnvVarGuard::remove("OXYDRA__SELECTION__PROVIDER");
     let _selection_model = EnvVarGuard::remove("OXYDRA__SELECTION__MODEL");
 
@@ -1613,7 +1717,7 @@ api_key = "test-gemini-key"
 
 #[test]
 fn startup_uses_runner_config_directory_for_host_agent_config_resolution() {
-    let _env_lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let _env_lock = env_lock().blocking_lock();
     let _gemini_key = EnvVarGuard::set("GEMINI_API_KEY", "gemini-test-key");
     let _openai_key = EnvVarGuard::set("OPENAI_API_KEY", "openai-test-key");
 

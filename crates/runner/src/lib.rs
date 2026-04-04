@@ -63,7 +63,14 @@ pub use bootstrap::{
 #[cfg(test)]
 mod tests;
 
-pub const PROCESS_TIER_WARNING: &str = "Process tier is insecure: isolation is degraded and not production-safe; shell/browser tools are disabled.";
+#[cfg(test)]
+fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+pub const PROCESS_TIER_WARNING: &str = "Process tier is insecure: isolation is degraded and not production-safe. When enabled, shell access runs in a sandboxed interpreter with built-in commands only; browser tools are disabled.";
+const SANDBOXED_SHELL_LIMITED_DETAIL: &str = "shell is available via a sandboxed interpreter with built-in text/file utilities only; outbound network access is disabled and system commands like cargo, git, python, node, npm, and pip are unavailable. Use Container or MicroVm tier for full shell access.";
 
 const SHARED_DIR_NAME: &str = "shared";
 const TMP_DIR_NAME: &str = "tmp";
@@ -159,7 +166,9 @@ impl Runner {
         // Pre-compute the sidecar endpoint so we can build the bootstrap envelope
         // before launching the backend. Container/MicroVM tiers need the bootstrap
         // file on disk before the guest process starts.
-        let pre_sidecar_endpoint = if capabilities.shell || capabilities.browser {
+        let pre_sidecar_endpoint = if (capabilities.shell || capabilities.browser)
+            && sandbox_tier.supports_sidecar()
+        {
             Some(pre_compute_sidecar_endpoint(
                 sandbox_tier,
                 host_os,
@@ -168,15 +177,18 @@ impl Runner {
         } else {
             None
         };
+        let pre_shell_available = if sandbox_tier.supports_sidecar() {
+            capabilities.shell && pre_sidecar_endpoint.is_some()
+        } else {
+            capabilities.shell
+        };
+        let pre_browser_available = capabilities.browser && pre_sidecar_endpoint.is_some();
 
         let pre_startup_status = build_startup_status_report(
             sandbox_tier,
             capabilities,
-            // Optimistically assume sidecar will launch for the bootstrap envelope.
-            // If it fails, the guest reads a slightly stale `sidecar_available` but
-            // the control plane will report the real value at health-check time.
-            capabilities.shell && pre_sidecar_endpoint.is_some(),
-            capabilities.browser && pre_sidecar_endpoint.is_some(),
+            pre_shell_available,
+            pre_browser_available,
             pre_sidecar_endpoint.is_some(),
             &[], // degraded reasons are unknown before launch
         );
@@ -200,7 +212,7 @@ impl Runner {
         // guest container can discover it. Also collect env vars referenced by
         // the config (api_key_env, etc.) to forward into the oxydra-vm container.
         // Shell-vm gets a separate set of env vars to avoid leaking API keys.
-        let (mut extra_env, mut shell_env) = if sandbox_tier != SandboxTier::Process {
+        let (mut extra_env, mut shell_env) = if sandbox_tier.supports_sidecar() {
             copy_agent_config_to_workspace_with_paths(&workspace, &host_config_paths)?;
             let mut config_env = collect_config_env_vars_with_paths(&host_config_paths);
             // Also forward bot token env vars from channel config.
@@ -228,7 +240,7 @@ impl Runner {
 
         // ── Browser provisioning (Pinchtab) ──────────────────────────────
         let mut bootstrap = bootstrap;
-        if capabilities.browser && sandbox_tier != SandboxTier::Process {
+        if capabilities.browser && sandbox_tier.supports_browser() {
             match find_available_port() {
                 Some(port) => {
                     let bridge_token = generate_bridge_token();
@@ -272,7 +284,7 @@ impl Runner {
 
         // For non-Process tiers, write the bootstrap to disk (must happen
         // after browser_config is populated).
-        let bootstrap_file = if sandbox_tier != SandboxTier::Process {
+        let bootstrap_file = if sandbox_tier.supports_sidecar() {
             Some(write_bootstrap_file(&workspace, &bootstrap)?)
         } else {
             None
@@ -325,7 +337,7 @@ impl Runner {
         );
 
         // For Process tier, send bootstrap via stdin (existing behavior).
-        if sandbox_tier == SandboxTier::Process {
+        if !sandbox_tier.supports_sidecar() {
             launch.launch.runtime.send_startup_bootstrap(&bootstrap)?;
         }
 
@@ -1338,7 +1350,8 @@ impl RunnerStartup {
         let mut status = self.startup_status.clone();
         status.shell_available = self.shell_available;
         status.browser_available = self.browser_available;
-        status.sidecar_available = status.shell_available || status.browser_available;
+        status.sidecar_available = self.sandbox_tier.supports_sidecar()
+            && (status.shell_available || status.browser_available);
         if self.shutdown_complete {
             status.push_reason(
                 StartupDegradedReasonCode::RuntimeShutdown,
@@ -1426,7 +1439,8 @@ pub struct SandboxLaunchRequest {
 
 impl SandboxLaunchRequest {
     fn sidecar_requested(&self) -> bool {
-        self.requested_shell || self.requested_browser
+        self.sandbox_tier.supports_sidecar()
+            && (self.requested_shell || self.requested_browser)
     }
 }
 
@@ -1650,7 +1664,7 @@ fn build_startup_status_report(
         degraded_reasons: degraded_reasons.to_vec(),
     };
 
-    if sandbox_tier == SandboxTier::Process
+    if !sandbox_tier.supports_sidecar()
         && !startup_status.has_reason_code(StartupDegradedReasonCode::InsecureProcessTier)
     {
         startup_status.push_reason(
@@ -1658,8 +1672,17 @@ fn build_startup_status_report(
             PROCESS_TIER_WARNING,
         );
     }
+    if !sandbox_tier.supports_sidecar() && shell_available {
+        startup_status.push_reason(
+            StartupDegradedReasonCode::SandboxedShellLimited,
+            SANDBOXED_SHELL_LIMITED_DETAIL,
+        );
+    }
 
-    if (capabilities.shell || capabilities.browser) && !sidecar_available {
+    if sandbox_tier.supports_sidecar()
+        && (capabilities.shell || capabilities.browser)
+        && !sidecar_available
+    {
         startup_status.push_reason(
             StartupDegradedReasonCode::SidecarUnavailable,
             "shell/browser capabilities were requested but no sidecar endpoint is available",
@@ -1674,9 +1697,11 @@ fn resolve_requested_capabilities(
     agent_tools: &types::ToolsConfig,
     user_behavior: &types::RunnerBehaviorOverrides,
 ) -> RequestedCapabilities {
-    let mut shell = !matches!(sandbox_tier, SandboxTier::Process) && agent_tools.shell_enabled();
-    let mut browser =
-        !matches!(sandbox_tier, SandboxTier::Process) && agent_tools.browser_enabled();
+    let mut shell = match sandbox_tier {
+        SandboxTier::Process => cfg!(feature = "sandboxed-shell") && agent_tools.shell_enabled(),
+        _ => agent_tools.shell_enabled(),
+    };
+    let mut browser = sandbox_tier.supports_browser() && agent_tools.browser_enabled();
 
     if let Some(enabled) = user_behavior.shell_enabled {
         shell &= enabled;

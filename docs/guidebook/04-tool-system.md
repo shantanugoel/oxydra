@@ -127,11 +127,12 @@ Most tools (except `BashTool`) execute through the `WasmToolRunner` backend (`Wa
 
 ### BashTool Backends
 
-The `BashTool` operates in three modes determined by the bootstrap environment:
+The `BashTool` operates in four modes determined by the bootstrap environment:
 
 1. **Host** — direct execution via `std::process::Command` (local development)
-2. **Session** — forwarded to a `ShellSession` in the oxydra-shelld sidecar (production)
-3. **Disabled** — rejects all execution if no safe execution environment is available
+2. **Session** — forwarded to a `ShellSession` in the oxydra-shelld sidecar (Container/MicroVm tiers)
+3. **Sandboxed** — Process-tier execution via an in-process `rust-bash` interpreter mounted onto `/shared` and `/tmp`; only built-in text/file utilities are available, `/vault` is hidden, and outbound network access is disabled
+4. **Disabled** — rejects all execution if no safe execution environment is available
 
 ### Memory Tools
 

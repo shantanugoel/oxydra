@@ -206,6 +206,60 @@ fn bootstrap_envelope_rejects_invalid_length_prefix() {
 }
 
 #[test]
+fn bootstrap_envelope_accepts_process_tier_shell_without_sidecar() {
+    let envelope = RunnerBootstrapEnvelope {
+        user_id: "user-1".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: "/workspace/user-1".to_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: Some(StartupStatusReport {
+            sandbox_tier: SandboxTier::Process,
+            sidecar_available: false,
+            shell_available: true,
+            browser_available: false,
+            degraded_reasons: Vec::new(),
+        }),
+        channels: None,
+        browser_config: None,
+    };
+
+    let encoded = envelope
+        .to_length_prefixed_json()
+        .expect("process-tier shell availability without a sidecar should encode");
+    let decoded = RunnerBootstrapEnvelope::from_length_prefixed_json(&encoded)
+        .expect("process-tier shell availability without a sidecar should decode");
+    assert_eq!(decoded, envelope);
+}
+
+#[test]
+fn bootstrap_envelope_rejects_process_tier_browser_available() {
+    let envelope = RunnerBootstrapEnvelope {
+        user_id: "user-1".to_owned(),
+        sandbox_tier: SandboxTier::Process,
+        workspace_root: "/workspace/user-1".to_owned(),
+        sidecar_endpoint: None,
+        runtime_policy: None,
+        startup_status: Some(StartupStatusReport {
+            sandbox_tier: SandboxTier::Process,
+            sidecar_available: false,
+            shell_available: false,
+            browser_available: true,
+            degraded_reasons: Vec::new(),
+        }),
+        channels: None,
+        browser_config: None,
+    };
+
+    let result = envelope.to_length_prefixed_json();
+    assert!(matches!(
+        result,
+        Err(BootstrapEnvelopeError::InvalidField { field })
+            if field == "startup_status.browser_available"
+    ));
+}
+
+#[test]
 fn bootstrap_envelope_rejects_invalid_runtime_policy_mounts() {
     let envelope = RunnerBootstrapEnvelope {
         user_id: "user-1".to_owned(),

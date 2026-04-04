@@ -956,6 +956,7 @@ async fn run_session_executes_bash_via_bootstrap_sidecar_backend() {
 async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavailable() {
     let provider_id = ProviderId::from("openai");
     let model_id = ModelId::from("gpt-4o-mini");
+    let workspace_root = temp_workspace_root("runtime-sidecar-missing");
     let provider = FakeProvider::new(
         provider_id.clone(),
         test_catalog(provider_id.clone(), model_id.clone(), true),
@@ -981,8 +982,8 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
 
     let bootstrap = RunnerBootstrapEnvelope {
         user_id: "alice".to_owned(),
-        sandbox_tier: SandboxTier::Process,
-        workspace_root: "/tmp/oxydra-runtime-test".to_owned(),
+        sandbox_tier: SandboxTier::Container,
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
         sidecar_endpoint: None,
         runtime_policy: None,
         startup_status: None,
@@ -1011,12 +1012,12 @@ async fn run_session_emits_explicit_shell_disabled_error_when_sidecar_is_unavail
         .iter()
         .find(|message| message.role == MessageRole::Tool)
         .expect("tool result should be appended for disabled bash call");
-    assert!(
-        tool_result
-            .content
-            .as_deref()
-            .is_some_and(|content| content.contains("shell tool is disabled"))
-    );
+    assert!(tool_result.content.as_deref().is_some_and(|content| {
+        content.contains("shell tool is disabled")
+            && content.contains("did not provide a sidecar endpoint")
+    }));
+
+    let _ = std::fs::remove_dir_all(workspace_root);
 }
 
 #[tokio::test]

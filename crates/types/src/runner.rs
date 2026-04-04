@@ -22,6 +22,20 @@ pub enum SandboxTier {
     Process,
 }
 
+impl SandboxTier {
+    /// Whether this tier uses a sidecar process for shell/browser execution.
+    /// Process tier runs shell in-process via the sandboxed interpreter instead.
+    pub fn supports_sidecar(self) -> bool {
+        !matches!(self, Self::Process)
+    }
+
+    /// Whether this tier supports the browser tool.
+    /// Only tiers with sidecar support can run the browser.
+    pub fn supports_browser(self) -> bool {
+        self.supports_sidecar()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerGlobalConfig {
     #[serde(default = "default_runner_config_version")]
@@ -320,6 +334,7 @@ impl RunnerRuntimePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum StartupDegradedReasonCode {
     InsecureProcessTier,
+    SandboxedShellLimited,
     ProcessHardeningLimited,
     SidecarUnavailable,
     SidecarTransportUnsupported,
@@ -709,16 +724,26 @@ impl RunnerBootstrapEnvelope {
                     field: "startup_status.sandbox_tier",
                 });
             }
+            if self.sidecar_endpoint.is_none() && startup_status.sidecar_available {
+                return Err(BootstrapEnvelopeError::InvalidField {
+                    field: "startup_status.sidecar_available",
+                });
+            }
+            if !self.sandbox_tier.supports_browser() && startup_status.browser_available {
+                return Err(BootstrapEnvelopeError::InvalidField {
+                    field: "startup_status.browser_available",
+                });
+            }
             if self.sidecar_endpoint.is_none()
-                && (startup_status.sidecar_available
-                    || startup_status.shell_available
-                    || startup_status.browser_available)
+                && self.sandbox_tier.supports_sidecar()
+                && (startup_status.shell_available || startup_status.browser_available)
             {
                 return Err(BootstrapEnvelopeError::InvalidField {
                     field: "startup_status.sidecar_available",
                 });
             }
             if (startup_status.shell_available || startup_status.browser_available)
+                && self.sandbox_tier.supports_sidecar()
                 && !startup_status.sidecar_available
             {
                 return Err(BootstrapEnvelopeError::InvalidField {

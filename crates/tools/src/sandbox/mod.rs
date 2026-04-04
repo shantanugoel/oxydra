@@ -122,6 +122,7 @@ pub enum SessionConnection {
         address: String,
     },
     LocalProcess,
+    SandboxedShell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

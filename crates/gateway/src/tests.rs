@@ -1045,7 +1045,7 @@ async fn health_check_includes_startup_status_when_gateway_has_bootstrap_state()
         browser_available: false,
         degraded_reasons: vec![types::StartupDegradedReason::new(
             types::StartupDegradedReasonCode::InsecureProcessTier,
-            "process tier is insecure: isolation is degraded and not production-safe; shell/browser tools are disabled.",
+            "Process tier is insecure: isolation is degraded and not production-safe. When enabled, shell access runs in a sandboxed interpreter with built-in commands only; browser tools are disabled.",
         )],
     };
     let (address, server_task) = spawn_gateway_server_with_startup_status(

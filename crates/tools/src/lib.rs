@@ -10,6 +10,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(feature = "sandboxed-shell")]
+use rust_bash::{
+    ExecutionLimits, InMemoryFs, MountableFs, NetworkPolicy, ReadWriteFs, RustBash,
+    RustBashBuilder, RustBashError,
+};
+#[cfg(feature = "sandboxed-shell")]
+use sandbox::SessionConnection;
 #[cfg(feature = "wasm-isolation")]
 use sandbox::WasmWasiToolRunner;
 use sandbox::{
@@ -18,6 +25,8 @@ use sandbox::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+#[cfg(feature = "sandboxed-shell")]
+use std::fs;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -193,6 +202,8 @@ pub const DEFAULT_SHELL_COMMAND_TIMEOUT_SECS: u64 = 60;
 enum BashBackend {
     Host,
     Session(Arc<Mutex<Box<dyn ShellSession>>>),
+    #[cfg(feature = "sandboxed-shell")]
+    Sandboxed(Arc<std::sync::Mutex<RustBash>>),
     Disabled(SessionStatus),
 }
 
@@ -395,6 +406,14 @@ impl BashTool {
         }
     }
 
+    #[cfg(feature = "sandboxed-shell")]
+    pub fn from_sandboxed_shell(shell: RustBash) -> Self {
+        Self {
+            backend: BashBackend::Sandboxed(Arc::new(std::sync::Mutex::new(shell))),
+            command_timeout: Duration::from_secs(DEFAULT_SHELL_COMMAND_TIMEOUT_SECS),
+        }
+    }
+
     /// Returns a clone of the shared session handle, if the tool is backed by
     /// a sidecar session.  Used to share the session with other tools (e.g.
     /// the browser tool) that need to execute commands via the same sidecar.
@@ -416,6 +435,22 @@ impl BashTool {
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = timeout;
         self
+    }
+
+    fn is_sandboxed(&self) -> bool {
+        #[cfg(feature = "sandboxed-shell")]
+        if matches!(self.backend, BashBackend::Sandboxed(_)) {
+            return true;
+        }
+        false
+    }
+}
+
+fn shell_tool_description(sandboxed: bool) -> String {
+    if sandboxed {
+        "Execute bash commands in a sandboxed interpreter and return combined stdout and stderr. Supports built-in text/file utilities in /shared and /tmp. /vault, system-installed commands, and outbound network access are unavailable.".to_owned()
+    } else {
+        "Execute a shell command and return its output. Returns combined stdout and stderr. The working directory is the workspace root; files are in /shared, /tmp, and /vault.".to_owned()
     }
 }
 
@@ -841,7 +876,7 @@ impl Tool for BashTool {
     fn schema(&self) -> FunctionDecl {
         FunctionDecl::new(
             SHELL_EXEC_TOOL_NAME,
-            Some("Execute a shell command and return its output. Returns combined stdout and stderr. The working directory is the workspace root; files are in /shared, /tmp, and /vault.".to_owned()),
+            Some(shell_tool_description(self.is_sandboxed())),
             json!({
                 "type": "object",
                 "required": ["command"],
@@ -879,6 +914,46 @@ impl Tool for BashTool {
                         format!("command exited with status {status}")
                     } else {
                         format!("command exited with status {status}: {combined_output}")
+                    };
+                    Err(execution_failed(SHELL_EXEC_TOOL_NAME, message))
+                }
+            }
+            #[cfg(feature = "sandboxed-shell")]
+            BashBackend::Sandboxed(shell) => {
+                let shell = Arc::clone(shell);
+                let command = request.command.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut shell = shell
+                        .lock()
+                        .map_err(|error| format!("sandboxed shell lock poisoned: {error}"))?;
+                    shell.exec(&command).map_err(format_sandboxed_shell_error)
+                })
+                .await
+                .map_err(|error| {
+                    execution_failed(
+                        SHELL_EXEC_TOOL_NAME,
+                        format!("failed to join sandboxed shell task: {error}"),
+                    )
+                })?
+                .map_err(|error| execution_failed(SHELL_EXEC_TOOL_NAME, error))?;
+
+                let combined_output =
+                    combine_command_output(result.stdout.as_bytes(), result.stderr.as_bytes());
+
+                if result.exit_code == 0 {
+                    if combined_output.is_empty() {
+                        Ok("command completed with no output".to_owned())
+                    } else {
+                        Ok(combined_output)
+                    }
+                } else {
+                    let message = if combined_output.is_empty() {
+                        format!("command exited with status {}", result.exit_code)
+                    } else {
+                        format!(
+                            "command exited with status {}: {combined_output}",
+                            result.exit_code
+                        )
                     };
                     Err(execution_failed(SHELL_EXEC_TOOL_NAME, message))
                 }
@@ -974,7 +1049,11 @@ fn workspace_security_policy(
 
 async fn bootstrap_bash_tool(
     bootstrap: Option<&RunnerBootstrapEnvelope>,
+    shell_config: Option<&ShellConfig>,
 ) -> (BashTool, SessionStatus, SessionStatus) {
+    #[cfg(not(feature = "sandboxed-shell"))]
+    let _ = shell_config;
+
     let Some(bootstrap) = bootstrap else {
         let status = unavailable_status(
             SessionUnavailableReason::Disabled,
@@ -988,8 +1067,15 @@ async fn bootstrap_bash_tool(
     };
 
     let Some(endpoint) = bootstrap.sidecar_endpoint.clone() else {
-        let detail = if bootstrap.sandbox_tier == SandboxTier::Process {
-            "runner bootstrap indicates process tier; shell/browser tools are disabled"
+        #[cfg(feature = "sandboxed-shell")]
+        if !bootstrap.sandbox_tier.supports_sidecar()
+            && sandboxed_shell_requested(bootstrap, shell_config)
+        {
+            return bootstrap_sandboxed_shell(bootstrap, shell_config);
+        }
+
+        let detail = if !bootstrap.sandbox_tier.supports_sidecar() {
+            "runner bootstrap indicates process tier without sandboxed shell access; shell/browser tools are disabled"
         } else {
             "runner bootstrap did not provide a sidecar endpoint; shell/browser tools are disabled"
         };
@@ -1029,6 +1115,120 @@ async fn bootstrap_bash_tool(
         )
     };
     (tool, shell_status, browser_status)
+}
+
+#[cfg(feature = "sandboxed-shell")]
+fn sandboxed_shell_requested(
+    bootstrap: &RunnerBootstrapEnvelope,
+    shell_config: Option<&ShellConfig>,
+) -> bool {
+    bootstrap
+        .startup_status
+        .as_ref()
+        .map(|status| status.shell_available)
+        .unwrap_or_else(|| {
+            shell_config
+                .and_then(|config| config.enabled)
+                .unwrap_or(true)
+        })
+}
+
+#[cfg(feature = "sandboxed-shell")]
+fn bootstrap_sandboxed_shell(
+    bootstrap: &RunnerBootstrapEnvelope,
+    shell_config: Option<&ShellConfig>,
+) -> (BashTool, SessionStatus, SessionStatus) {
+    let workspace_root = PathBuf::from(&bootstrap.workspace_root);
+    let (shared_path, tmp_path) = match bootstrap.runtime_policy.as_ref() {
+        Some(runtime_policy) => (
+            PathBuf::from(&runtime_policy.mounts.shared),
+            PathBuf::from(&runtime_policy.mounts.tmp),
+        ),
+        None => (workspace_root.join("shared"), workspace_root.join("tmp")),
+    };
+    let timeout_secs = shell_config
+        .and_then(|config| config.command_timeout_secs)
+        .unwrap_or(DEFAULT_SHELL_COMMAND_TIMEOUT_SECS);
+    let inner_timeout = timeout_secs
+        .saturating_sub(SHELL_COMMAND_TIMEOUT_SAFETY_MARGIN_SECS)
+        .max(5);
+    let limits = ExecutionLimits {
+        max_execution_time: Duration::from_secs(inner_timeout),
+        ..ExecutionLimits::default()
+    };
+
+    let mountable = match (|| -> Result<MountableFs, String> {
+        fs::create_dir_all(&shared_path).map_err(|error| {
+            format!(
+                "failed to create sandboxed shell shared directory `{}`: {error}",
+                shared_path.display()
+            )
+        })?;
+        fs::create_dir_all(&tmp_path).map_err(|error| {
+            format!(
+                "failed to create sandboxed shell tmp directory `{}`: {error}",
+                tmp_path.display()
+            )
+        })?;
+        let shared_fs = ReadWriteFs::with_root(&shared_path)
+            .map_err(|error| format!("shared mount initialization failed: {error}"))?;
+        let tmp_fs = ReadWriteFs::with_root(&tmp_path)
+            .map_err(|error| format!("tmp mount initialization failed: {error}"))?;
+        Ok(MountableFs::new()
+            .mount("/", Arc::new(InMemoryFs::new()))
+            .mount("/shared", Arc::new(shared_fs))
+            .mount("/tmp", Arc::new(tmp_fs)))
+    })() {
+        Ok(mountable) => mountable,
+        Err(error) => {
+            tracing::warn!("failed to create sandboxed shell filesystem: {error}");
+            let status = unavailable_status(
+                SessionUnavailableReason::Disabled,
+                format!("sandboxed shell filesystem init failed: {error}"),
+            );
+            return (
+                BashTool::from_status(status.clone()),
+                status.clone(),
+                status,
+            );
+        }
+    };
+
+    let shell = match RustBashBuilder::new()
+        .fs(Arc::new(mountable))
+        .cwd("/shared")
+        .execution_limits(limits)
+        .network_policy(NetworkPolicy {
+            enabled: false,
+            ..NetworkPolicy::default()
+        })
+        .build()
+    {
+        Ok(shell) => shell,
+        Err(error) => {
+            tracing::warn!("failed to build sandboxed shell: {error}");
+            let status = unavailable_status(
+                SessionUnavailableReason::Disabled,
+                format!("sandboxed shell init failed: {error}"),
+            );
+            return (
+                BashTool::from_status(status.clone()),
+                status.clone(),
+                status,
+            );
+        }
+    };
+
+    let shell_status = SessionStatus::Ready(SessionConnection::SandboxedShell);
+    let browser_status = unavailable_status(
+        SessionUnavailableReason::Disabled,
+        "browser tools are not available in process tier when using the sandboxed shell",
+    );
+    (
+        BashTool::from_sandboxed_shell(shell),
+        shell_status,
+        browser_status,
+    )
 }
 
 async fn connect_sidecar_bash_tool(endpoint: SidecarEndpoint) -> (BashTool, SessionStatus) {
@@ -1159,6 +1359,18 @@ fn unavailable_status(
         reason,
         detail: detail.into(),
     })
+}
+
+#[cfg(feature = "sandboxed-shell")]
+fn format_sandboxed_shell_error(error: RustBashError) -> String {
+    match error {
+        RustBashError::Timeout => "execution time limit exceeded".to_owned(),
+        RustBashError::LimitExceeded {
+            limit_name: "max_execution_time",
+            ..
+        } => "execution time limit exceeded".to_owned(),
+        other => other.to_string(),
+    }
 }
 
 pub(crate) fn parse_args<T>(tool: &str, args: &str) -> Result<T, ToolError>

@@ -15,6 +15,9 @@ members = [
   "crates/wasm-guest",
 ]
 
+[workspace.dependencies]
+rust-bash = { git = "https://github.com/shantanugoel/rust-bash.git", rev = "7758919dd877198a72b06b043e8d3da39a5b518a", default-features = false, features = ["native-fs", "network"] }
+
 [profile.dev]
 debug = "line-tables-only"
 

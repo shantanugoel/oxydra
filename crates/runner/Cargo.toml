@@ -9,8 +9,9 @@ name = "oxydra"
 path = "src/main.rs"
 
 [features]
-default = ["telegram"]
+default = ["telegram", "sandboxed-shell"]
 telegram = ["dep:channels", "channels/telegram"]
+sandboxed-shell = ["tools/sandboxed-shell"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }

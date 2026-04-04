@@ -171,23 +171,29 @@ impl ToolAvailability {
         startup_status.sandbox_tier = fallback_tier;
         startup_status.shell_available = self.shell.is_ready();
         startup_status.browser_available = self.browser.is_ready();
-        startup_status.sidecar_available =
-            startup_status.shell_available || startup_status.browser_available;
+        startup_status.sidecar_available = fallback_tier.supports_sidecar()
+            && (startup_status.shell_available || startup_status.browser_available);
 
         for status in [&self.shell, &self.browser] {
-            if let SessionStatus::Unavailable(unavailable) = status {
-                startup_status.push_reason(
-                    map_session_unavailable_reason(unavailable.reason, fallback_tier),
-                    unavailable.detail.clone(),
-                );
+            if let SessionStatus::Unavailable(unavailable) = status
+                && let Some(code) =
+                    map_session_unavailable_reason(unavailable.reason, fallback_tier)
+            {
+                startup_status.push_reason(code, unavailable.detail.clone());
             }
         }
 
-        if fallback_tier == SandboxTier::Process {
+        if !fallback_tier.supports_sidecar() {
             startup_status.push_reason(
                 StartupDegradedReasonCode::InsecureProcessTier,
-                "process tier is insecure; shell/browser tools are disabled",
+                "Process tier is insecure: isolation is degraded and not production-safe. When enabled, shell access runs in a sandboxed interpreter with built-in commands only; browser tools are disabled.",
             );
+            if startup_status.shell_available {
+                startup_status.push_reason(
+                    StartupDegradedReasonCode::SandboxedShellLimited,
+                    "shell is available via a sandboxed interpreter with built-in text/file utilities only; outbound network access is disabled and system commands like cargo, git, python, node, npm, and pip are unavailable. Use Container or MicroVm tier for full shell access.",
+                );
+            }
         }
 
         startup_status
@@ -204,7 +210,8 @@ pub async fn bootstrap_runtime_tools(
     shell_config: Option<&ShellConfig>,
     attachment_save_config: Option<&AttachmentSaveConfig>,
 ) -> RuntimeToolsBootstrap {
-    let (bash_tool, shell_status, browser_status) = bootstrap_bash_tool(bootstrap).await;
+    let (bash_tool, shell_status, browser_status) =
+        bootstrap_bash_tool(bootstrap, shell_config).await;
 
     // Apply the configurable command timeout from ShellConfig.  Falls back to
     // DEFAULT_SHELL_COMMAND_TIMEOUT_SECS when no explicit value is set so the
@@ -287,25 +294,32 @@ pub async fn bootstrap_runtime_tools(
 fn map_session_unavailable_reason(
     reason: SessionUnavailableReason,
     sandbox_tier: SandboxTier,
-) -> StartupDegradedReasonCode {
+) -> Option<StartupDegradedReasonCode> {
     match reason {
-        SessionUnavailableReason::MissingSidecarEndpoint | SessionUnavailableReason::Disabled => {
-            if sandbox_tier == SandboxTier::Process {
-                StartupDegradedReasonCode::InsecureProcessTier
+        SessionUnavailableReason::Disabled => {
+            // Process tier handles its own degraded reasons (InsecureProcessTier,
+            // SandboxedShellLimited) explicitly; skip the generic mapping.
+            if !sandbox_tier.supports_sidecar() {
+                None
             } else {
-                StartupDegradedReasonCode::SidecarUnavailable
+                Some(StartupDegradedReasonCode::SidecarUnavailable)
             }
         }
+        SessionUnavailableReason::MissingSidecarEndpoint => {
+            Some(StartupDegradedReasonCode::SidecarUnavailable)
+        }
         SessionUnavailableReason::UnsupportedTransport => {
-            StartupDegradedReasonCode::SidecarTransportUnsupported
+            Some(StartupDegradedReasonCode::SidecarTransportUnsupported)
         }
         SessionUnavailableReason::InvalidAddress => {
-            StartupDegradedReasonCode::SidecarEndpointInvalid
+            Some(StartupDegradedReasonCode::SidecarEndpointInvalid)
         }
         SessionUnavailableReason::ConnectionFailed => {
-            StartupDegradedReasonCode::SidecarConnectionFailed
+            Some(StartupDegradedReasonCode::SidecarConnectionFailed)
         }
-        SessionUnavailableReason::ProtocolError => StartupDegradedReasonCode::SidecarProtocolError,
+        SessionUnavailableReason::ProtocolError => {
+            Some(StartupDegradedReasonCode::SidecarProtocolError)
+        }
     }
 }
 

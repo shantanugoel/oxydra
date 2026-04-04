@@ -174,7 +174,7 @@ Built the foundation layer with zero internal dependencies:
 - Length-prefixed JSON bootstrap envelope from runner to `oxydra-vm` via startup socket
 - Shell daemon protocol: `SpawnSession`, `ExecCommand`, `StreamOutput`, `KillSession`
 - `ShellSession` / `BrowserSession` traits with `VsockShellSession` and `LocalProcessShellSession`
-- `--insecure` mode: Process tier, no VM/container, shell/browser tools disabled, warning emitted
+- `--insecure` mode: Process tier, no VM/container; browser remains disabled, and a limited rust-bash sandboxed shell is available when the `sandboxed-shell` feature is compiled in
 
 ### Phase 11: Security Policy + WASM Tool Isolation
 

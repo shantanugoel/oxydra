@@ -341,6 +341,8 @@ Two backends implement the `ShellSession` trait:
 | `VsockShellSession` | Production (Container/MicroVM) | Connects to oxydra-shelld over vsock/Unix socket |
 | `LocalProcessShellSession` | Development/Testing | Spawns host processes directly |
 
+Process tier shell access does not use `ShellSession`: when the `sandboxed-shell` feature is enabled, `BashTool` runs the in-process `rust-bash` interpreter directly with only `/shared` and `/tmp` mounted (see Chapter 4, BashTool backends).
+
 ## Browser Sidecar (Pinchtab)
 
 When the browser tool is enabled for the workspace in `agent.toml` (`[tools.browser] enabled = true`) and not restricted off for the current user in `runner-user.toml` (`[behavior] browser_enabled = false`), the runner provisions a [Pinchtab](https://github.com/pinchtab/pinchtab) process alongside `oxydra-shelld` inside the same `shell-vm` container. Pinchtab is a headless Chrome automation server with a REST API. The agent drives the browser via `curl` commands through the existing `shell_exec` tool, guided by the Browser Automation skill injected into the system prompt (see Chapter 14).
@@ -540,22 +542,27 @@ The guest reports its capability status at startup:
 
 ```rust
 pub struct StartupStatusReport {
+    pub sandbox_tier: SandboxTier,
     pub sidecar_available: bool,
     pub shell_available: bool,
     pub browser_available: bool,
     pub degraded_reasons: Vec<StartupDegradedReason>,
 }
 
-pub enum StartupDegradedReason {
+pub enum StartupDegradedReasonCode {
     InsecureProcessTier,
+    SandboxedShellLimited,
+    ProcessHardeningLimited,
     SidecarUnavailable,
-    SidecarConnectionFailed(String),
-    ShellDaemonUnresponsive,
-    BrowserPoolUnavailable,
+    SidecarTransportUnsupported,
+    SidecarEndpointInvalid,
+    SidecarConnectionFailed,
+    SidecarProtocolError,
+    RuntimeShutdown,
 }
 ```
 
-This report determines which tools are registered in the `ToolRegistry`. If the sidecar is unavailable, shell and browser tools are disabled rather than failing silently at execution time.
+This report determines which tools are registered in the `ToolRegistry`. For Container and MicroVm tiers, shell/browser availability still depends on the sidecar. For Process tier, `sidecar_available` remains `false` even when `shell_available` is `true`, because shell commands can run through the in-process `rust-bash` backend instead of `oxydra-shelld`; browser remains disabled there.
 
 ## Gateway Endpoint Discovery
 

@@ -33,10 +33,10 @@ Oxydra is designed for people who want an agent runtime they can self-host, insp
 | Tier | Docker Required | Safety | Typical Use |
 |---|---:|---|---|
 | `container` (recommended) | ✅ | Strong | Daily usage with shell/browser tools |
-| `process` (`--insecure`) | ❌ | Degraded | Fast local testing when Docker is unavailable |
+| `process` (`--insecure`) | ❌ | Degraded | Fast local testing when Docker is unavailable (sandboxed rust-bash shell only; browser disabled) |
 | `micro_vm` (experimental) | ✅ | Strongest | Advanced isolation testing (extra host setup required) |
 
-`process` mode disables shell/browser tools and runs directly on the host.
+`process` mode runs directly on the host with a sandboxed in-process shell interpreter powered by [rust-bash](https://github.com/rust-bash/rust-bash) (built-in text/file utilities only — system commands like `cargo`, `git`, `python` are unavailable). Browser tools are disabled.
 
 `micro_vm` prerequisites:
 

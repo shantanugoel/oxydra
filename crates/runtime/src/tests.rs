@@ -3777,11 +3777,50 @@ mod scheduler_executor_tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct PanicTurnRunner;
+
+    #[async_trait]
+    impl ScheduledTurnRunner for PanicTurnRunner {
+        async fn run_scheduled_turn(
+            &self,
+            _user_id: &str,
+            _session_id: &str,
+            _prompt: String,
+            _channel_capabilities: Option<ChannelCapabilities>,
+            _cancellation: CancellationToken,
+        ) -> Result<(String, Vec<MediaAttachment>), RuntimeError> {
+            panic!("mock scheduled turn panic");
+        }
+    }
+
+    /// Runner that panics for schedule IDs containing "panic" and succeeds otherwise.
+    #[derive(Clone, Default)]
+    struct SelectivePanicRunner;
+
+    #[async_trait]
+    impl ScheduledTurnRunner for SelectivePanicRunner {
+        async fn run_scheduled_turn(
+            &self,
+            _user_id: &str,
+            session_id: &str,
+            _prompt: String,
+            _channel_capabilities: Option<ChannelCapabilities>,
+            _cancellation: CancellationToken,
+        ) -> Result<(String, Vec<MediaAttachment>), RuntimeError> {
+            if session_id.contains("panic") {
+                panic!("selective panic");
+            }
+            Ok(("success response".to_owned(), Vec::new()))
+        }
+    }
+
     // -- Mock SchedulerStore --
 
     struct MockSchedulerStore {
         due: Mutex<Vec<ScheduleDefinition>>,
         recorded_runs: Mutex<Vec<ScheduleRunRecord>>,
+        reschedules: Mutex<Vec<(Option<String>, Option<ScheduleStatus>)>>,
     }
 
     impl MockSchedulerStore {
@@ -3789,11 +3828,16 @@ mod scheduler_executor_tests {
             Self {
                 due: Mutex::new(due),
                 recorded_runs: Mutex::new(Vec::new()),
+                reschedules: Mutex::new(Vec::new()),
             }
         }
 
         async fn recorded_runs(&self) -> Vec<ScheduleRunRecord> {
             self.recorded_runs.lock().await.clone()
+        }
+
+        async fn reschedules(&self) -> Vec<(Option<String>, Option<ScheduleStatus>)> {
+            self.reschedules.lock().await.clone()
         }
     }
 
@@ -3849,10 +3893,14 @@ mod scheduler_executor_tests {
             &self,
             _schedule_id: &str,
             run: &ScheduleRunRecord,
-            _next_run_at: Option<String>,
-            _new_status: Option<ScheduleStatus>,
+            next_run_at: Option<String>,
+            new_status: Option<ScheduleStatus>,
         ) -> Result<(), SchedulerError> {
             self.recorded_runs.lock().await.push(run.clone());
+            self.reschedules
+                .lock()
+                .await
+                .push((next_run_at, new_status));
             Ok(())
         }
         async fn prune_run_history(
@@ -4131,5 +4179,170 @@ mod scheduler_executor_tests {
 
         let notifs = notifier.notifications().await;
         assert!(notifs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn executor_truncates_unicode_output_summary_without_panicking() {
+        let schedule = test_schedule("sched-unicode", NotificationPolicy::Always);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Ok(format!(
+            "{}{} trailing text",
+            "a".repeat(496),
+            '\u{00B0}'
+        ))]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier,
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        let summary = runs[0]
+            .output_summary
+            .as_ref()
+            .expect("output summary should be recorded");
+        assert!(summary.ends_with("..."));
+        assert!(summary.contains('\u{00B0}'));
+        assert_eq!(summary.chars().count(), 500);
+    }
+
+    #[tokio::test]
+    async fn executor_survives_panicking_scheduled_turn() {
+        let schedule = test_schedule("sched-panic", NotificationPolicy::Always);
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(PanicTurnRunner);
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, ScheduleRunStatus::Failed);
+        assert_eq!(
+            runs[0].output.as_deref(),
+            Some("Error: scheduled execution panicked: mock scheduled turn panic")
+        );
+        assert!(!runs[0].notified);
+
+        let reschedules = store.reschedules().await;
+        assert_eq!(reschedules.len(), 1);
+        assert!(reschedules[0].0.is_some());
+        assert!(reschedules[0].1.is_none());
+
+        let notifs = notifier.notifications().await;
+        assert!(notifs.is_empty());
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_handles_multibyte_boundary() {
+        use crate::scheduler_executor::truncate_with_ellipsis;
+
+        // ASCII only — fits exactly
+        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
+
+        // ASCII truncation
+        let long_ascii = "a".repeat(250);
+        let result = truncate_with_ellipsis(&long_ascii, 200);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 200);
+
+        // Multi-byte char at the truncation boundary
+        let text = format!("{}{} trailing", "x".repeat(196), '\u{00B0}');
+        let result = truncate_with_ellipsis(&text, 200);
+        assert!(result.ends_with("..."));
+        assert!(result.chars().count() <= 200);
+        // Must not panic — that's the main assertion
+
+        // max_chars < 3: should truncate without ellipsis rather than exceed limit
+        let result = truncate_with_ellipsis("abcdef", 2);
+        assert_eq!(result, "ab");
+        assert_eq!(result.chars().count(), 2);
+
+        let result = truncate_with_ellipsis("abcdef", 0);
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn executor_panicking_schedule_does_not_block_sibling() {
+        let panic_schedule = test_schedule("sched-panic-sib", NotificationPolicy::Always);
+        let ok_schedule = test_schedule("sched-ok", NotificationPolicy::Always);
+        let store = Arc::new(MockSchedulerStore::new(vec![panic_schedule, ok_schedule]));
+        let runner = Arc::new(SelectivePanicRunner);
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 2, "both schedules should record a run");
+
+        let panic_run = runs
+            .iter()
+            .find(|r| r.schedule_id == "sched-panic-sib")
+            .expect("panic schedule should have a run record");
+        assert_eq!(panic_run.status, ScheduleRunStatus::Failed);
+
+        let ok_run = runs
+            .iter()
+            .find(|r| r.schedule_id == "sched-ok")
+            .expect("ok schedule should have a run record");
+        assert_eq!(ok_run.status, ScheduleRunStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn executor_failure_notification_truncates_multibyte_error_summary() {
+        let mut schedule = test_schedule("sched-fail-mb", NotificationPolicy::Always);
+        // Set consecutive_failures to threshold - 1 so this failure triggers notification.
+        schedule.consecutive_failures = 2; // notify_after_failures is 3 in test_config
+
+        let multibyte_error = format!("{}°end", "E".repeat(250));
+        let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
+        let runner = Arc::new(MockTurnRunner::new(vec![Err(
+            RuntimeError::Tool(types::ToolError::ExecutionFailed {
+                tool: "test".to_owned(),
+                message: multibyte_error,
+            }),
+        )]));
+        let notifier = Arc::new(MockNotifier::new());
+
+        let executor = SchedulerExecutor::new(
+            store.clone(),
+            runner,
+            notifier.clone(),
+            test_config(),
+            CancellationToken::new(),
+        );
+
+        executor.tick().await;
+
+        let runs = store.recorded_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, ScheduleRunStatus::Failed);
+
+        // Should have sent a failure-threshold notification without panicking.
+        let notifs = notifier.notifications().await;
+        assert_eq!(notifs.len(), 1, "failure threshold notification should fire");
     }
 }

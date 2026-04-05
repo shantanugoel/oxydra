@@ -13,6 +13,7 @@ docker/staging
 *.swp
 *.swo
 *~
+/.codex
 
 # Environment and local overrides
 .env

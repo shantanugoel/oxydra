@@ -1,8 +1,11 @@
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::FutureExt;
 use memory_crate::SchedulerStore;
 use memory_crate::cadence::next_run_for_cadence;
 use tokio::time::MissedTickBehavior;
@@ -28,6 +31,8 @@ pub struct SchedulerExecutor {
     config: SchedulerConfig,
     cancellation: CancellationToken,
 }
+
+const OUTPUT_SUMMARY_LIMIT_CHARS: usize = 500;
 
 impl SchedulerExecutor {
     pub fn new(
@@ -84,14 +89,42 @@ impl SchedulerExecutor {
 
         tracing::debug!("scheduler: {} due schedule(s)", due.len());
 
-        let futs: Vec<_> = due.into_iter().map(|s| self.execute_schedule(s)).collect();
+        let futs: Vec<_> = due
+            .into_iter()
+            .map(|schedule| self.execute_schedule(schedule))
+            .collect();
         futures::future::join_all(futs).await;
     }
 
     async fn execute_schedule(&self, schedule: ScheduleDefinition) {
         let run_id = uuid::Uuid::new_v4().to_string();
-        let session_id = format!("scheduled:{}", schedule.schedule_id);
         let started_at = Utc::now().to_rfc3339();
+        let panic_schedule = schedule.clone();
+        let panic_run_id = run_id.clone();
+        let panic_started_at = started_at.clone();
+
+        if let Err(payload) =
+            AssertUnwindSafe(self.execute_schedule_inner(schedule, run_id, started_at))
+                .catch_unwind()
+                .await
+        {
+            self.record_panicked_schedule_run(
+                &panic_schedule,
+                panic_run_id,
+                panic_started_at,
+                payload,
+            )
+            .await;
+        }
+    }
+
+    async fn execute_schedule_inner(
+        &self,
+        schedule: ScheduleDefinition,
+        run_id: String,
+        started_at: String,
+    ) {
+        let session_id = format!("scheduled:{}", schedule.schedule_id);
 
         let prompt = if schedule.notification_policy == NotificationPolicy::Conditional {
             format!(
@@ -152,13 +185,7 @@ impl SchedulerExecutor {
             response_text.clone()
         };
 
-        let output_summary = if clean_text.is_empty() {
-            None
-        } else if clean_text.len() > 500 {
-            Some(format!("{}...", &clean_text[..497]))
-        } else {
-            Some(clean_text.clone())
-        };
+        let output_summary = summarize_output(&clean_text);
 
         let output = if clean_text.is_empty() {
             None
@@ -177,12 +204,6 @@ impl SchedulerExecutor {
             )
             .await;
 
-        let (next_run_at, new_status) = self.compute_reschedule(&schedule, status);
-
-        // Send operational failure notifications.
-        self.handle_failure_notifications(&schedule, status, &clean_text)
-            .await;
-
         let run_record = ScheduleRunRecord {
             run_id,
             schedule_id: schedule.schedule_id.clone(),
@@ -196,9 +217,63 @@ impl SchedulerExecutor {
             output,
         };
 
+        self.finalize_schedule_run(&schedule, run_record, &clean_text)
+            .await;
+    }
+
+    async fn record_panicked_schedule_run(
+        &self,
+        schedule: &ScheduleDefinition,
+        run_id: String,
+        started_at: String,
+        payload: Box<dyn Any + Send>,
+    ) {
+        let panic_message = panic_payload_message(payload.as_ref());
+        tracing::error!(
+            schedule_id = %schedule.schedule_id,
+            panic_message = %panic_message,
+            "scheduled execution panicked"
+        );
+
+        let clean_text = format!("Error: scheduled execution panicked: {panic_message}");
+        let finished_at = Utc::now().to_rfc3339();
+        let run_record = ScheduleRunRecord {
+            run_id,
+            schedule_id: schedule.schedule_id.clone(),
+            started_at,
+            finished_at,
+            status: ScheduleRunStatus::Failed,
+            output_summary: summarize_output(&clean_text),
+            turn_count: 0,
+            cost: 0.0,
+            notified: false,
+            output: Some(clean_text.clone()),
+        };
+
+        self.finalize_schedule_run(schedule, run_record, &clean_text)
+            .await;
+    }
+
+    async fn finalize_schedule_run(
+        &self,
+        schedule: &ScheduleDefinition,
+        run_record: ScheduleRunRecord,
+        clean_text: &str,
+    ) {
+        let (next_run_at, new_status) =
+            self.compute_reschedule(schedule, run_record.status);
+
+        self.handle_failure_notifications(schedule, run_record.status, clean_text)
+            .await;
+
         if let Err(e) = self
             .store
-            .record_run_and_reschedule(&schedule.schedule_id, &run_record, next_run_at, new_status)
+            .record_run_and_reschedule(
+                &schedule.schedule_id,
+                &run_record,
+                next_run_at,
+                new_status,
+            )
             .await
         {
             tracing::error!(
@@ -290,11 +365,7 @@ impl SchedulerExecutor {
 
         let new_consecutive_failures = schedule.consecutive_failures + 1;
         let name = schedule.name.as_deref().unwrap_or(&schedule.schedule_id);
-        let error_summary = if clean_text.len() > 200 {
-            format!("{}...", &clean_text[..197])
-        } else {
-            clean_text.to_owned()
-        };
+        let error_summary = truncate_with_ellipsis(clean_text, 200);
 
         // Notify when consecutive failures hit the threshold.
         if self.config.notify_after_failures > 0
@@ -370,4 +441,35 @@ impl SchedulerExecutor {
             }
         }
     }
+}
+
+fn summarize_output(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(truncate_with_ellipsis(text, OUTPUT_SUMMARY_LIMIT_CHARS))
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic payload unavailable".to_owned()
+    }
+}
+
+pub(crate) fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+
+    if max_chars < 3 {
+        return text.chars().take(max_chars).collect();
+    }
+
+    let prefix: String = text.chars().take(max_chars.saturating_sub(3)).collect();
+    format!("{prefix}...")
 }

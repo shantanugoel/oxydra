@@ -260,20 +260,14 @@ impl SchedulerExecutor {
         run_record: ScheduleRunRecord,
         clean_text: &str,
     ) {
-        let (next_run_at, new_status) =
-            self.compute_reschedule(schedule, run_record.status);
+        let (next_run_at, new_status) = self.compute_reschedule(schedule, run_record.status);
 
         self.handle_failure_notifications(schedule, run_record.status, clean_text)
             .await;
 
         if let Err(e) = self
             .store
-            .record_run_and_reschedule(
-                &schedule.schedule_id,
-                &run_record,
-                next_run_at,
-                new_status,
-            )
+            .record_run_and_reschedule(&schedule.schedule_id, &run_record, next_run_at, new_status)
             .await
         {
             tracing::error!(

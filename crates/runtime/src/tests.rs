@@ -4319,12 +4319,12 @@ mod scheduler_executor_tests {
 
         let multibyte_error = format!("{}°end", "E".repeat(250));
         let store = Arc::new(MockSchedulerStore::new(vec![schedule]));
-        let runner = Arc::new(MockTurnRunner::new(vec![Err(
-            RuntimeError::Tool(types::ToolError::ExecutionFailed {
+        let runner = Arc::new(MockTurnRunner::new(vec![Err(RuntimeError::Tool(
+            types::ToolError::ExecutionFailed {
                 tool: "test".to_owned(),
                 message: multibyte_error,
-            }),
-        )]));
+            },
+        ))]));
         let notifier = Arc::new(MockNotifier::new());
 
         let executor = SchedulerExecutor::new(
@@ -4343,6 +4343,10 @@ mod scheduler_executor_tests {
 
         // Should have sent a failure-threshold notification without panicking.
         let notifs = notifier.notifications().await;
-        assert_eq!(notifs.len(), 1, "failure threshold notification should fire");
+        assert_eq!(
+            notifs.len(),
+            1,
+            "failure threshold notification should fire"
+        );
     }
 }
